@@ -85,7 +85,20 @@ fn extract(&self, entry: &ArchiveEntry) -> Result<Bytes, ArchiveError>;
 ### Code Quality Convention
 
 * **`archive-core` / `archive-cli`** — Production quality. Clean, tested, idiomatic Rust. These crates ship to users.
-* **`archive-dev`** — Scratchpad. Quick experiments, real-file smoke tests, throwaway hacks. Run with `cargo run -p archive-dev`. Never depended on by production crates. Not production quality and that's fine.
+* **`archive-dev`** — Scratchpad for real-world experiments. Calls the CLI or `Archive::open()`. Never depended on by production crates.
+  * **"Dev it" / "Dev this"** — Stefan shorthand: *write dev code for this.* Agent should add a test scenario to `crates/archive-dev/src/main.rs` that exercises the described feature via the CLI.
+  * **`crates/archive-dev/output/`** — gitignored scratch folder; dump listing files, extracted files, etc. here.
+  * If something is awkward to express in dev code, the core/CLI is missing an API — fix it there, not here.
+
+### Architecture Convention
+
+* **`archive-core`** holds ALL business logic. The primary entry point is `Archive::open(source)` which auto-detects source type and archive format. CLI, UI, server, and dev code should all go through `Archive` rather than wiring up low-level readers and parsers manually.
+* **`archive-cli`** is a **thin shell** — just parses arguments and calls `archive-core`. If CLI code gets "fat," that's a smell that the core is missing a high-level API.
+* **`archive-dev`** should ideally use the CLI as an entry point (`cargo run -p archive-cli -- ...`). If dev needs to write code, it should call `Archive::open()` — if that's not enough, the core is missing something.
+
+### Git Convention
+
+* Agents **MUST NOT** auto-commit or auto-push. Always ask Stefan for permission first. Commits should happen on a per-task basis after code review.
 
 ### Build Order (Roadmap)
 
