@@ -3,7 +3,7 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 2 — Core engine: remaining formats + write support.
-* **Current Active Task:** TAR/TAR.GZ parser.
+* **Current Active Task:** Test ZIP with real cloud file, then RAR support.
 * **Latest Changes:**
   * [2026-02-25] Stefan: Revised roadmap — UI deferred until core engine is feature-complete. Core-first, CLI-first, UI-last.
   * [2026-02-25] Gemini: Completed Phase 1 — added `ZipIndex` (JSON serialization of parsed entries), `archive-cli` binary with `list` + `extract` commands, enum-based `Source` dispatch for local/HTTP. 15 tests passing. Initialized git repo, pushed to GitHub (SSH).
@@ -82,13 +82,18 @@ fn extract(&self, entry: &ArchiveEntry) -> Result<Bytes, ArchiveError>;
 * **ZIP parsing:** Our own code (reading EOCD + Central Directory + entries via `ReadAt`).
 * **Decompression:** `flate2` (Deflate — used by ZIP), external crates for LZMA/RAR as needed.
 
+### Code Quality Convention
+
+* **`archive-core` / `archive-cli`** — Production quality. Clean, tested, idiomatic Rust. These crates ship to users.
+* **`archive-dev`** — Scratchpad. Quick experiments, real-file smoke tests, throwaway hacks. Run with `cargo run -p archive-dev`. Never depended on by production crates. Not production quality and that's fine.
+
 ### Build Order (Roadmap)
 
 **Philosophy: Core-first, CLI-first, UI-last.** The engine and CLI must reach feature parity before any UI work begins. This keeps the core UI-agnostic and means every capability can be tested without a UI.
 
 #### Phase 1 — Foundation [COMPLETE ✅]
 
-- `ReadAt` trait (local + HTTP), `ArchiveError`
+* `ReadAt` trait (local + HTTP), `ArchiveError`
 * ZIP parser (EOCD + Central Directory, Deflate/Store) — our own code
 * `ZipIndex` — JSON-serializable cache for parsed listings
 * `archive-cli` — `list` / `extract` subcommands (local + HTTP auto-detect)
@@ -96,27 +101,30 @@ fn extract(&self, entry: &ArchiveEntry) -> Result<Bytes, ArchiveError>;
 #### Phase 2 — Core Engine: All Major Formats + Write Support [ACTIVE]
 
 Goal: cover ~99% of real-world archives. Test everything via CLI.
-* **TAR / TAR.GZ parser** — our own code (sequential; no cloud sniping)
+Format priority order: **ZIP → RAR → 7z → TAR** (by real-world usage).
+
+* **Test ZIP with real cloud file** — validate end-to-end sniping before moving on
 * **RAR support** — wrap external crate (read + extract only; RAR creation is proprietary)
 * **7z support** — wrap external crate (read + extract)
-* **Write support (local):** Create ZIP and TAR archives from local files (skip RAR — creation is proprietary)
+* **TAR / TAR.GZ parser** — our own code (sequential; no cloud sniping)
+* **Write support (local):** Create ZIP and TAR archives from local files (skip RAR — proprietary)
 * CLI subcommands: `compress`, progress reporting, multi-entry extract
 * `ArchiveReader` trait — unified interface across all formats for CLI and future layers
 
 #### Phase 3 — Cloud Sniping Server
 
-- Minimal stateless HTTP server: accept cloud URL → return listing → extract single file
+* Minimal stateless HTTP server: accept cloud URL → return listing → extract single file
 * OAuth token flow for Google Drive / Dropbox
 * Credit / quota accounting (freemium model)
 
 #### Phase 4 — UI (Desktop / Mobile / Web)
 
-- Desktop app (macOS first, then Windows/Linux)
+* Desktop app (macOS first, then Windows/Linux)
 * Mobile (iOS / Android)
 * Billing UI, cloud dashboard
 * Only starts once Phase 2 is fully proven via CLI
 
 #### Phase X (Future) — Cloud Archiving ("Vault" / "Reverse Snipe")
 
-- Stream files from cloud → compress on our servers → stream archive back to cloud
+* Stream files from cloud → compress on our servers → stream archive back to cloud
 * Separate pay-per-operation billing
