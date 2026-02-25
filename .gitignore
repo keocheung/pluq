@@ -1,0 +1,20 @@
+# Rust build artifacts
+/target/
+**/target/
+
+# Cargo lock files — keep root lock, ignore crate-level ones
+Cargo.lock
+
+# Editor / OS files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment files (never commit secrets)
+.env
+.env.*
+
+# Test / scratch ZIPs
+*.zip
