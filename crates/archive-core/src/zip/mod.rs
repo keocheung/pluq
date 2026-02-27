@@ -365,4 +365,95 @@ mod tests {
             "expected PasswordRequired, got: {result:?}"
         );
     }
+
+    #[tokio::test]
+    async fn entries_clean_filters_os_junk() {
+        let (_tmp, reader) = create_test_zip(&[
+            ("real_file.txt", b"content", ZipCrateMethod::Stored),
+            (".DS_Store", b"mac junk", ZipCrateMethod::Stored),
+            (
+                "__MACOSX/._real_file.txt",
+                b"mac sidecar",
+                ZipCrateMethod::Stored,
+            ),
+        ]);
+
+        let zip = ZipArchive::open(reader).await.unwrap();
+        assert_eq!(zip.entries().len(), 3, "entries() must return all 3");
+
+        let clean = zip.entries_clean();
+        assert_eq!(
+            clean.len(),
+            1,
+            "entries_clean() must filter out 2 junk files"
+        );
+        assert_eq!(clean[0].name, "real_file.txt");
+    }
+
+    #[tokio::test]
+    async fn unsupported_method_parses_but_errors_on_extract() {
+        // Write a valid stored ZIP, then patch the method ID in both the
+        // Central Directory (offset +10) and the Local File Header (offset +8)
+        // to 12 (BZip2), which we don't have compiled in.
+        let content = b"some data";
+        let (_tmp, _reader) = create_test_zip(&[("file.txt", content, ZipCrateMethod::Stored)]);
+
+        let path = _tmp.path().to_owned();
+        let mut raw = std::fs::read(&path).unwrap();
+
+        // Patch Local File Header method (sig [50 4b 03 04], method at +8).
+        let lfh_sig = [0x50u8, 0x4b, 0x03, 0x04];
+        if let Some(pos) = raw.windows(4).position(|w| w == lfh_sig) {
+            raw[pos + 8] = 12; // low byte of method ID
+            raw[pos + 9] = 0;
+        }
+
+        // Patch Central Directory method (sig [50 4b 01 02], method at +10).
+        let cd_sig = [0x50u8, 0x4b, 0x01, 0x02];
+        if let Some(pos) = raw.windows(4).position(|w| w == cd_sig) {
+            raw[pos + 10] = 12;
+            raw[pos + 11] = 0;
+        }
+
+        std::fs::write(&path, &raw).unwrap();
+
+        let reader2 = LocalReadAt::new(&path);
+        let zip = ZipArchive::open(reader2).await.unwrap();
+
+        // open() must succeed — unknown methods are deferred (not an error at parse time).
+        assert_eq!(zip.entries()[0].name, "file.txt");
+        assert_eq!(
+            zip.entries()[0].compression_method,
+            Some(CompressionMethod::BZip2),
+            "method should be recognised in the entry metadata"
+        );
+
+        // extract() must fail with UnsupportedMethod — not a panic or InvalidFormat.
+        let result = zip.extract(&zip.entries()[0]).await;
+        assert!(
+            matches!(result, Err(ArchiveError::UnsupportedMethod { .. })),
+            "expected UnsupportedMethod, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn truncated_zip_returns_invalid_format() {
+        // Write a real ZIP then truncate it to just 10 bytes — far too short
+        // to contain any valid EOCD record. open() must return an error, not panic.
+        let (_tmp, _reader) = create_test_zip(&[("file.txt", b"hello", ZipCrateMethod::Stored)]);
+
+        let path = _tmp.path().to_owned();
+        let mut raw = std::fs::read(&path).unwrap();
+        raw.truncate(10);
+        std::fs::write(&path, &raw).unwrap();
+
+        let reader2 = LocalReadAt::new(&path);
+        let result = ZipArchive::open(reader2).await;
+
+        assert!(
+            matches!(result, Err(ArchiveError::InvalidFormat { .. })),
+            "expected InvalidFormat for truncated ZIP, got: {:?}",
+            result.err()
+        );
+    }
 }

@@ -132,3 +132,75 @@ pub fn build_decoder<'a>(
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Read;
+
+    use super::*;
+
+    // ── is_available() ────────────────────────────────────────────────────────
+
+    #[test]
+    fn store_and_deflate_are_available() {
+        assert!(CompressionMethod::Store.is_available());
+        assert!(CompressionMethod::Deflate.is_available());
+    }
+
+    #[test]
+    fn unimplemented_codecs_are_not_available() {
+        assert!(!CompressionMethod::BZip2.is_available());
+        assert!(!CompressionMethod::Lzma.is_available());
+        assert!(!CompressionMethod::Lzma2.is_available());
+        assert!(!CompressionMethod::Zstd.is_available());
+        assert!(!CompressionMethod::Ppmd.is_available());
+    }
+
+    // ── build_decoder() ───────────────────────────────────────────────────────
+
+    #[test]
+    fn build_decoder_store_passes_through() {
+        let input = b"hello, world!";
+        let mut decoder = build_decoder(CompressionMethod::Store, &input[..], &[]).unwrap();
+        let mut out = Vec::new();
+        decoder.read_to_end(&mut out).unwrap();
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn build_decoder_deflate_decompresses() {
+        use flate2::Compression;
+        use flate2::write::DeflateEncoder;
+        use std::io::Write;
+
+        // Compress with flate2, then decompress via our decoder.
+        let input = b"Archive Sniper codec test - DEFLATE round-trip";
+        let mut enc = DeflateEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(input).unwrap();
+        let compressed = enc.finish().unwrap();
+
+        let mut decoder = build_decoder(CompressionMethod::Deflate, &compressed[..], &[]).unwrap();
+        let mut out = Vec::new();
+        decoder.read_to_end(&mut out).unwrap();
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn build_decoder_returns_unsupported_for_missing_codecs() {
+        let dummy: &[u8] = &[];
+        for method in [
+            CompressionMethod::BZip2,
+            CompressionMethod::Lzma,
+            CompressionMethod::Lzma2,
+            CompressionMethod::Zstd,
+            CompressionMethod::Ppmd,
+        ] {
+            let result = build_decoder(method, dummy, &[]);
+            assert!(
+                matches!(result, Err(ArchiveError::UnsupportedMethod { .. })),
+                "{method} should return UnsupportedMethod, got: {:?}",
+                result.err()
+            );
+        }
+    }
+}
