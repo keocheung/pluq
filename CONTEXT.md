@@ -3,8 +3,10 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 2 — Core engine: remaining formats + write support.
-* **Current Active Task:** Test ZIP with real cloud file, then RAR support.
+* **Current Active Task:** RAR support — Phase 2 foundations complete, RAR is next.
 * **Latest Changes:**
+  * [2026-02-27] Gemini: Phase 2 foundations complete — codec layer (`CompressionMethod`, `Decoder`, `build_decoder`), expanded `ArchiveError` (8 typed variants + 5 helpers), CRC32 verification mandatory in decompression pipeline, `ArchiveEntry` redesigned (removed private ZIP fields, added `is_encrypted`/`modified_at`/`compression_method`/`index`), `ZipEntryLocation` parallel array, `ArchiveReader` trait. 19 tests passing.
+  * [2026-02-27] Gemini: Phase 2 foundation work started — codec layer, ArchiveError expansion, CRC, ArchiveEntry redesign, ArchiveReader trait (see ARCHITECTURE.md § Implementation Priority).
   * [2026-02-25] Stefan: Revised roadmap — UI deferred until core engine is feature-complete. Core-first, CLI-first, UI-last.
   * [2026-02-25] Gemini: Completed Phase 1 — added `ZipIndex` (JSON serialization of parsed entries), `archive-cli` binary with `list` + `extract` commands, enum-based `Source` dispatch for local/HTTP. 15 tests passing. Initialized git repo, pushed to GitHub (SSH).
   * [2026-02-24] Gemini: Major architecture update — added `ArchiveReader` trait design, format strategy, broadened product vision, monetization model.
@@ -15,6 +17,8 @@
 ---
 
 ## [Static Context] - DO NOT MODIFY WITHOUT PERMISSION
+
+**Architecture Reference:** `ARCHITECTURE.md` is the canonical specification. It is not an RFC — every trait signature, design decision, and rule in it is final. **If any value in `CONTEXT.md` conflicts with `ARCHITECTURE.md`, `ARCHITECTURE.md` wins.** Agents must note any conflict they find and ask Stefan, but must assume `ARCHITECTURE.md` is correct until told otherwise. `CONTEXT.md` tracks state; `ARCHITECTURE.md` defines truth.
 
 ### The Product
 
