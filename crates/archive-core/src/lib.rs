@@ -1,4 +1,6 @@
 mod archive;
+pub mod archive_reader;
+pub mod codec;
 mod entry;
 mod error;
 pub(crate) mod http;
@@ -10,6 +12,12 @@ pub mod zip;
 
 // Primary public API — use this.
 pub use archive::Archive;
+
+// Trait for format-agnostic archive operations.
+pub use archive_reader::ArchiveReader;
+
+// Shared codec types.
+pub use codec::CompressionMethod;
 
 // Data types.
 pub use entry::ArchiveEntry;

@@ -86,9 +86,29 @@ impl Archive {
     }
 
     /// Extract a single entry's contents, decompressing if needed.
+    ///
+    /// CRC verification is mandatory — never returns corrupted bytes.
     pub async fn extract(&self, entry: &ArchiveEntry) -> Result<Bytes, ArchiveError> {
         match &self.inner {
             ArchiveInner::Zip(z) => z.extract(entry).await,
+        }
+    }
+
+    /// Bytes that must be downloaded and decompressed to produce this entry.
+    ///
+    /// Used by the "extraction tax" UX for cloud sniping cost warnings.
+    pub fn extraction_cost(&self, entry: &ArchiveEntry) -> u64 {
+        match &self.inner {
+            ArchiveInner::Zip(z) => z.extraction_cost(entry),
+        }
+    }
+
+    /// Decompress and verify CRC without retaining output.
+    ///
+    /// Used for archive integrity checking.
+    pub async fn test(&self, entry: &ArchiveEntry) -> Result<(), ArchiveError> {
+        match &self.inner {
+            ArchiveInner::Zip(z) => z.test(entry).await,
         }
     }
 }

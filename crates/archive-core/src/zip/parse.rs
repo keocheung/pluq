@@ -2,12 +2,21 @@
 //!
 //! All functions operate directly on a [`ReadAt`] source, issuing the
 //! minimum number of range reads needed.
+//!
+//! `parse_central_directory` now returns two parallel `Vec`s:
+//! - `Vec<ArchiveEntry>` — the public, format-agnostic metadata
+//! - `Vec<ZipEntryLocation>` — private ZIP-specific location details
+//!
+//! Both slices are indexed identically: `entries[i]` corresponds to `locations[i]`.
+
+use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
 
+use crate::codec::CompressionMethod;
 use crate::{ArchiveEntry, ArchiveError, ReadAt};
 
-// ── ZIP magic numbers ───────────────────────────────────────────────
+// ── ZIP magic numbers ─────────────────────────────────────────────────────
 const EOCD_SIGNATURE: u32 = 0x06054b50;
 const EOCD64_RECORD_SIGNATURE: u32 = 0x06064b50;
 const EOCD64_LOCATOR_SIGNATURE: u32 = 0x07064b50;
@@ -30,13 +39,33 @@ const EOCD64_RECORD_MIN_SIZE: usize = 56;
 /// Covers the EOCD itself (22 bytes) + max comment length (65535 bytes).
 const EOCD_SEARCH_LEN: u64 = 65557;
 
-// ── ZIP compression methods ─────────────────────────────────────────
+// ── ZIP compression methods ───────────────────────────────────────────────
 /// File is stored without compression.
 pub const METHOD_STORED: u16 = 0;
 /// File is compressed with Deflate.
 pub const METHOD_DEFLATE: u16 = 8;
 
-// ── Helper: read little-endian integers from a byte slice ───────────
+// ── ZIP general-purpose bit flags ─────────────────────────────────────────
+/// Bit 0: file is encrypted.
+const GP_FLAG_ENCRYPTED: u16 = 1 << 0;
+
+// ── Private location metadata (parallel to ArchiveEntry) ─────────────────
+
+/// ZIP-specific location details for a single entry.
+///
+/// Never exposed outside `archive-core`. The format parser holds
+/// `entries: Vec<ArchiveEntry>` + `locations: Vec<ZipEntryLocation>` as
+/// parallel arrays — same index maps an entry to its location.
+pub(crate) struct ZipEntryLocation {
+    /// Byte offset of the Local File Header in the archive.
+    pub(crate) offset: u64,
+    /// Raw ZIP compression method ID (0 = stored, 8 = deflate, …).
+    pub(crate) method_id: u16,
+    /// CRC-32 of the uncompressed data, as stored in the Central Directory.
+    pub(crate) crc32: u32,
+}
+
+// ── Helper: read little-endian integers from a byte slice ─────────────────
 
 fn read_u16_le(buf: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes([buf[offset], buf[offset + 1]])
@@ -64,7 +93,7 @@ fn read_u64_le(buf: &[u8], offset: usize) -> u64 {
     ])
 }
 
-// ── EOCD ────────────────────────────────────────────────────────────
+// ── EOCD ──────────────────────────────────────────────────────────────────
 
 /// Parsed End of Central Directory — values are always u64 regardless of whether
 /// the source was a standard ZIP or ZIP64 archive.
@@ -87,9 +116,9 @@ pub async fn find_eocd(reader: &impl ReadAt) -> Result<Eocd, ArchiveError> {
     let file_size = reader.size().await?;
 
     if file_size < EOCD_MIN_SIZE as u64 {
-        return Err(ArchiveError::Other(
-            "file too small to be a valid ZIP".into(),
-        ));
+        return Err(ArchiveError::InvalidFormat {
+            message: "file too small to be a valid ZIP".into(),
+        });
     }
 
     // Read the tail of the file (up to 65,557 bytes) to find the EOCD.
@@ -107,8 +136,8 @@ pub async fn find_eocd(reader: &impl ReadAt) -> Result<Eocd, ArchiveError> {
         }
     }
 
-    let pos = eocd_pos.ok_or_else(|| {
-        ArchiveError::Other("EOCD signature not found — not a valid ZIP file".into())
+    let pos = eocd_pos.ok_or_else(|| ArchiveError::InvalidFormat {
+        message: "EOCD signature not found — not a valid ZIP file".into(),
     })?;
 
     // Parse the standard EOCD fields.
@@ -129,20 +158,19 @@ pub async fn find_eocd(reader: &impl ReadAt) -> Result<Eocd, ArchiveError> {
         });
     }
 
-    // ── ZIP64 path ──────────────────────────────────────────────────────
+    // ── ZIP64 path ────────────────────────────────────────────────────────
     // The ZIP64 EOCD Locator sits immediately before the standard EOCD.
-    // It points us to the absolute file offset of the ZIP64 EOCD Record.
     if pos < EOCD64_LOCATOR_SIZE {
-        return Err(ArchiveError::Other(
-            "ZIP64 EOCD Locator not found in scanned tail".into(),
-        ));
+        return Err(ArchiveError::InvalidFormat {
+            message: "ZIP64 EOCD Locator not found in scanned tail".into(),
+        });
     }
 
     let locator_pos = pos - EOCD64_LOCATOR_SIZE;
     if read_u32_le(&tail, locator_pos) != EOCD64_LOCATOR_SIGNATURE {
-        return Err(ArchiveError::Other(
-            "ZIP64 EOCD Locator signature missing".into(),
-        ));
+        return Err(ArchiveError::InvalidFormat {
+            message: "ZIP64 EOCD Locator signature missing".into(),
+        });
     }
 
     // Bytes 8-15 of the locator = absolute file offset of the ZIP64 EOCD Record.
@@ -166,9 +194,9 @@ pub async fn find_eocd(reader: &impl ReadAt) -> Result<Eocd, ArchiveError> {
                 .await?;
 
             if read_u32_le(&rec, 0) != EOCD64_RECORD_SIGNATURE {
-                return Err(ArchiveError::Other(
-                    "ZIP64 EOCD Record signature mismatch".into(),
-                ));
+                return Err(ArchiveError::InvalidFormat {
+                    message: "ZIP64 EOCD Record signature mismatch".into(),
+                });
             }
 
             return Ok(Eocd {
@@ -180,9 +208,9 @@ pub async fn find_eocd(reader: &impl ReadAt) -> Result<Eocd, ArchiveError> {
     };
 
     if read_u32_le(&tail, eocd64_pos) != EOCD64_RECORD_SIGNATURE {
-        return Err(ArchiveError::Other(
-            "ZIP64 EOCD Record signature mismatch".into(),
-        ));
+        return Err(ArchiveError::InvalidFormat {
+            message: "ZIP64 EOCD Record signature mismatch".into(),
+        });
     }
 
     Ok(Eocd {
@@ -192,36 +220,47 @@ pub async fn find_eocd(reader: &impl ReadAt) -> Result<Eocd, ArchiveError> {
     })
 }
 
-// ── Central Directory ───────────────────────────────────────────────
+// ── Central Directory ──────────────────────────────────────────────────────
 
-/// Parse the Central Directory and return a list of archive entries.
+/// Parse the Central Directory and return parallel lists of archive entries
+/// and their ZIP-specific location details.
+///
+/// The two returned `Vec`s are indexed identically: `entries[i]` is located
+/// at `locations[i]`.
 ///
 /// Handles ZIP64 extra fields inside each CD entry to get real u64 sizes
 /// and offsets when the standard u32 fields hold sentinel values.
 pub async fn parse_central_directory(
     reader: &impl ReadAt,
     eocd: &Eocd,
-) -> Result<Vec<ArchiveEntry>, ArchiveError> {
+) -> Result<(Vec<ArchiveEntry>, Vec<ZipEntryLocation>), ArchiveError> {
     let cd_bytes = reader.read_range(eocd.cd_offset, eocd.cd_size).await?;
 
-    let mut entries = Vec::with_capacity(eocd.entry_count.min(65536) as usize);
+    let capacity = eocd.entry_count.min(65536) as usize;
+    let mut entries: Vec<ArchiveEntry> = Vec::with_capacity(capacity);
+    let mut locations: Vec<ZipEntryLocation> = Vec::with_capacity(capacity);
     let mut cursor = 0usize;
 
-    for _ in 0..eocd.entry_count {
+    for index in 0..eocd.entry_count as usize {
         if cursor + 46 > cd_bytes.len() {
-            return Err(ArchiveError::Other(
-                "unexpected end of Central Directory".into(),
-            ));
+            return Err(ArchiveError::InvalidFormat {
+                message: "unexpected end of Central Directory".into(),
+            });
         }
 
         let sig = read_u32_le(&cd_bytes, cursor);
         if sig != CD_ENTRY_SIGNATURE {
-            return Err(ArchiveError::Other(format!(
-                "invalid CD entry signature: {sig:#010x}"
-            )));
+            return Err(ArchiveError::InvalidFormat {
+                message: format!("invalid CD entry signature: {sig:#010x}"),
+            });
         }
 
-        let compression_method = read_u16_le(&cd_bytes, cursor + 10);
+        // ── CD fixed fields ───────────────────────────────────────────────
+        let general_purpose_flags = read_u16_le(&cd_bytes, cursor + 8);
+        let method_id = read_u16_le(&cd_bytes, cursor + 10);
+        let last_mod_time = read_u16_le(&cd_bytes, cursor + 12);
+        let last_mod_date = read_u16_le(&cd_bytes, cursor + 14);
+        let crc32 = read_u32_le(&cd_bytes, cursor + 16);
         let mut compressed_size = read_u32_le(&cd_bytes, cursor + 20) as u64;
         let mut uncompressed_size = read_u32_le(&cd_bytes, cursor + 24) as u64;
         let name_len = read_u16_le(&cd_bytes, cursor + 28) as usize;
@@ -233,14 +272,12 @@ pub async fn parse_central_directory(
         let name_end = name_start + name_len;
 
         if name_end > cd_bytes.len() {
-            return Err(ArchiveError::Other(
-                "file name extends beyond Central Directory".into(),
-            ));
+            return Err(ArchiveError::InvalidFormat {
+                message: "file name extends beyond Central Directory".into(),
+            });
         }
 
-        // ── ZIP64 extra field parsing ──────────────────────────────────
-        // If any u32/u16 field holds a sentinel value (0xFFFFFFFF / 0xFFFF),
-        // the real value is in the ZIP64 extra field block.
+        // ── ZIP64 extra field parsing ──────────────────────────────────────
         let extra_start = name_end;
         let extra_end = extra_start + extra_len;
         if extra_end <= cd_bytes.len() {
@@ -258,22 +295,60 @@ pub async fn parse_central_directory(
             }
         }
 
-        let name = String::from_utf8_lossy(&cd_bytes[name_start..name_end]).into_owned();
+        // ── Derive entry fields ────────────────────────────────────────────
+        // GP bit 11 = UTF-8 filename; bit 0 = encrypted.
+        let is_utf8 = general_purpose_flags & (1 << 11) != 0;
+        let is_encrypted = general_purpose_flags & GP_FLAG_ENCRYPTED != 0;
+
+        let name = if is_utf8 {
+            String::from_utf8_lossy(&cd_bytes[name_start..name_end]).into_owned()
+        } else {
+            // Legacy CP437 / Windows-1252 — use lossy UTF-8 for now.
+            // TODO: use `encoding_rs` crate for correct decoding.
+            String::from_utf8_lossy(&cd_bytes[name_start..name_end]).into_owned()
+        };
         let is_directory = name.ends_with('/');
+
+        let modified_at = dos_datetime_to_system_time(last_mod_date, last_mod_time);
+
+        let compression_method = zip_method_to_codec(method_id);
 
         entries.push(ArchiveEntry {
             name,
             compressed_size,
             uncompressed_size,
             is_directory,
-            offset: local_header_offset,
+            is_encrypted,
+            modified_at,
             compression_method,
+            index,
+        });
+
+        locations.push(ZipEntryLocation {
+            offset: local_header_offset,
+            method_id,
+            crc32,
         });
 
         cursor = name_end + extra_len + comment_len;
     }
 
-    Ok(entries)
+    Ok((entries, locations))
+}
+
+/// Translate a raw ZIP compression method ID to the shared [`CompressionMethod`] enum.
+///
+/// Returns `None` for unknown method IDs — defers errors to extraction time
+/// per the architecture spec ("Defer errors to extraction, not parse time").
+pub(crate) fn zip_method_to_codec(id: u16) -> Option<CompressionMethod> {
+    match id {
+        METHOD_STORED => Some(CompressionMethod::Store),
+        METHOD_DEFLATE => Some(CompressionMethod::Deflate),
+        12 => Some(CompressionMethod::BZip2),
+        14 => Some(CompressionMethod::Lzma),
+        93 => Some(CompressionMethod::Zstd),
+        _ => None,
+    }
 }
 
 /// Parse ZIP64 extra fields to extract real u64 sizes and offsets.
@@ -314,33 +389,99 @@ fn parse_zip64_extra(
     }
 }
 
-// ── Local File Header + Data ────────────────────────────────────────
+/// Convert a ZIP DOS-format date+time pair to `SystemTime`.
+///
+/// DOS date: bits 15-9 = year offset from 1980, 8-5 = month (1-12), 4-0 = day (1-31)
+/// DOS time: bits 15-11 = hour, 10-5 = minute, 4-0 = 2-second count
+///
+/// Returns `None` if the date is zero (absent) or invalid.
+fn dos_datetime_to_system_time(date: u16, time: u16) -> Option<SystemTime> {
+    if date == 0 {
+        return None;
+    }
+
+    let year = ((date >> 9) & 0x7F) as u32 + 1980;
+    let month = ((date >> 5) & 0x0F) as u32;
+    let day = (date & 0x1F) as u32;
+    let hour = ((time >> 11) & 0x1F) as u64;
+    let minute = ((time >> 5) & 0x3F) as u64;
+    let second = ((time & 0x1F) as u64) * 2;
+
+    if month == 0 || month > 12 || day == 0 || day > 31 {
+        return None;
+    }
+
+    // Compute days since Unix epoch (1970-01-01).
+    // We use a simple Gregorian calendar calculation.
+    let days_since_epoch = days_since_unix_epoch(year, month, day)?;
+
+    let secs = days_since_epoch * 86400 + hour * 3600 + minute * 60 + second;
+
+    Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+}
+
+/// Compute the number of days between 1970-01-01 and the given Gregorian date.
+/// Returns `None` for dates before 1970 (shouldn't happen in ZIP's 1980+ range).
+fn days_since_unix_epoch(year: u32, month: u32, day: u32) -> Option<u64> {
+    // Days in each month (non-leap year)
+    const DAYS_IN_MONTH: [u32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+    if year < 1970 {
+        return None;
+    }
+
+    let is_leap = |y: u32| y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+
+    let mut days: u64 = 0;
+
+    // Full years from 1970 to year-1
+    for y in 1970..year {
+        days += if is_leap(y) { 366 } else { 365 };
+    }
+
+    // Full months from January to month-1 in the target year
+    for m in 1..month {
+        let m_idx = (m - 1) as usize;
+        days += DAYS_IN_MONTH[m_idx] as u64;
+        if m == 2 && is_leap(year) {
+            days += 1;
+        }
+    }
+
+    // Days in the target month (day is 1-based)
+    days += (day - 1) as u64;
+
+    Some(days)
+}
+
+// ── Local File Header + Data ───────────────────────────────────────────────
 
 /// Read the compressed data for a single entry by parsing its Local File
 /// Header to determine the actual data offset.
 pub async fn read_local_file_data(
     reader: &impl ReadAt,
-    entry: &ArchiveEntry,
+    location: &ZipEntryLocation,
+    compressed_size: u64,
 ) -> Result<Bytes, ArchiveError> {
     // Read the fixed-size part of the Local File Header (30 bytes).
-    let lfh = reader.read_range(entry.offset, 30).await?;
+    let lfh = reader.read_range(location.offset, 30).await?;
 
     let sig = read_u32_le(&lfh, 0);
     if sig != LOCAL_FILE_HEADER_SIGNATURE {
-        return Err(ArchiveError::Other(format!(
-            "invalid Local File Header signature: {sig:#010x}"
-        )));
+        return Err(ArchiveError::InvalidFormat {
+            message: format!("invalid Local File Header signature: {sig:#010x}"),
+        });
     }
 
     let name_len = read_u16_le(&lfh, 26) as u64;
     let extra_len = read_u16_le(&lfh, 28) as u64;
 
     // Compressed data starts right after the LFH + name + extra fields.
-    let data_offset = entry.offset + 30 + name_len + extra_len;
+    let data_offset = location.offset + 30 + name_len + extra_len;
 
-    if entry.compressed_size == 0 {
+    if compressed_size == 0 {
         return Ok(Bytes::new());
     }
 
-    reader.read_range(data_offset, entry.compressed_size).await
+    reader.read_range(data_offset, compressed_size).await
 }

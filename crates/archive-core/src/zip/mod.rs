@@ -15,24 +15,35 @@ pub mod index;
 mod parse;
 
 pub use index::ZipIndex;
+use parse::ZipEntryLocation;
 
 use std::io::Read;
 
 use bytes::Bytes;
-use flate2::read::DeflateDecoder;
 
+use crate::archive_reader::ArchiveReader;
+use crate::codec::CompressionMethod;
+use crate::codec::build_decoder;
+use crate::junk;
 use crate::{ArchiveEntry, ArchiveError, ReadAt};
-
-use self::parse::{METHOD_DEFLATE, METHOD_STORED};
 
 /// A parsed ZIP archive backed by any [`ReadAt`] source.
 ///
 /// Created via [`ZipArchive::open`], which reads the EOCD and Central
 /// Directory to build the file listing. Extraction calls issue additional
 /// targeted range reads.
+///
+/// # Internal layout
+///
+/// Holds two parallel `Vec`s at the same indices:
+/// - `entries` — public, format-agnostic [`ArchiveEntry`] metadata
+/// - `locations` — private [`ZipEntryLocation`] with byte offsets, method IDs, CRC values
+///
+/// `entry.index` is the key from `entries` into `locations`.
 pub struct ZipArchive<R: ReadAt> {
     reader: R,
     entries: Vec<ArchiveEntry>,
+    locations: Vec<ZipEntryLocation>,
 }
 
 impl<R: ReadAt> ZipArchive<R> {
@@ -41,40 +52,134 @@ impl<R: ReadAt> ZipArchive<R> {
     /// This issues exactly **2 range reads** (or 1 if the file is small).
     pub async fn open(reader: R) -> Result<Self, ArchiveError> {
         let eocd = parse::find_eocd(&reader).await?;
-        let entries = parse::parse_central_directory(&reader, &eocd).await?;
+        let (entries, locations) = parse::parse_central_directory(&reader, &eocd).await?;
 
-        Ok(Self { reader, entries })
+        Ok(Self {
+            reader,
+            entries,
+            locations,
+        })
     }
 
-    /// Return the list of entries (files and directories) in the archive.
+    /// Return all entries (files and directories) in the archive, including
+    /// OS-generated junk (`.DS_Store`, `__MACOSX/`, `Thumbs.db`, etc.).
+    ///
+    /// Prefer [`entries_clean`](Self::entries_clean) for user-facing output.
     pub fn entries(&self) -> &[ArchiveEntry] {
         &self.entries
     }
 
-    /// Extract a single entry's contents, decompressing if necessary.
+    /// Return entries with OS-generated junk files filtered out.
     ///
-    /// Issues exactly **1 range read** for the Local File Header + data.
+    /// This is the **default** for user-facing output (CLI, UI).
+    pub fn entries_clean(&self) -> Vec<&ArchiveEntry> {
+        self.entries.iter().filter(|e| !junk::is_junk(e)).collect()
+    }
+
+    /// Bytes that must be downloaded and decompressed to produce this entry.
+    ///
+    /// For ZIP every entry is independently seekable, so this is always
+    /// `entry.compressed_size`.
+    pub fn extraction_cost(&self, entry: &ArchiveEntry) -> u64 {
+        entry.compressed_size
+    }
+
+    /// Extract a single entry's contents, decompressing and verifying CRC.
+    ///
+    /// CRC verification is mandatory and structural — it is the primary
+    /// corruption and wrong-password detection mechanism.
+    ///
+    /// Follows the mandated extraction pattern (ARCHITECTURE.md §Async/Sync Boundary):
+    /// 1. **async**: `read_range()` → compressed `Bytes`
+    /// 2. **`spawn_blocking`**: decompress → `Vec<u8>` (CPU-bound)
+    /// 3. **`spawn_blocking`**: CRC32 verify (CPU-bound hashing)
     pub async fn extract(&self, entry: &ArchiveEntry) -> Result<Bytes, ArchiveError> {
         if entry.is_directory {
             return Ok(Bytes::new());
         }
 
-        let compressed = parse::read_local_file_data(&self.reader, entry).await?;
+        let location = &self.locations[entry.index];
 
-        match entry.compression_method {
-            METHOD_STORED => Ok(compressed),
-            METHOD_DEFLATE => {
-                let mut decoder = DeflateDecoder::new(&compressed[..]);
-                let mut decompressed = Vec::with_capacity(entry.uncompressed_size as usize);
-                decoder.read_to_end(&mut decompressed).map_err(|e| {
-                    ArchiveError::Other(format!("deflate decompression failed: {e}"))
-                })?;
-                Ok(Bytes::from(decompressed))
+        // ── Step 1 (async): fetch the compressed bytes via ReadAt ──────────
+        let compressed =
+            parse::read_local_file_data(&self.reader, location, entry.compressed_size).await?;
+
+        // Map the raw method ID to the shared CompressionMethod enum.
+        let method = parse::zip_method_to_codec(location.method_id).ok_or_else(|| {
+            ArchiveError::UnsupportedMethod {
+                method: format!("ZIP method id {}", location.method_id),
             }
-            other => Err(ArchiveError::Other(format!(
-                "unsupported compression method: {other}"
-            ))),
-        }
+        })?;
+
+        // Capture values needed inside the blocking closures.
+        let uncompressed_size = entry.uncompressed_size;
+        let entry_name = entry.name.clone();
+        let entry_name_crc = entry_name.clone(); // CRC closure needs its own copy
+        let expected_crc = location.crc32;
+
+        // ── Step 2 (spawn_blocking): decompress ───────────────────────────
+        // Decompression is CPU-bound — MUST NOT run on the async executor.
+        let decompressed = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, ArchiveError> {
+            if method == CompressionMethod::Store {
+                Ok(compressed.to_vec())
+            } else {
+                let mut decoder = build_decoder(method, &compressed[..], &[])?;
+                let mut buf = Vec::with_capacity(uncompressed_size as usize);
+                decoder
+                    .read_to_end(&mut buf)
+                    .map_err(|e| ArchiveError::InvalidFormat {
+                        message: format!("decompression failed for '{entry_name}': {e}"),
+                    })?;
+                Ok(buf)
+            }
+        })
+        .await
+        .map_err(|e| ArchiveError::Other(format!("decompression task panicked: {e}")))??;
+
+        // ── Step 3 (spawn_blocking): CRC32 verification ───────────────────
+        // CRC hashing is CPU-bound — don't block the I/O thread.
+        let verified = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, ArchiveError> {
+            let actual_crc = crc32fast::hash(&decompressed);
+            if actual_crc != expected_crc {
+                return Err(ArchiveError::CrcMismatch {
+                    entry_name: entry_name_crc,
+                    expected: expected_crc,
+                    actual: actual_crc,
+                });
+            }
+            Ok(decompressed)
+        })
+        .await
+        .map_err(|e| ArchiveError::Other(format!("CRC verification task panicked: {e}")))??;
+
+        // ── Step 3 (async): return to caller ──────────────────────────────
+        Ok(Bytes::from(verified))
+    }
+
+    /// Decompress and verify CRC without writing output anywhere.
+    ///
+    /// Identical to [`extract`](Self::extract) but discards the decompressed bytes.
+    /// Used for archive integrity checking.
+    pub async fn test(&self, entry: &ArchiveEntry) -> Result<(), ArchiveError> {
+        self.extract(entry).await.map(|_| ())
+    }
+}
+
+impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for ZipArchive<R> {
+    fn entries(&self) -> &[ArchiveEntry] {
+        &self.entries
+    }
+
+    fn extraction_cost(&self, entry: &ArchiveEntry) -> u64 {
+        entry.compressed_size
+    }
+
+    async fn extract(&self, entry: &ArchiveEntry) -> Result<Bytes, ArchiveError> {
+        ZipArchive::extract(self, entry).await
+    }
+
+    async fn test(&self, entry: &ArchiveEntry) -> Result<(), ArchiveError> {
+        ZipArchive::test(self, entry).await
     }
 }
 
@@ -82,7 +187,7 @@ impl<R: ReadAt> ZipArchive<R> {
 mod tests {
     use std::io::{Cursor, Write};
 
-    use zip::CompressionMethod;
+    use zip::CompressionMethod as ZipCrateMethod;
     use zip::write::SimpleFileOptions;
 
     use crate::local::LocalReadAt;
@@ -91,7 +196,7 @@ mod tests {
 
     /// Helper: create a real ZIP file in a temp file, return a `LocalReadAt`.
     fn create_test_zip(
-        files: &[(&str, &[u8], CompressionMethod)],
+        files: &[(&str, &[u8], ZipCrateMethod)],
     ) -> (tempfile::NamedTempFile, LocalReadAt) {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         {
@@ -111,11 +216,11 @@ mod tests {
     #[tokio::test]
     async fn list_files_in_zip() {
         let (_tmp, reader) = create_test_zip(&[
-            ("hello.txt", b"Hello, world!", CompressionMethod::Deflated),
+            ("hello.txt", b"Hello, world!", ZipCrateMethod::Deflated),
             (
                 "data/numbers.bin",
                 b"\x01\x02\x03\x04",
-                CompressionMethod::Stored,
+                ZipCrateMethod::Stored,
             ),
         ]);
 
@@ -135,7 +240,7 @@ mod tests {
     async fn extract_deflated_file() {
         let content = b"Archive Sniper is awesome! Compressing this text with Deflate.";
         let (_tmp, reader) =
-            create_test_zip(&[("compressed.txt", content, CompressionMethod::Deflated)]);
+            create_test_zip(&[("compressed.txt", content, ZipCrateMethod::Deflated)]);
 
         let zip = ZipArchive::open(reader).await.unwrap();
         let data = zip.extract(&zip.entries()[0]).await.unwrap();
@@ -146,7 +251,7 @@ mod tests {
     #[tokio::test]
     async fn extract_stored_file() {
         let content = b"\x00\x01\x02\x03\x04\x05\x06\x07";
-        let (_tmp, reader) = create_test_zip(&[("raw.bin", content, CompressionMethod::Stored)]);
+        let (_tmp, reader) = create_test_zip(&[("raw.bin", content, ZipCrateMethod::Stored)]);
 
         let zip = ZipArchive::open(reader).await.unwrap();
         let data = zip.extract(&zip.entries()[0]).await.unwrap();
@@ -160,5 +265,66 @@ mod tests {
 
         let zip = ZipArchive::open(reader).await.unwrap();
         assert!(zip.entries().is_empty());
+    }
+
+    #[tokio::test]
+    async fn compression_method_field_is_set() {
+        let (_tmp, reader) = create_test_zip(&[
+            ("deflated.txt", b"hello", ZipCrateMethod::Deflated),
+            ("stored.bin", b"hello", ZipCrateMethod::Stored),
+        ]);
+        let zip = ZipArchive::open(reader).await.unwrap();
+        let entries = zip.entries();
+        assert_eq!(
+            entries[0].compression_method,
+            Some(CompressionMethod::Deflate)
+        );
+        assert_eq!(
+            entries[1].compression_method,
+            Some(CompressionMethod::Store)
+        );
+    }
+
+    #[tokio::test]
+    async fn modified_at_is_parsed() {
+        let (_tmp, reader) = create_test_zip(&[("file.txt", b"data", ZipCrateMethod::Stored)]);
+        let zip = ZipArchive::open(reader).await.unwrap();
+        // The zip crate writes a real timestamp, so modified_at should be Some.
+        assert!(zip.entries()[0].modified_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_passes_on_valid_entry() {
+        let content = b"integrity check content";
+        let (_tmp, reader) = create_test_zip(&[("file.txt", content, ZipCrateMethod::Deflated)]);
+        let zip = ZipArchive::open(reader).await.unwrap();
+        zip.test(&zip.entries()[0]).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn crc_mismatch_detected() {
+        // Build a valid ZIP and corrupt one byte in the compressed data stream.
+        let content = b"This is some content that will be Deflated and then corrupted.";
+        let (_tmp, _reader) = create_test_zip(&[("file.txt", content, ZipCrateMethod::Deflated)]);
+
+        // Read the raw ZIP bytes, flip a byte deep in the compressed data section.
+        let path = _tmp.path().to_owned();
+        let mut raw = std::fs::read(&path).unwrap();
+        // The compressed data starts after the Local File Header (at least 30 + name bytes).
+        // Flip a byte somewhere in the middle of the file, well past the headers.
+        let mid = raw.len() / 2;
+        raw[mid] ^= 0xFF;
+        std::fs::write(&path, &raw).unwrap();
+
+        let reader2 = LocalReadAt::new(&path);
+        let zip = ZipArchive::open(reader2).await.unwrap();
+        let result = zip.extract(&zip.entries()[0]).await;
+
+        // Should be either CrcMismatch or an InvalidFormat decompression error
+        assert!(
+            matches!(result, Err(ArchiveError::CrcMismatch { .. }))
+                || matches!(result, Err(ArchiveError::InvalidFormat { .. })),
+            "expected CrcMismatch or InvalidFormat, got: {result:?}"
+        );
     }
 }
