@@ -98,6 +98,10 @@ impl<R: ReadAt> ZipArchive<R> {
             return Ok(Bytes::new());
         }
 
+        if entry.is_encrypted {
+            return Err(ArchiveError::PasswordRequired);
+        }
+
         let location = &self.locations[entry.index];
 
         // ── Step 1 (async): fetch the compressed bytes via ReadAt ──────────
@@ -325,6 +329,40 @@ mod tests {
             matches!(result, Err(ArchiveError::CrcMismatch { .. }))
                 || matches!(result, Err(ArchiveError::InvalidFormat { .. })),
             "expected CrcMismatch or InvalidFormat, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn encrypted_entry_returns_password_required() {
+        // Strategy: write a normal stored ZIP, then flip GP bit 0 in the Central
+        // Directory to simulate an encrypted entry — no AES dep needed.
+        let content = b"very secret data";
+        let (_tmp, _reader) = create_test_zip(&[("secret.txt", content, ZipCrateMethod::Stored)]);
+
+        // Find the CD entry signature [50 4b 01 02] and set GP bit 0 (encrypted).
+        let path = _tmp.path().to_owned();
+        let mut raw = std::fs::read(&path).unwrap();
+        let cd_sig = [0x50u8, 0x4b, 0x01, 0x02];
+        if let Some(pos) = raw.windows(4).position(|w| w == cd_sig) {
+            raw[pos + 8] |= 0x01; // GP flags offset = +8 from CD signature
+        } else {
+            panic!("could not locate Central Directory signature in test ZIP");
+        }
+        std::fs::write(&path, &raw).unwrap();
+
+        let reader2 = LocalReadAt::new(&path);
+        let zip = ZipArchive::open(reader2).await.unwrap();
+
+        assert!(
+            zip.entries()[0].is_encrypted,
+            "parser must flag entry as encrypted when GP bit 0 is set"
+        );
+
+        // Must fail immediately with PasswordRequired — before any decompression attempt.
+        let result = zip.extract(&zip.entries()[0]).await;
+        assert!(
+            matches!(result, Err(ArchiveError::PasswordRequired)),
+            "expected PasswordRequired, got: {result:?}"
         );
     }
 }
