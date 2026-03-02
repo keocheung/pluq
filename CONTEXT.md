@@ -3,8 +3,9 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 2 — Core engine: remaining formats + write support.
-* **Current Active Task:** RAR support — Phase 2 foundations complete, RAR is next.
+* **Current Active Task:** RAR support — all ZIP work complete, RAR is next.
 * **Latest Changes:**
+  * [2026-03-02] Gemini: All ZIP P0 items complete. CP437/Windows-1252 filename decoding via `encoding_rs` (3 new tests). `snipe test` CLI subcommand added (CRC-verifies all entries, exits non-zero on failure). Cloud E2E validated: listed 7.5 GB Dropbox ZIP via HTTP range requests, surgically extracted a 29 KB PDF — confirmed valid (CRC + `file` check). 31 tests passing.
   * [2026-02-27] Gemini: Phase 2 foundations complete — codec layer (`CompressionMethod`, `Decoder`, `build_decoder`), expanded `ArchiveError` (8 typed variants + 5 helpers), CRC32 verification mandatory in decompression pipeline, `ArchiveEntry` redesigned (removed private ZIP fields, added `is_encrypted`/`modified_at`/`compression_method`/`index`), `ZipEntryLocation` parallel array, `ArchiveReader` trait. 19 tests passing.
   * [2026-02-27] Gemini: Phase 2 foundation work started — codec layer, ArchiveError expansion, CRC, ArchiveEntry redesign, ArchiveReader trait (see ARCHITECTURE.md § Implementation Priority).
   * [2026-02-25] Stefan: Revised roadmap — UI deferred until core engine is feature-complete. Core-first, CLI-first, UI-last.
@@ -18,7 +19,10 @@
 
 ## [Static Context] - DO NOT MODIFY WITHOUT PERMISSION
 
-**Architecture Reference:** `ARCHITECTURE.md` is the canonical specification. It is not an RFC — every trait signature, design decision, and rule in it is final. **If any value in `CONTEXT.md` conflicts with `ARCHITECTURE.md`, `ARCHITECTURE.md` wins.** Agents must note any conflict they find and ask Stefan, but must assume `ARCHITECTURE.md` is correct until told otherwise. `CONTEXT.md` tracks state; `ARCHITECTURE.md` defines truth.
+### Agent Developer Guidelines
+
+1. **Commit Messages:** All agents MUST use **Conventional Commits** (e.g., `feat:`, `fix:`, `docs:`, `chore:`, `test:`). Scope the commit to the crate if applicable (e.g., `feat(archive-core): ...`). Do not use capitalized imperative mood strings without a conventional prefix.
+2. **Architecture:** `ARCHITECTURE.md` is the canonical specification. It is not an RFC — every trait signature, design decision, and rule in it is final. **If any value in `CONTEXT.md` conflicts with `ARCHITECTURE.md`, `ARCHITECTURE.md` wins.** Agents must note any conflict they find and ask Stefan, but must assume `ARCHITECTURE.md` is correct until told otherwise. `CONTEXT.md` tracks state; `ARCHITECTURE.md` defines truth.
 
 ### The Product
 

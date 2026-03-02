@@ -33,6 +33,16 @@ enum Command {
         #[arg(short, long, default_value = ".")]
         output: PathBuf,
     },
+    /// Test archive integrity — decompress and CRC-verify every entry.
+    ///
+    /// Exits with a non-zero status code if any entry fails.
+    Test {
+        /// Path to a local file or an HTTP(S) URL.
+        source: String,
+        /// Show all entries including OS-generated junk files.
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[tokio::main]
@@ -105,6 +115,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 out_path.display(),
                 format_size(data.len() as u64)
             );
+        }
+        Command::Test { source, all } => {
+            let archive = Archive::open(&source).await?;
+
+            let entries: Vec<_> = if all {
+                archive.entries().iter().collect()
+            } else {
+                archive.entries_clean()
+            };
+
+            let mut failures: usize = 0;
+
+            for entry in &entries {
+                if entry.is_directory {
+                    continue;
+                }
+                match archive.test(entry).await {
+                    Ok(()) => println!("  OK  {}", entry.name),
+                    Err(e) => {
+                        eprintln!("  FAIL {} — {e}", entry.name);
+                        failures += 1;
+                    }
+                }
+            }
+
+            let files_tested = entries.iter().filter(|e| !e.is_directory).count();
+            if failures == 0 {
+                println!("\n  All {files_tested} file(s) OK");
+            } else {
+                eprintln!("\n  {failures}/{files_tested} file(s) FAILED");
+                std::process::exit(1);
+            }
         }
     }
 

@@ -16,6 +16,27 @@ use bytes::Bytes;
 use crate::codec::CompressionMethod;
 use crate::{ArchiveEntry, ArchiveError, ReadAt};
 
+// ── Filename decoding ─────────────────────────────────────────────────────
+
+/// Decode a ZIP entry filename from raw bytes, respecting the UTF-8 flag.
+///
+/// - GP bit 11 set → UTF-8 (modern tools always set this)
+/// - GP bit 11 clear → legacy CP437 / Windows-1252 (ZIP's original codepage)
+///
+/// Using `from_utf8_lossy` for the legacy branch silently corrupts accented
+/// characters (é, å, 한글). We use `encoding_rs::WINDOWS_1252` instead,
+/// which is a strict superset of CP437 for the printable range.
+pub(crate) fn decode_zip_filename(bytes: &[u8], general_purpose_flags: u16) -> String {
+    if general_purpose_flags & (1 << 11) != 0 {
+        // Modern, explicit UTF-8.
+        String::from_utf8_lossy(bytes).into_owned()
+    } else {
+        // Legacy codepage — decode as Windows-1252 (superset of CP437).
+        let (decoded, _, _) = encoding_rs::WINDOWS_1252.decode(bytes);
+        decoded.into_owned()
+    }
+}
+
 // ── ZIP magic numbers ─────────────────────────────────────────────────────
 const EOCD_SIGNATURE: u32 = 0x06054b50;
 const EOCD64_RECORD_SIGNATURE: u32 = 0x06064b50;
@@ -296,17 +317,10 @@ pub async fn parse_central_directory(
         }
 
         // ── Derive entry fields ────────────────────────────────────────────
-        // GP bit 11 = UTF-8 filename; bit 0 = encrypted.
-        let is_utf8 = general_purpose_flags & (1 << 11) != 0;
+        // GP bit 0 = encrypted.
         let is_encrypted = general_purpose_flags & GP_FLAG_ENCRYPTED != 0;
 
-        let name = if is_utf8 {
-            String::from_utf8_lossy(&cd_bytes[name_start..name_end]).into_owned()
-        } else {
-            // Legacy CP437 / Windows-1252 — use lossy UTF-8 for now.
-            // TODO: use `encoding_rs` crate for correct decoding.
-            String::from_utf8_lossy(&cd_bytes[name_start..name_end]).into_owned()
-        };
+        let name = decode_zip_filename(&cd_bytes[name_start..name_end], general_purpose_flags);
         let is_directory = name.ends_with('/');
 
         let modified_at = dos_datetime_to_system_time(last_mod_date, last_mod_time);
@@ -484,4 +498,49 @@ pub async fn read_local_file_data(
     }
 
     reader.read_range(data_offset, compressed_size).await
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── decode_zip_filename ────────────────────────────────────────────────
+
+    /// GP bit 11 set → treat as UTF-8.
+    #[test]
+    fn decode_utf8_filename_when_bit11_set() {
+        let name = "café.txt";
+        let bytes = name.as_bytes();
+        let flags: u16 = 1 << 11; // UTF-8 bit
+        assert_eq!(decode_zip_filename(bytes, flags), "café.txt");
+    }
+
+    /// GP bit 11 clear → decode as Windows-1252.
+    /// 0xE9 is 'é' in Windows-1252 / Latin-1. `from_utf8_lossy` would turn
+    /// it into the replacement character (U+FFFD) — we must NOT do that.
+    #[test]
+    fn decode_windows1252_filename_when_bit11_clear() {
+        // "café" encoded in Windows-1252: c=0x63, a=0x61, f=0x66, é=0xE9
+        let bytes: &[u8] = b"caf\xE9.txt";
+        let flags: u16 = 0; // bit 11 clear → legacy codepage
+        let result = decode_zip_filename(bytes, flags);
+        assert_eq!(result, "café.txt");
+    }
+
+    /// Sanity-check that the two branches differ for non-ASCII bytes.
+    /// `from_utf8_lossy` on 0xE9 alone yields the replacement char \u{FFFD};
+    /// Windows-1252 decoding yields 'é'. They must not be equal.
+    #[test]
+    fn utf8_lossy_and_windows1252_are_distinct_for_non_ascii() {
+        let bytes: &[u8] = &[0xE9]; // 'é' in Win-1252, invalid lone byte in UTF-8
+        let utf8_lossy = String::from_utf8_lossy(bytes).into_owned();
+        let win1252 = decode_zip_filename(bytes, 0 /* bit 11 clear */);
+        assert_ne!(
+            utf8_lossy, win1252,
+            "Windows-1252 decode must differ from UTF-8 lossy for 0xE9"
+        );
+        assert_eq!(win1252, "é");
+    }
 }
