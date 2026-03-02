@@ -21,3 +21,6 @@ Cargo.lock
 
 # Dev crate output (listings, extracted files)
 crates/archive-dev/output/
+
+# Learning log (private/internal progress tracking)
+LEARNING.md
