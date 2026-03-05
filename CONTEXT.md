@@ -5,6 +5,8 @@
 * **Current Phase:** Phase 2 — Core engine: remaining formats + write support.
 * **Current Active Task:** RAR support — all ZIP work complete, RAR is next.
 * **Latest Changes:**
+  * [2026-03-05] Claude + Stefan: **Architecture revision** — State layer (Layer 3.5) purified to universal cache only (Session, ArchiveCache, EntryTree). Auth, retry, billing, quota moved out to horizontal crates assembled per-product (Layer 4). `SessionError` renamed to `StateError`, product-specific variants (`AuthenticationFailed`, `QuotaExceeded`) removed — these now live in product-level error types. Multi-hop Transport tunnel: decorators box errors → core carries blindly → state layer carries blindly → product opens and handles. Added Products section to `ARCHITECTURE.md` (Server/SaaS, KMP Apps, CLI, Web). KMP + Compose Multiplatform + UniFFI added to Phase 4 roadmap. Client apps are independent cloud snipers (buy once, no metering). Server/SaaS exists primarily for web clients. Updated `ARCHITECTURE.md`, `ERRORS.md`, `CONTEXT.md`.
+  * [2026-03-04] Claude + Stefan: Created `ERRORS.md` — layered error translation model (3 tiers: decorator internal types → `ArchiveError` → `StateError`), Transport tunnel mechanism, decorator injection pattern. Updated `ARCHITECTURE.md`: removed inline ArchiveError definition (replaced with ERRORS.md reference), moved auth/retry/rate-limit handling from core HttpReadAt to state-layer decorators, updated layer diagram. Core is now fully stateless — auth, retry, metering, caching are state-layer (Layer 3.5) concerns via ReadAt decorator pattern.
   * [2026-03-02] Gemini: All ZIP P0 items complete. CP437/Windows-1252 filename decoding via `encoding_rs` (3 new tests). `snipe test` CLI subcommand added (CRC-verifies all entries, exits non-zero on failure). Cloud E2E validated: listed 7.5 GB Dropbox ZIP via HTTP range requests, surgically extracted a 29 KB PDF — confirmed valid (CRC + `file` check). 31 tests passing.
   * [2026-02-27] Gemini: Phase 2 foundations complete — codec layer (`CompressionMethod`, `Decoder`, `build_decoder`), expanded `ArchiveError` (8 typed variants + 5 helpers), CRC32 verification mandatory in decompression pipeline, `ArchiveEntry` redesigned (removed private ZIP fields, added `is_encrypted`/`modified_at`/`compression_method`/`index`), `ZipEntryLocation` parallel array, `ArchiveReader` trait. 19 tests passing.
   * [2026-02-27] Gemini: Phase 2 foundation work started — codec layer, ArchiveError expansion, CRC, ArchiveEntry redesign, ArchiveReader trait (see ARCHITECTURE.md § Implementation Priority).
@@ -22,7 +24,7 @@
 ### Agent Developer Guidelines
 
 1. **Commit Messages:** All agents MUST use **Conventional Commits** (e.g., `feat:`, `fix:`, `docs:`, `chore:`, `test:`). Scope the commit to the crate if applicable (e.g., `feat(archive-core): ...`). Do not use capitalized imperative mood strings without a conventional prefix.
-2. **Architecture:** `ARCHITECTURE.md` is the canonical specification. It is not an RFC — every trait signature, design decision, and rule in it is final. **If any value in `CONTEXT.md` conflicts with `ARCHITECTURE.md`, `ARCHITECTURE.md` wins.** Agents must note any conflict they find and ask Stefan, but must assume `ARCHITECTURE.md` is correct until told otherwise. `CONTEXT.md` tracks state; `ARCHITECTURE.md` defines truth.
+2. **Architecture:** `ARCHITECTURE.md` is the canonical specification for system architecture (layers, traits, formats, codecs). `ERRORS.md` is the canonical specification for error types and error flow across layers (the layered translation model, Transport tunnel, decorator pattern). Both are final — not RFCs. **If any value in `CONTEXT.md` conflicts with `ARCHITECTURE.md` or `ERRORS.md`, the spec file wins.** Agents must note any conflict they find and ask Stefan, but must assume the spec files are correct until told otherwise. `CONTEXT.md` tracks state; the spec files define truth.
 
 ### The Product
 
@@ -68,7 +70,7 @@ fn entries(&self) -> Result<Vec<ArchiveEntry>, ArchiveError>;
 fn extract(&self, entry: &ArchiveEntry) -> Result<Bytes, ArchiveError>;
 ```
 
-* The rest of the app (CLI, server, UI) only talks to `ArchiveReader`.
+* The state layer (Layer 3.5) talks to `ArchiveReader` / `Archive`. Products (CLI, server, KMP apps) talk to the state layer.
 * Each format implementation either uses our own parsing code or wraps an external crate.
 
 ### Format Strategy
@@ -100,8 +102,9 @@ fn extract(&self, entry: &ArchiveEntry) -> Result<Bytes, ArchiveError>;
 
 ### Architecture Convention
 
-* **`archive-core`** holds ALL business logic. The primary entry point is `Archive::open(source)` which auto-detects source type and archive format. CLI, UI, server, and dev code should all go through `Archive` rather than wiring up low-level readers and parsers manually.
-* **`archive-cli`** is a **thin shell** — just parses arguments and calls `archive-core`. If CLI code gets "fat," that's a smell that the core is missing a high-level API.
+* **`archive-core`** holds all stateless archive logic (parsing, extraction, codecs, format detection). The core entry point is `Archive::open(reader)` which takes a `ReadAt` and auto-detects format. Core is stateless — no auth, no retries, no caching.
+* **`archive-state`** [TO BUILD] is the State Layer (Layer 3.5) — a **universal cache layer**. It holds session state, metadata caching (`ArchiveCache`), and entry tree building (`EntryTree`). It does NOT hold auth, retry, billing, or quota logic — those are product-level concerns in horizontal crates (see `ARCHITECTURE.md` § Horizontal Capabilities). The state layer receives a `ReadAt` from the product above (possibly decorated, but state layer doesn't know or care), passes it to core, translates core errors into `StateError`, and tunnels decorator errors blindly. All products go through the state layer — never call `archive-core` directly.
+* **`archive-cli`** is a **thin shell** — just parses arguments and calls the state layer. If CLI code gets "fat," that's a smell that the state layer or core is missing a high-level API.
 * **`archive-dev`** should ideally use the CLI as an entry point (`cargo run -p archive-cli -- ...`). If dev needs to write code, it should call `Archive::open()` — if that's not enough, the core is missing something.
 
 ### Git Convention
@@ -109,6 +112,8 @@ fn extract(&self, entry: &ArchiveEntry) -> Result<Bytes, ArchiveError>;
 * Agents **MUST NOT** auto-commit or auto-push. Always ask Stefan for permission first. Commits should happen on a per-task basis after code review.
 
 ### Build Order (Roadmap)
+
+> **CONTEXT.md is the single source of truth for project planning and build ordering.** `ARCHITECTURE.md` and `ERRORS.md` define *what* to build; this file defines *when* and *in what order*. Do not put ordering or priority lists in the spec files.
 
 **Philosophy: Core-first, CLI-first, UI-last.** The engine and CLI must reach feature parity before any UI work begins. This keeps the core UI-agnostic and means every capability can be tested without a UI.
 
@@ -124,25 +129,37 @@ fn extract(&self, entry: &ArchiveEntry) -> Result<Bytes, ArchiveError>;
 Goal: cover ~99% of real-world archives. Test everything via CLI.
 Format priority order: **ZIP → RAR → 7z → TAR** (by real-world usage).
 
-* **Test ZIP with real cloud file** — validate end-to-end sniping before moving on
-* **RAR support** — wrap external crate (read + extract only; RAR creation is proprietary)
+**Done:**
+* ✅ Core abstractions — codec layer, `ArchiveReader` trait, error model (`ERRORS.md`), format-agnostic `ArchiveEntry`
+* ✅ ZIP read support — parsing, extraction, CRC verification, legacy filename decoding, cloud sniping E2E validated
+* ✅ CLI foundations — `list`, `extract`, `test` subcommands
+
+**Active — shared infrastructure (cheaper now, benefits all formats):**
+* Additional shared codecs (LZMA, BZip2, Zstd) — ZIP uses them, 7z needs them
+* State layer (`archive-state`) — universal cache layer: session boundary, metadata cache, entry tree, error translation
+
+**Active — format expansion:**
+* **RAR support** ← current task — wrap external crate (read + extract only)
 * **7z support** — wrap external crate (read + extract)
 * **TAR / TAR.GZ parser** — our own code (sequential; no cloud sniping)
-* **Write support (local):** Create ZIP and TAR archives from local files (skip RAR — proprietary)
-* CLI subcommands: `compress`, progress reporting, multi-entry extract
-* `ArchiveReader` trait — unified interface across all formats for CLI and future layers
 
-#### Phase 3 — Cloud Sniping Server
+**Later in Phase 2:**
+* **Write support (local):** Create ZIP and TAR archives (skip RAR — proprietary)
+* CLI: `compress` subcommand, progress reporting, multi-entry extract
 
-* Minimal stateless HTTP server: accept cloud URL → return listing → extract single file
-* OAuth token flow for Google Drive / Dropbox
-* Credit / quota accounting (freemium model)
+#### Phase 3 — Cloud Sniping Server (SaaS)
 
-#### Phase 4 — UI (Desktop / Mobile / Web)
+* HTTP API server — primarily serves the **web site** version, which can't do direct HTTP range requests (CORS, no Range header control)
+* OAuth token flow for Google Drive / Dropbox (server holds tokens for cloud providers)
+* Credit / quota accounting (freemium model) — metering and billing live **only** in the server crate
+* Client apps (Phase 4) are independent cloud snipers — they do NOT depend on this server for core functionality
 
-* Desktop app (macOS first, then Windows/Linux)
-* Mobile (iOS / Android)
-* Billing UI, cloud dashboard
+#### Phase 4 — Client Apps (KMP + CLI)
+
+* **KMP (Kotlin Multiplatform) project** — Compose Multiplatform for shared UI across Android, iOS, and 3 desktop platforms (macOS, Windows, Linux). Rust core consumed via UniFFI.
+* Client apps are **standalone products**: buy once, no metering. They connect directly to Dropbox/Drive for cloud sniping. Full local archive management (read + write).
+* Client apps may optionally call the SaaS API in certain conditions (future consideration), but are independent by default.
+* **Web site** — consumes the SaaS API (Phase 3). Not a Rust product. Metered/freemium.
 * Only starts once Phase 2 is fully proven via CLI
 
 #### Phase X (Future) — Cloud Archiving ("Vault" / "Reverse Snipe")

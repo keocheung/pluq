@@ -8,30 +8,50 @@
 
 ## Mental Model
 
-Five layers. Each has one job. Nothing leaks between them.
+Six layers. Each has one job. Nothing leaks between them.
 
 ```
-┌──────────────────────────────────────────────────────┐
-│  Layer 4: Consumers                                  │
-│  CLI, Server, UI                                     │
-│  Knows ONLY: Archive, ArchiveEntry, ArchiveError     │
-└──────────────────────┬───────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│  Layer 4: Products (actual binaries)                              │
+│                                                                    │
+│  Server/SaaS       KMP Apps (Android/iOS/Desktop)    CLI           │
+│                                                                    │
+│  Each product:                                                     │
+│    - Assembles ReadAt decorator stack from horizontal crates        │
+│    - Passes composed ReadAt down to state layer                    │
+│    - Opens StateError::Transport tunnel for decorator errors       │
+│    - Defines own error type (ServerError, AppError, CliError)      │
+│                                                                    │
+│  Horizontal crates (optional, picked per product):                 │
+│    archive-auth │ archive-retry │ metering (server-only)           │
+│    Each provides ReadAt decorators + its own error type             │
+│    Errors are boxed into ArchiveError::Transport by decorators     │
+└──────────────────────┬───────────────────────────────────────────┘
+                       │  decorated ReadAt passed down
+┌──────────────────────▼───────────────────────────────────────────┐
+│  Layer 3.5: State Layer (universal cache)                         │
+│  Session, ArchiveCache, EntryTree                                 │
+│  Translates ArchiveError → StateError (core errors only)          │
+│  Tunnels Transport errors blindly (re-wraps for product above)    │
+│  See ERRORS.md for error flow                                     │
+└──────────────────────┬───────────────────────────────────────────┘
                        │
-┌──────────────────────▼───────────────────────────────┐
-│  Layer 3: Archive Facade                             │
-│  Archive::open(source) → auto-detects format         │
-│  Unified API: entries(), extract(), create()         │
-│  Dispatches to correct format parser                 │
-└──────────────────────┬───────────────────────────────┘
+┌──────────────────────▼───────────────────────────────────────────┐
+│  Layer 3: Archive Facade (stateless)                              │
+│  Archive::open(reader) → auto-detects format                      │
+│  Unified API: entries(), extract(), test()                        │
+│  Dispatches to correct format parser                              │
+│  Receives decorated ReadAt, unaware of decorators                 │
+└──────────────────────┬───────────────────────────────────────────┘
                        │
-┌──────────────────────▼───────────────────────────────┐
-│  Layer 2: Format Parsers (ArchiveReader trait)        │
-│  zip/ │ sevenz/ │ rar/ │ tar/                        │
-│  Each parser has:                                    │
-│    public:  Vec<ArchiveEntry>    (universal fields)  │
-│    private: Vec<FormatLocation>  (offsets, indexes)  │
-│  Maps format-specific method IDs → shared codec enum │
-└─────────┬────────────────────────┬───────────────────┘
+┌──────────────────────▼───────────────────────────────────────────┐
+│  Layer 2: Format Parsers (ArchiveReader trait)                    │
+│  zip/ │ sevenz/ │ rar/ │ tar/                                     │
+│  Each parser has:                                                  │
+│    public:  Vec<ArchiveEntry>    (universal fields)                │
+│    private: Vec<FormatLocation>  (offsets, indexes)                │
+│  Maps format-specific method IDs → shared codec enum               │
+└─────────┬────────────────────────┬────────────────────────────────┘
           │                        │
 ┌─────────▼─────────┐  ┌──────────▼──────────────────┐
 │  Layer 1:         │  │  Layer 1: Codec Layer        │
@@ -47,11 +67,12 @@ Five layers. Each has one job. Nothing leaks between them.
 Layer 0: Raw bytes (disk, network, memory)
 ```
 
-**The four rules:**
-1. Nothing leaks through boundaries — consumers never see ZipArchive, flate2, or LocalReadAt
+**The five rules:**
+1. Nothing leaks through boundaries — products never see ZipArchive, flate2, LocalReadAt, or ArchiveError. Products see `StateError` + their own product-level error types.
 2. Codec layer is shared — Deflate lives once, all format parsers use the same instance
 3. ArchiveEntry has zero format-specific fields — format parsers hold location details privately
 4. **Zero eager buffering** — no function in Layer 0 or Layer 2 may buffer more than 1 MiB of raw data into a `Vec<u8>`. Zesven uses `read_to_end()` (whole archive in RAM); we fetch exact byte ranges. A cloud archive can be 50 GB — never slurp it.
+5. **Core is stateless** — Layers 0–3 hold no session state, no caches, no auth tokens. Universal state (cache, session, entry tree) lives in the state layer (Layer 3.5). Product-specific state (auth tokens, quota counters, billing) lives in horizontal crates composed at the product level (Layer 4). See `ERRORS.md` for how errors flow through the stateless core via the Transport tunnel.
 
 ---
 
@@ -89,16 +110,11 @@ pub trait ReadAt: Send + Sync {
 
 **Request coalescing.** If the format parser requests two ranges within 64 KB of each other, merge them into one HTTP Range request. Downloading 64 KB of intermediate "gap" bytes is faster than paying 150 ms of latency for a second request.
 
-**Dynamic auth (token refresh).** `HttpReadAt` MUST accept an `Arc<dyn TokenProvider>` rather than a static `HeaderMap`. On receiving HTTP 401 Unauthorized, transparently call `TokenProvider::refresh_token()` and retry — never surface a 401 to the format parser. Supports Dropbox/Drive OAuth tokens that expire every 60 minutes.
+**Core's `HttpReadAt` is stateless and dumb.** It accepts optional static headers (for pre-authenticated requests), makes one request, returns the result or an error. It does NOT handle auth refresh, retries, or rate limits — those are product-level concerns handled via `ReadAt` decorators from horizontal crates (see `ERRORS.md`).
 
-**Exponential backoff for rate limits.** HTTP 429 Too Many Requests MUST be handled at Layer 0 with exponential backoff + jitter. Never let a rate-limit bubble up to Layer 2 as `ArchiveError::Io`.
+**Auth, retry, and rate-limit handling** are implemented as `ReadAt` decorators from horizontal crates (e.g., `archive-auth`, `archive-retry`), assembled by the product (Layer 4) and passed down through the state layer into core. Core receives a composed `ReadAt` and is unaware of the decorator stack. See `ERRORS.md` § Decorator Construction.
 
-```rust
-pub trait TokenProvider: Send + Sync {
-    async fn get_token(&self) -> Result<HeaderValue, ArchiveError>;
-    async fn refresh_token(&self) -> Result<HeaderValue, ArchiveError>;
-}
-```
+**Mobile/KMP note:** On mobile platforms, OAuth may be handled entirely in Kotlin/Swift (using OkHttp, NSURLSession). The app gets a token, passes `Authorization: Bearer xyz` as a static header to `HttpReadAt::with_headers()`, and Rust never touches auth. The `archive-auth` crate is optional — products choose whether auth lives in Rust or the host language.
 
 ### Design Notes
 - `ReadAt` maps directly to HTTP Range headers — this is why ArchiveSniper uses offset-based I/O instead of cursor-based Read+Seek
@@ -121,20 +137,7 @@ File path normalization: archive entries may contain `\` (Windows) or `/` (Unix)
 
 ### Bandwidth Metering (Credit System)
 
-Users buy MB credits for cloud sniping. Track every byte transferred.
-
-```rust
-pub struct MeteredReadAt<R: ReadAt> {
-    inner: R,
-    bytes_read: Arc<AtomicU64>,
-}
-```
-
-- Wraps `HttpReadAt` (or any cloud source) — counts bytes in `read_range()`
-- Local operations are NOT metered (free)
-- `bytes_read.load()` at end of operation = billable amount
-- Per-operation accounting (each extract/list call gets a fresh meter or an operation ID)
-- The metering layer is a ReadAt decorator — completely transparent to format parsers
+Metering is a product-level concern — only the server/SaaS product needs it. See § Horizontal Capabilities for `MeteredReadAt` and the decorator pattern. Local operations are never metered.
 
 ---
 
@@ -313,7 +316,7 @@ pub trait ArchiveReader {
 `extraction_cost()` enables the "extraction tax" UX:
 - **ZIP**: returns `entry.compressed_size` (every entry is independently seekable)
 - **7z solid block**: returns `sum(compressed_sizes_of_all_preceding_entries_in_folder) + entry.compressed_size`
-- Consumer shows: *"Sniping this 1 MB file requires downloading 500 MB. Proceed?"*
+- State layer / UI shows: *"Sniping this 1 MB file requires downloading 500 MB. Proceed?"*
 
 `test()` = decompress + verify CRC without writing to disk. Essential for integrity checking.
 
@@ -400,7 +403,7 @@ Parsing algorithm: loop until plain header is found, count levels, error on >4.
 When the encoded header's coder chain includes AES, **filenames and metadata are hidden** until the password is provided. This is not an error — it's a feature. The correct UX response:
 > "This archive has encrypted metadata. Enter password to view contents."
 
-Never show `ArchiveError::PasswordRequired` as a crash — surface it as a UI prompt.
+Password-required is not an error from the user's perspective — the state layer handles it by prompting for a password and retrying. See `ERRORS.md` for the full error translation flow.
 
 #### BCJ2 Folders — Multiple Pack Streams
 
@@ -442,7 +445,95 @@ fn decode_zip_filename(bytes: &[u8], general_purpose_flags: u16) -> String {
 
 ---
 
-## Layer 3 — Archive Facade
+## Layer 3.5 — State Layer (Universal Cache) [TO BUILD]
+
+The universal cache and session layer. Sits between products (Layer 4) and the stateless core (Layers 0–3). Holds **only** state that every product benefits from: cached metadata, session handles, virtual folder trees. Products interact with the state layer, never with core directly.
+
+**What the state layer IS:** a universal cache that saves every product from duplicating work. Parsed entry lists, folder trees, fingerprint-based invalidation — all products (CLI, server, KMP apps) get this for free.
+
+**What the state layer is NOT:** it is not the place for auth, billing, quotas, OAuth, or retry policies. Those are product-specific concerns that live in horizontal crates, assembled at the product level (Layer 4).
+
+**Responsibilities:**
+- Receives a `ReadAt` from the product above (possibly decorated — state layer doesn't know or care)
+- Passes the `ReadAt` to `Archive::open()` in core
+- Manages `Session` (in-memory handle wrapping a live `Archive`)
+- Manages `ArchiveCache` (on-disk cross-session metadata cache with invalidation)
+- Builds `EntryTree` (virtual folder structure derived from flat entry names)
+- Translates `ArchiveError` → `StateError` for core errors it understands
+- Tunnels `ArchiveError::Transport` blindly as `StateError::Transport` — does not inspect or downcast
+- Handles password prompts (encrypted archives are a universal concern)
+
+**Key types** (all owned by state layer):
+- `Session` — in-memory session for an open archive
+- `StateError` — error type for product consumption (see `ERRORS.md`)
+- `EntryTree` / `TreeNode` — virtual folder structure
+- `ArchiveCache` / `ArchiveFingerprint` — cross-session metadata + location cache
+
+**Crate placement:** `archive-state`, depends on `archive-core`. Pure cross-platform Rust. No dependency on any horizontal crate (auth, retry, metering). Platform-specific concerns (cache storage path) are injected via traits.
+
+See `ERRORS.md` for the full error translation flow and tunnel mechanism.
+
+---
+
+## Horizontal Capabilities (Product-Level Crates)
+
+Optional crates that products pick from to compose their `ReadAt` decorator stack. Each crate depends on `archive-core` (for the `ReadAt` trait and `ArchiveError`), but NOT on `archive-state`. Products assemble decorators, compose them into a `ReadAt` stack, and pass the result down to the state layer.
+
+**`archive-auth`** — OAuth / token lifecycle decorator.
+- `AuthReadAt<R: ReadAt>` — intercepts HTTP 401 responses, boxes `AuthError::TokenExpired` into `ArchiveError::Transport`, lets the product handle refresh.
+- `AuthError` — `TokenExpired`, `RefreshFailed`, etc.
+- Products that handle OAuth in the host language (e.g., Kotlin/Swift on mobile) can skip this crate entirely and pass pre-authenticated headers to `HttpReadAt::with_headers()`.
+
+**`archive-retry`** — Retry / backoff decorator.
+- `RetryReadAt<R: ReadAt>` — retries transient failures with configurable backoff.
+- Products may want different retry aggressiveness (desktop vs mobile vs server).
+
+**Metering / billing** — server-internal, not a shared crate.
+
+```rust
+// Example: MeteredReadAt (server-only)
+pub struct MeteredReadAt<R: ReadAt> {
+    inner: R,
+    bytes_read: Arc<AtomicU64>,
+}
+```
+- Wraps `HttpReadAt` (or any cloud source) — counts bytes in `read_range()`
+- `bytes_read.load()` at end of operation = billable amount
+- Per-operation accounting (each extract/list call gets a fresh meter or an operation ID)
+- Only the server product uses this. Client apps don't meter.
+
+**How decorators create tunneled errors:**
+
+Each decorator intercepts errors from the `ReadAt` below it. If the error is something the decorator recognizes (e.g., HTTP 401), it boxes its own error type into `ArchiveError::Transport`. Core carries the box blindly. The state layer carries it blindly. The product at the top opens the box, downcasts to the types it knows about (from the horizontal crates it depends on), and handles or reports them.
+
+See `ERRORS.md` § Transport Tunnel for the full multi-hop flow.
+
+---
+
+## Products (Layer 4)
+
+Each product is an actual binary (or library consumed via FFI). It assembles the full stack: horizontal crates (if needed) → state layer → core.
+
+**Server/SaaS** — serves the web version. The web site can't do direct HTTP range requests (CORS, no Range header control), so it goes through the server API. This is the only metered/freemium path.
+- Assembles: `archive-core` + `archive-state` + `archive-auth` + `archive-retry` + metering (internal)
+- Defines `ServerError` — extends `StateError` with `QuotaExceeded`, `AuthenticationFailed`, etc.
+- Billing, quota accounting, OAuth for cloud providers (Dropbox, Drive) all live here.
+
+**KMP Apps (Android / iOS / Desktop)** — standalone products. They are independent cloud snipers — connect directly to Dropbox/Drive, fetch ranges, extract. Buy once, no metering. Built with Compose Multiplatform, consuming the Rust core via UniFFI.
+- Assembles: `archive-core` + `archive-state` + optionally `archive-auth` (or handle OAuth in Kotlin/Swift)
+- Defines `AppError`
+- Full local archive management (read + write) plus direct cloud sniping
+- No dependency on the server for core functionality
+
+**CLI** — thin shell for dev and power users.
+- Assembles: `archive-core` + `archive-state`, minimal or no decorators
+- Defines `CliError`
+
+**Web site** — not a Rust product. Consumes the server's HTTP API. Metered/freemium.
+
+---
+
+## Layer 3 — Archive Facade (Stateless)
 
 ### Archive Struct (exists, needs expansion)
 
@@ -459,7 +550,9 @@ enum ArchiveInner {
 }
 ```
 
-`Archive::open(source)` auto-detects source type AND format, then dispatches. Consumers never see what's inside.
+`Archive::open(reader)` auto-detects format from the provided `ReadAt` and dispatches to the correct format parser. The `ReadAt` it receives may be decorated by the state layer (Layer 3.5), but `Archive` is unaware of this — it only sees the `ReadAt` trait.
+
+**Stateless:** `Archive` holds no session state, no caches, no auth tokens. It is constructed, used, and dropped. The state layer above decides when to create it, what `ReadAt` to give it, and what to do with the results.
 
 ---
 
@@ -491,56 +584,11 @@ pub struct ArchiveEntry {
 
 Format-specific location info (offsets, folder indexes, CRC values) stays inside the format parser's internal parallel array, keyed by `index`.
 
-### ArchiveError (needs expansion)
+### ArchiveError
 
-Current: `Io`, `OutOfBounds`, `Other(String)` — too coarse.
-Target: structured variants with helper methods.
+Error handling follows a layered translation model. Each layer defines errors for its consumer — no layer exposes a lower layer's error types. Errors are either handled (retried, prompted) and disappear, or translated into the consumer's vocabulary.
 
-```rust
-#[derive(Debug, Error)]
-pub enum ArchiveError {
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-
-    #[error("out of bounds: offset {offset} + len {len} exceeds size {size}")]
-    OutOfBounds { offset: u64, len: u64, size: u64 },
-
-    #[error("invalid archive format: {message}")]
-    InvalidFormat { message: String },
-
-    #[error("unsupported compression method: {method}")]
-    UnsupportedMethod { method: String },
-
-    #[error("CRC mismatch for '{entry_name}': expected {expected:#010x}, got {actual:#010x}")]
-    CrcMismatch { entry_name: String, expected: u32, actual: u32 },
-
-    #[error("password required")]
-    PasswordRequired,
-
-    #[error("wrong password or corrupted data")]
-    WrongPassword,
-
-    #[error("path traversal detected: {path}")]
-    PathTraversal { path: String },
-
-    #[error("resource limit exceeded: {message}")]
-    ResourceLimitExceeded { message: String },
-
-    #[error("operation cancelled")]
-    Cancelled,
-
-    #[error("{0}")]
-    Other(String),
-}
-
-impl ArchiveError {
-    pub fn is_recoverable(&self) -> bool { /* WrongPassword, PasswordRequired, Cancelled */ }
-    pub fn is_corruption(&self) -> bool { /* CrcMismatch, InvalidFormat */ }
-    pub fn is_encryption_error(&self) -> bool { /* WrongPassword, PasswordRequired */ }
-    pub fn is_security_error(&self) -> bool { /* PathTraversal */ }
-    pub fn is_unsupported(&self) -> bool { /* UnsupportedMethod */ }
-}
-```
+See **`ERRORS.md`** for the full error architecture: tier definitions (`ArchiveError`, `StateError`, decorator internal types), the `Transport` tunnel mechanism, translation flows, and the decorator injection pattern.
 
 ---
 
@@ -555,8 +603,9 @@ impl ArchiveError {
 - RAR: CRC32 per-file
 - TAR: weak header checksum only (no per-file CRC)
 
-Return `ArchiveError::CrcMismatch` with entry name, expected, and actual values.
+Return a CRC mismatch error with entry name, expected, and actual values.
 CRC mismatch is also the primary wrong-password detection mechanism for encrypted archives.
+See `ERRORS.md` for how CRC errors flow through layers.
 
 ### Progress Reporting [TO BUILD]
 
@@ -570,7 +619,7 @@ pub trait ProgressReporter: Send {
 
 - Independent of streaming — works with standard extraction
 - `should_cancel()` replaces a separate cancellation channel
-- Returns `ArchiveError::Cancelled` when true
+- Returns a cancellation error when true
 - Wrap with `ThrottledProgress` (minimum interval between callbacks) for UI
 
 ### Multi-Volume Archives
@@ -697,17 +746,3 @@ Each format stores timestamps differently:
 ArchiveEntry stores: `pub modified_at: Option<SystemTime>`
 Conversion constant for 7z FILETIME → Unix: subtract `116444736000000000`, divide by `10_000_000`
 
----
-
-## Implementation Priority (what to build next, while at ZIP stage)
-
-These are cheapest to get right now and most expensive to retrofit later:
-
-1. **Extract codec layer** — move Deflate out of zip/mod.rs into shared codec module
-2. **Expand ArchiveError** — add typed variants and helper methods
-3. **Add CRC verification** — parse crc32 from Central Directory, verify after decompression
-4. **Add `modified_at`, `is_encrypted`, `compression_method` to ArchiveEntry** — ZIP has all of these
-5. **Remove format-specific private fields from ArchiveEntry** — replace with `index: usize`
-6. **Define ArchiveReader trait** — even if only ZIP implements it initially
-
-These establish the abstractions that 7z, RAR, and TAR will build on.
