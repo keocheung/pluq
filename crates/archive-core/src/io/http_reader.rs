@@ -5,7 +5,9 @@ use reqwest::{
 };
 
 use super::ReadAt;
+use super::read_error::{NetworkPhase, ReadErrorKind, ReadFailure, ReadOperation, SourceInfo};
 use crate::ArchiveError;
+use crate::io::ReadError;
 
 /// A [`ReadAt`] backed by HTTP range requests.
 ///
@@ -46,6 +48,34 @@ impl HttpReadAt {
     }
 }
 
+/// Classify a `reqwest::Error` into a `ReadErrorKind`, then wrap it into `ArchiveError::Io`.
+fn classify_reqwest_error(e: reqwest::Error, url: &str, op: ReadOperation) -> ArchiveError {
+    let kind = if e.is_timeout() {
+        ReadErrorKind::NetworkTimeout {
+            phase: NetworkPhase::Transfer,
+        }
+    } else if e.is_connect() {
+        ReadErrorKind::NetworkReset
+    } else if let Some(status) = e.status() {
+        ReadErrorKind::HttpStatus {
+            code: status.as_u16(),
+            headers: vec![],
+            body: None,
+        }
+    } else {
+        ReadErrorKind::NetworkReset
+    };
+
+    ArchiveError::Io(ReadError::Failed(ReadFailure {
+        source: SourceInfo::Http {
+            url: url.to_string(),
+        },
+        operation: op,
+        kind,
+        diagnostic: e.to_string(),
+    }))
+}
+
 impl ReadAt for HttpReadAt {
     async fn read_range(&self, offset: u64, len: u64) -> Result<Bytes, ArchiveError> {
         if len == 0 {
@@ -55,6 +85,7 @@ impl ReadAt for HttpReadAt {
         // Range header is inclusive on both ends: "bytes=0-9" returns 10 bytes.
         let range_end = offset + len - 1;
         let range_value = format!("bytes={offset}-{range_end}");
+        let op = ReadOperation::ReadRange { offset, len };
 
         let response = self
             .client
@@ -62,54 +93,98 @@ impl ReadAt for HttpReadAt {
             .headers(self.extra_headers.clone())
             .header(
                 RANGE,
-                HeaderValue::from_str(&range_value)
-                    .map_err(|e| ArchiveError::Other(format!("invalid range header: {e}")))?,
+                HeaderValue::from_str(&range_value).map_err(|e| {
+                    ArchiveError::Io(ReadError::Failed(ReadFailure {
+                        source: SourceInfo::Http {
+                            url: self.url.clone(),
+                        },
+                        operation: op.clone(),
+                        kind: ReadErrorKind::NetworkReset,
+                        diagnostic: format!("invalid range header: {e}"),
+                    }))
+                })?,
             )
             .send()
             .await
-            .map_err(|e| ArchiveError::Other(format!("HTTP request failed: {e}")))?;
+            .map_err(|e| classify_reqwest_error(e, &self.url, op.clone()))?;
 
         match response.status() {
             StatusCode::PARTIAL_CONTENT => {
                 let body = response
                     .bytes()
                     .await
-                    .map_err(|e| ArchiveError::Other(format!("failed to read body: {e}")))?;
+                    .map_err(|e| classify_reqwest_error(e, &self.url, op))?;
                 Ok(body)
             }
             StatusCode::RANGE_NOT_SATISFIABLE => {
                 // Server told us the range is invalid — map to OutOfBounds.
-                Err(ArchiveError::OutOfBounds {
+                Err(ArchiveError::Io(ReadError::OutOfBounds {
                     offset,
                     len,
                     size: 0, // We don't know the real size from a 416 alone.
-                })
+                }))
             }
-            status => Err(ArchiveError::Other(format!(
-                "unexpected HTTP status {status} for range request"
-            ))),
+            status => Err(ArchiveError::Io(ReadError::Failed(ReadFailure {
+                source: SourceInfo::Http {
+                    url: self.url.clone(),
+                },
+                operation: op,
+                kind: ReadErrorKind::HttpStatus {
+                    code: status.as_u16(),
+                    headers: vec![],
+                    body: None,
+                },
+                diagnostic: format!("unexpected HTTP status {status} for range request"),
+            }))),
         }
     }
 
     async fn size(&self) -> Result<u64, ArchiveError> {
+        let op = ReadOperation::SizeCheck;
+
         let response = self
             .client
             .head(&self.url)
             .headers(self.extra_headers.clone())
             .send()
             .await
-            .map_err(|e| ArchiveError::Other(format!("HEAD request failed: {e}")))?;
+            .map_err(|e| classify_reqwest_error(e, &self.url, op.clone()))?;
 
         let content_length = response
             .headers()
             .get(CONTENT_LENGTH)
             .ok_or_else(|| {
-                ArchiveError::Other("server did not return Content-Length header".into())
+                ArchiveError::Io(ReadError::Failed(ReadFailure {
+                    source: SourceInfo::Http {
+                        url: self.url.clone(),
+                    },
+                    operation: op.clone(),
+                    kind: ReadErrorKind::RangeNotSupported,
+                    diagnostic: "server did not return Content-Length header".into(),
+                }))
             })?
             .to_str()
-            .map_err(|e| ArchiveError::Other(format!("invalid Content-Length: {e}")))?
+            .map_err(|e| {
+                ArchiveError::Io(ReadError::Failed(ReadFailure {
+                    source: SourceInfo::Http {
+                        url: self.url.clone(),
+                    },
+                    operation: op.clone(),
+                    kind: ReadErrorKind::RangeNotSupported,
+                    diagnostic: format!("invalid Content-Length: {e}"),
+                }))
+            })?
             .parse::<u64>()
-            .map_err(|e| ArchiveError::Other(format!("Content-Length not a number: {e}")))?;
+            .map_err(|e| {
+                ArchiveError::Io(ReadError::Failed(ReadFailure {
+                    source: SourceInfo::Http {
+                        url: self.url.clone(),
+                    },
+                    operation: op,
+                    kind: ReadErrorKind::RangeNotSupported,
+                    diagnostic: format!("Content-Length not a number: {e}"),
+                }))
+            })?;
 
         Ok(content_length)
     }
@@ -170,8 +245,8 @@ mod tests {
         let err = reader.read_range(9999, 100).await.unwrap_err();
 
         assert!(
-            matches!(err, ArchiveError::OutOfBounds { .. }),
-            "expected OutOfBounds, got: {err:?}"
+            matches!(err, ArchiveError::Io(ReadError::OutOfBounds { .. })),
+            "expected Io(OutOfBounds), got: {err:?}"
         );
     }
 

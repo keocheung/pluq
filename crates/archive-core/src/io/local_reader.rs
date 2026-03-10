@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 use bytes::Bytes;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
-use super::ReadAt;
+use super::read_error::{ReadErrorKind, ReadFailure, ReadOperation, SourceInfo};
+use super::{ReadAt, ReadError};
 use crate::ArchiveError;
 
 /// A [`ReadAt`] backed by a local file on disk.
@@ -23,33 +24,62 @@ impl LocalReadAt {
     }
 }
 
+/// Convert a `std::io::Error` from a local file operation into an `ArchiveError`.
+fn io_err_to_archive(e: std::io::Error, path: &Path, op: ReadOperation) -> ArchiveError {
+    ArchiveError::Io(ReadError::Failed(ReadFailure {
+        source: SourceInfo::LocalFile {
+            path: path.to_path_buf(),
+        },
+        operation: op,
+        kind: ReadErrorKind::DiskIoError {
+            os_code: e.raw_os_error(),
+        },
+        diagnostic: e.to_string(),
+    }))
+}
+
 impl ReadAt for LocalReadAt {
     async fn read_range(&self, offset: u64, len: u64) -> Result<Bytes, ArchiveError> {
-        let mut file = tokio::fs::File::open(&self.path).await?;
-        let file_size = file.metadata().await?.len();
+        let mut file = tokio::fs::File::open(&self.path)
+            .await
+            .map_err(|e| io_err_to_archive(e, &self.path, ReadOperation::Open))?;
+
+        let file_size = file
+            .metadata()
+            .await
+            .map_err(|e| io_err_to_archive(e, &self.path, ReadOperation::SizeCheck))?
+            .len();
 
         if offset.saturating_add(len) > file_size {
-            return Err(ArchiveError::OutOfBounds {
+            return Err(ArchiveError::Io(ReadError::OutOfBounds {
                 offset,
                 len,
                 size: file_size,
-            });
+            }));
         }
 
         if len == 0 {
             return Ok(Bytes::new());
         }
 
-        file.seek(std::io::SeekFrom::Start(offset)).await?;
+        file.seek(std::io::SeekFrom::Start(offset))
+            .await
+            .map_err(|e| {
+                io_err_to_archive(e, &self.path, ReadOperation::ReadRange { offset, len })
+            })?;
 
         let mut buf = vec![0u8; len as usize];
-        file.read_exact(&mut buf).await?;
+        file.read_exact(&mut buf).await.map_err(|e| {
+            io_err_to_archive(e, &self.path, ReadOperation::ReadRange { offset, len })
+        })?;
 
         Ok(Bytes::from(buf))
     }
 
     async fn size(&self) -> Result<u64, ArchiveError> {
-        let meta = tokio::fs::metadata(&self.path).await?;
+        let meta = tokio::fs::metadata(&self.path)
+            .await
+            .map_err(|e| io_err_to_archive(e, &self.path, ReadOperation::SizeCheck))?;
         Ok(meta.len())
     }
 }
@@ -112,8 +142,8 @@ mod tests {
             .unwrap_err();
 
         assert!(
-            matches!(err, ArchiveError::OutOfBounds { .. }),
-            "expected OutOfBounds, got: {err:?}"
+            matches!(err, ArchiveError::Io(ReadError::OutOfBounds { .. })),
+            "expected Io(OutOfBounds), got: {err:?}"
         );
     }
 

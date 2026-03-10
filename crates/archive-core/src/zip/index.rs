@@ -8,6 +8,10 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::io::{
+    ReadError,
+    read_error::{ReadErrorKind, ReadFailure, ReadOperation, SourceInfo},
+};
 use crate::{ArchiveEntry, ArchiveError};
 
 /// A cached, serializable snapshot of a ZIP archive's file listing.
@@ -46,17 +50,45 @@ impl ZipIndex {
 
     /// Serialize this index to a JSON file on disk.
     pub fn save(&self, path: impl AsRef<Path>) -> Result<(), ArchiveError> {
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| ArchiveError::Other(format!("failed to serialize index: {e}")))?;
-        std::fs::write(path, json)?;
+        let json = serde_json::to_string_pretty(self).map_err(|e| ArchiveError::InvalidFormat {
+            message: format!("failed to serialize index: {e}"),
+        })?;
+        std::fs::write(path.as_ref(), &json).map_err(|e| {
+            ArchiveError::Io(ReadError::Failed(ReadFailure {
+                source: SourceInfo::LocalFile {
+                    path: path.as_ref().to_path_buf(),
+                },
+                operation: ReadOperation::ReadRange {
+                    offset: 0,
+                    len: json.len() as u64,
+                },
+                kind: ReadErrorKind::DiskIoError {
+                    os_code: e.raw_os_error(),
+                },
+                diagnostic: e.to_string(),
+            }))
+        })?;
         Ok(())
     }
 
     /// Load an index from a JSON file on disk.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, ArchiveError> {
-        let json = std::fs::read_to_string(path)?;
-        let index: ZipIndex = serde_json::from_str(&json)
-            .map_err(|e| ArchiveError::Other(format!("failed to deserialize index: {e}")))?;
+        let json = std::fs::read_to_string(path.as_ref()).map_err(|e| {
+            ArchiveError::Io(ReadError::Failed(ReadFailure {
+                source: SourceInfo::LocalFile {
+                    path: path.as_ref().to_path_buf(),
+                },
+                operation: ReadOperation::Open,
+                kind: ReadErrorKind::DiskIoError {
+                    os_code: e.raw_os_error(),
+                },
+                diagnostic: e.to_string(),
+            }))
+        })?;
+        let index: ZipIndex =
+            serde_json::from_str(&json).map_err(|e| ArchiveError::InvalidFormat {
+                message: format!("failed to deserialize index: {e}"),
+            })?;
         Ok(index)
     }
 }

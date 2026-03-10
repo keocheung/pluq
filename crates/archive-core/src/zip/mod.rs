@@ -110,8 +110,8 @@ impl<R: ReadAt> ZipArchive<R> {
 
         // Map the raw method ID to the shared CompressionMethod enum.
         let method = parse::zip_method_to_codec(location.method_id).ok_or_else(|| {
-            ArchiveError::UnsupportedMethod {
-                method: format!("ZIP method id {}", location.method_id),
+            ArchiveError::UnsupportedCompression {
+                algorithm: format!("ZIP method id {}", location.method_id),
             }
         })?;
 
@@ -131,14 +131,16 @@ impl<R: ReadAt> ZipArchive<R> {
                 let mut buf = Vec::with_capacity(uncompressed_size as usize);
                 decoder
                     .read_to_end(&mut buf)
-                    .map_err(|e| ArchiveError::InvalidFormat {
-                        message: format!("decompression failed for '{entry_name}': {e}"),
+                    .map_err(|e| ArchiveError::BitstreamError {
+                        detail: format!("decompression failed for '{entry_name}': {e}"),
                     })?;
                 Ok(buf)
             }
         })
         .await
-        .map_err(|e| ArchiveError::Other(format!("decompression task panicked: {e}")))??;
+        .map_err(|e| ArchiveError::BitstreamError {
+            detail: format!("decompression task panicked: {e}"),
+        })??;
 
         // ── Step 3 (spawn_blocking): CRC32 verification ───────────────────
         // CRC hashing is CPU-bound — don't block the I/O thread.
@@ -146,7 +148,7 @@ impl<R: ReadAt> ZipArchive<R> {
             let actual_crc = crc32fast::hash(&decompressed);
             if actual_crc != expected_crc {
                 return Err(ArchiveError::CrcMismatch {
-                    entry_name: entry_name_crc,
+                    entry: entry_name_crc,
                     expected: expected_crc,
                     actual: actual_crc,
                 });
@@ -154,7 +156,9 @@ impl<R: ReadAt> ZipArchive<R> {
             Ok(decompressed)
         })
         .await
-        .map_err(|e| ArchiveError::Other(format!("CRC verification task panicked: {e}")))??;
+        .map_err(|e| ArchiveError::BitstreamError {
+            detail: format!("CRC verification task panicked: {e}"),
+        })??;
 
         // ── Step 3 (async): return to caller ──────────────────────────────
         Ok(Bytes::from(verified))
@@ -327,8 +331,9 @@ mod tests {
         // Should be either CrcMismatch or an InvalidFormat decompression error
         assert!(
             matches!(result, Err(ArchiveError::CrcMismatch { .. }))
+                || matches!(result, Err(ArchiveError::BitstreamError { .. }))
                 || matches!(result, Err(ArchiveError::InvalidFormat { .. })),
-            "expected CrcMismatch or InvalidFormat, got: {result:?}"
+            "expected CrcMismatch, BitstreamError or InvalidFormat, got: {result:?}"
         );
     }
 
@@ -428,11 +433,11 @@ mod tests {
             "method should be recognised in the entry metadata"
         );
 
-        // extract() must fail with UnsupportedMethod — not a panic or InvalidFormat.
+        // extract() must fail with UnsupportedCompression — not a panic or InvalidFormat.
         let result = zip.extract(&zip.entries()[0]).await;
         assert!(
-            matches!(result, Err(ArchiveError::UnsupportedMethod { .. })),
-            "expected UnsupportedMethod, got: {result:?}"
+            matches!(result, Err(ArchiveError::UnsupportedCompression { .. })),
+            "expected UnsupportedCompression, got: {result:?}"
         );
     }
 

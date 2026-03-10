@@ -8,7 +8,7 @@
 //!   or `lzma-rust2` directly.
 //! - [`build_decoder`] is the single dispatch point. Add a new algorithm by adding a
 //!   match arm here — format parsers see no change.
-//! - Algorithms not yet implemented return [`ArchiveError::UnsupportedMethod`] rather
+//! - Algorithms not yet implemented return [`ArchiveError::UnsupportedCompression`] rather
 //!   than panicking or linking dead code.
 
 mod deflate;
@@ -118,7 +118,7 @@ pub trait Encoder: Write + Send {
 /// Pass `&[]` for codecs that don't need properties (Store, Deflate).
 ///
 /// # Errors
-/// Returns [`ArchiveError::UnsupportedMethod`] if the method is not compiled in.
+/// Returns [`ArchiveError::UnsupportedCompression`] if the method is not compiled in.
 pub fn build_decoder<'a>(
     method: CompressionMethod,
     input: impl Read + Send + 'a,
@@ -127,8 +127,8 @@ pub fn build_decoder<'a>(
     match method {
         CompressionMethod::Store => Ok(Box::new(StoreDecoder::new(input))),
         CompressionMethod::Deflate => Ok(Box::new(DeflateDecoder::new(input))),
-        other => Err(ArchiveError::UnsupportedMethod {
-            method: other.to_string(),
+        other => Err(ArchiveError::UnsupportedCompression {
+            algorithm: other.to_string(),
         }),
     }
 }
@@ -197,8 +197,8 @@ mod tests {
         ] {
             let result = build_decoder(method, dummy, &[]);
             assert!(
-                matches!(result, Err(ArchiveError::UnsupportedMethod { .. })),
-                "{method} should return UnsupportedMethod, got: {:?}",
+                matches!(result, Err(ArchiveError::UnsupportedCompression { .. })),
+                "{method} should return UnsupportedCompression, got: {:?}",
                 result.err()
             );
         }
