@@ -90,12 +90,12 @@ where
 
 // ── Test helpers ──────────────────────────────────────────────────────────────
 
-#[cfg(feature = "test-helpers")]
 impl ArchiveEntry {
     /// Construct a minimal `ArchiveEntry` for use in tests outside `archive-core`.
     ///
     /// Sets `index` to `0` — do **not** pass these entries to `ArchiveCore::extract()`
     /// or any format parser. For tree/cache unit tests only.
+    #[doc(hidden)]
     pub fn new_test(name: impl Into<String>, is_directory: bool) -> Self {
         Self {
             name: name.into(),

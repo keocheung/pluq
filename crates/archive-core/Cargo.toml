@@ -3,10 +3,6 @@ name = "archive-core"
 version = "0.1.0"
 edition = "2024"
 
-[features]
-# Exposes ArchiveEntry::new_test() for constructing test fixtures in other crates.
-# Never enable in production code.
-test-helpers = []
 
 [dependencies]
 bytes = "1"
