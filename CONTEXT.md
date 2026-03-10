@@ -3,8 +3,10 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 2 — Core engine: remaining formats + write support.
-* **Current Active Task:** RAR support — all ZIP work complete, RAR is next.
+* **Current Active Task:** SESSION_PLAN.md Step 2 — Define ReadError types (additive: create `io/read_error.rs` with full type hierarchy, add `PasswordDetectionMethod` to `archive_error.rs`).
 * **Latest Changes:**
+  * [2026-03-10] Gemini: **Step 1 complete** — File restructure + `Archive` → `ArchiveCore` rename. Moved `read_at.rs`, `local.rs`, `http.rs`, `source.rs` into new `crates/archive-core/src/io/` submodule (renamed to `read_at.rs`, `local_reader.rs`, `http_reader.rs`, `source.rs`). Renamed `archive.rs` → `facade.rs` (struct `Archive` → `ArchiveCore`). Renamed `error.rs` → `archive_error.rs`. Updated `lib.rs` with `pub mod io;` and new re-exports. Updated `archive-cli/src/main.rs` and `zip/mod.rs` import for `LocalReadAt`. All 31 tests pass.
+  * [2026-03-06] Gemini + Stefan: **Error Architecture refinement** — Refined `ArchiveError` into a high-fidelity 5-tier design (I/O, Identification, Integrity, Security, Interaction). Adopted `PasswordDetectionMethod` (Early/CRC/Bitstream) and `CorruptHeader { offset, reason }` context from research into the `zesven` (7z) codebase to optimize Cloud Sniping UX. Renamed `UnsupportedMethod` to `UnsupportedCompression` and added `UnsupportedFormat` to distinguish between "unrecognized magic" and "valid format but unsupported version." Updated `ERRORS.md`, `ARCHITECTURE.md`, and `SESSION_PLAN.md` for terminology consistency.
   * [2026-03-05] Claude + Stefan: **Architecture revision** — State layer (Layer 3.5) purified to universal cache only (Session, ArchiveCache, EntryTree). Auth, retry, billing, quota moved out to horizontal crates assembled per-product (Layer 4). `SessionError` renamed to `StateError`, product-specific variants (`AuthenticationFailed`, `QuotaExceeded`) removed — these now live in product-level error types. Multi-hop Transport tunnel: decorators box errors → core carries blindly → state layer carries blindly → product opens and handles. Added Products section to `ARCHITECTURE.md` (Server/SaaS, KMP Apps, CLI, Web). KMP + Compose Multiplatform + UniFFI added to Phase 4 roadmap. Client apps are independent cloud snipers (buy once, no metering). Server/SaaS exists primarily for web clients. Updated `ARCHITECTURE.md`, `ERRORS.md`, `CONTEXT.md`.
   * [2026-03-04] Claude + Stefan: Created `ERRORS.md` — layered error translation model (3 tiers: decorator internal types → `ArchiveError` → `StateError`), Transport tunnel mechanism, decorator injection pattern. Updated `ARCHITECTURE.md`: removed inline ArchiveError definition (replaced with ERRORS.md reference), moved auth/retry/rate-limit handling from core HttpReadAt to state-layer decorators, updated layer diagram. Core is now fully stateless — auth, retry, metering, caching are state-layer (Layer 3.5) concerns via ReadAt decorator pattern.
   * [2026-03-02] Gemini: All ZIP P0 items complete. CP437/Windows-1252 filename decoding via `encoding_rs` (3 new tests). `snipe test` CLI subcommand added (CRC-verifies all entries, exits non-zero on failure). Cloud E2E validated: listed 7.5 GB Dropbox ZIP via HTTP range requests, surgically extracted a 29 KB PDF — confirmed valid (CRC + `file` check). 31 tests passing.
@@ -130,20 +132,24 @@ Goal: cover ~99% of real-world archives. Test everything via CLI.
 Format priority order: **ZIP → RAR → 7z → TAR** (by real-world usage).
 
 **Done:**
+
 * ✅ Core abstractions — codec layer, `ArchiveReader` trait, error model (`ERRORS.md`), format-agnostic `ArchiveEntry`
 * ✅ ZIP read support — parsing, extraction, CRC verification, legacy filename decoding, cloud sniping E2E validated
 * ✅ CLI foundations — `list`, `extract`, `test` subcommands
 
 **Active — shared infrastructure (cheaper now, benefits all formats):**
+
 * Additional shared codecs (LZMA, BZip2, Zstd) — ZIP uses them, 7z needs them
 * State layer (`archive-state`) — universal cache layer: session boundary, metadata cache, entry tree, error translation
 
 **Active — format expansion:**
+
 * **RAR support** ← current task — wrap external crate (read + extract only)
 * **7z support** — wrap external crate (read + extract)
 * **TAR / TAR.GZ parser** — our own code (sequential; no cloud sniping)
 
 **Later in Phase 2:**
+
 * **Write support (local):** Create ZIP and TAR archives (skip RAR — proprietary)
 * CLI: `compress` subcommand, progress reporting, multi-entry extract
 

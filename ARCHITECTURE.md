@@ -1,7 +1,7 @@
 # ArchiveSniper — System Architecture
 
 > **Source of truth** for how ArchiveSniper is structured.
-> Last updated: 2026-02-27. Informed by deep research into the zesven (pure-Rust 7z) codebase and cross-examination of design decisions.
+> Last updated: 2026-03-10. Informed by deep research into the zesven (pure-Rust 7z) codebase and cross-examination of design decisions.
 > See also: `CONTEXT.md` (project state).
 
 ---
@@ -25,21 +25,21 @@ Six layers. Each has one job. Nothing leaks between them.
 │  Horizontal crates (optional, picked per product):                 │
 │    archive-auth │ archive-retry │ metering (server-only)           │
 │    Each provides ReadAt decorators + its own error type             │
-│    Errors are boxed into ArchiveError::Transport by decorators     │
+│    Errors are boxed into ReadError::Transport by decorators        │
 └──────────────────────┬───────────────────────────────────────────┘
                        │  decorated ReadAt passed down
 ┌──────────────────────▼───────────────────────────────────────────┐
 │  Layer 3.5: State Layer (universal cache)                         │
-│  Session, ArchiveCache, EntryTree                                 │
+│  Archive, ArchiveCache, EntryTree                                 │
 │  Translates ArchiveError → StateError (core errors only)          │
-│  Tunnels Transport errors blindly (re-wraps for product above)    │
+│  Tunnels ReadError::Transport blindly (re-wraps for product)      │
 │  See ERRORS.md for error flow                                     │
 └──────────────────────┬───────────────────────────────────────────┘
                        │
 ┌──────────────────────▼───────────────────────────────────────────┐
 │  Layer 3: Archive Facade (stateless)                              │
-│  Archive::open(reader) → auto-detects format                      │
-│  Unified API: entries(), extract(), test()                        │
+│  ArchiveCore::open(reader) → auto-detects format                  │
+│  Unified API: entries(), extract(sink), test()                    │
 │  Dispatches to correct format parser                              │
 │  Receives decorated ReadAt, unaware of decorators                 │
 └──────────────────────┬───────────────────────────────────────────┘
@@ -68,41 +68,102 @@ Layer 0: Raw bytes (disk, network, memory)
 ```
 
 **The five rules:**
-1. Nothing leaks through boundaries — products never see ZipArchive, flate2, LocalReadAt, or ArchiveError. Products see `StateError` + their own product-level error types.
+1. Nothing leaks through boundaries — products never see `ArchiveCore`, `ZipArchive`, flate2, LocalReadAt, or ArchiveError. Products see `Archive` (state layer handle) + `StateError` + their own product-level error types.
 2. Codec layer is shared — Deflate lives once, all format parsers use the same instance
 3. ArchiveEntry has zero format-specific fields — format parsers hold location details privately
-4. **Zero eager buffering** — no function in Layer 0 or Layer 2 may buffer more than 1 MiB of raw data into a `Vec<u8>`. Zesven uses `read_to_end()` (whole archive in RAM); we fetch exact byte ranges. A cloud archive can be 50 GB — never slurp it.
-5. **Core is stateless** — Layers 0–3 hold no session state, no caches, no auth tokens. Universal state (cache, session, entry tree) lives in the state layer (Layer 3.5). Product-specific state (auth tokens, quota counters, billing) lives in horizontal crates composed at the product level (Layer 4). See `ERRORS.md` for how errors flow through the stateless core via the Transport tunnel.
+4. **Streaming by default** — `ReadAt::read_range()` returns `AsyncRead`, not `Bytes`. `ArchiveReader::extract()` writes to a sink, not returns a buffer. No layer may eagerly buffer an entire entry — a 4 GB video or a 50 GB cloud archive cannot live in RAM. Convenience methods (`read_bytes()`, `extract_to_bytes()`) exist for small, bounded reads (headers, small entries).
+5. **Core is stateless** — Layers 0–3 hold no session state, no caches, no auth tokens. Universal state (cache, session, entry tree) lives in the state layer (Layer 3.5). Product-specific state (auth tokens, quota counters, billing) lives in horizontal crates composed at the product level (Layer 4). See `ERRORS.md` for how errors flow across layers.
+6. **I/O has its own error language** — `ReadAt` returns `ReadError` (not `ArchiveError`). `ReadError` is a standalone type covering both local filesystem and HTTP failures, with structured context for decorator routing and user-facing messages. Format parsers convert `ReadError → ArchiveError` at the boundary. See `ERRORS.md` § ReadError.
 
 ---
 
 ## Layer 0 — I/O Sources
 
-### ReadAt Trait [LOCKED]
+### ReadAt Trait
 
 ```rust
 pub trait ReadAt: Send + Sync {
+    /// Stream `len` bytes starting at `offset`. Returns a reader, not a buffer.
+    /// Callers decide whether to collect into memory or pipe to a sink.
     fn read_range(&self, offset: u64, len: u64)
-        -> impl Future<Output = Result<Bytes, ArchiveError>> + Send;
+        -> impl Future<Output = Result<Box<dyn AsyncRead + Send + Unpin>, ReadError>> + Send;
+
     fn size(&self)
-        -> impl Future<Output = Result<u64, ArchiveError>> + Send;
+        -> impl Future<Output = Result<u64, ReadError>> + Send;
 }
 ```
 
+**Streaming by default.** `read_range` returns an `AsyncRead` stream, not `Bytes`. For HTTP, this maps directly to a streaming `reqwest` response body — zero buffering. For a 4 GB stored ZIP entry, the HTTP response streams through the decompressor into the output file with bounded memory. The caller never holds the entire payload in RAM.
+
+**Returns `ReadError`, not `ArchiveError`.** The I/O layer has its own error vocabulary covering both local and remote failures, with structured context for decorator routing and user-facing messages. See § ReadError below.
+
+**Convenience for small reads.** Header parsing needs small bounded reads (EOCD, central directory — kilobytes). A blanket extension trait collects a stream into memory:
+
+```rust
+pub trait ReadAtExt: ReadAt {
+    /// Collect a bounded range into memory. Use for headers and metadata only.
+    async fn read_bytes(&self, offset: u64, len: u64) -> Result<Bytes, ReadError> {
+        let mut reader = self.read_range(offset, len).await?;
+        let mut buf = Vec::with_capacity(len as usize);
+        reader.read_to_end(&mut buf).await.map_err(/* wrap as ReadError */)?;
+        Ok(Bytes::from(buf))
+    }
+}
+impl<T: ReadAt> ReadAtExt for T {}
+```
+
+Format parsers use `read_bytes()` for headers and `read_range()` for entry data extraction.
+
 **Implementations:**
-- `LocalReadAt` — opens file, seeks, reads per call (stateless)
-- `HttpReadAt` — HTTP Range header per call, with optional auth headers
+- `LocalReadAt` — opens file, seeks, returns a bounded `AsyncRead` over the file handle
+- `HttpReadAt` — HTTP Range request, returns the response body stream directly (zero copy)
 - `Source` enum — static dispatch over Local/Http (no vtables)
 - `MultiVolumeReadAt` [future] — joins multiple files into one virtual ReadAt
   - User passes first volume (e.g., `archive.7z.001`)
   - I/O layer discovers siblings by naming convention (`.002`, `.003`, ...)
   - Builds prefix-sum size table, translates global offsets to (volume_index, local_offset)
   - Format parser sees one seamless ReadAt, completely unaware of volume boundaries
+  - `ReadError::source` identifies which volume failed — "I/O error reading volume 3"
 - `SfxAdjustedReadAt` [future] — transparent offset adapter for self-extracting archives (.exe)
-  - Scans first 1–16 MiB for 7z signature `37 7A BC AF 27 1C` (MZ/ELF/Mach-O heuristic first)
-  - Full header validation after finding candidate bytes (false positives are real)
+  - Scans first 1–16 MiB for archive signature (MZ/ELF/Mach-O heuristic first)
   - Wraps inner ReadAt with `sfx_offset`: every `read_range(offset, len)` becomes `read_range(sfx_offset + offset, len)`
   - Format parser is SFX-unaware — same clean adapter pattern as MultiVolumeReadAt
+
+### ReadError — I/O Error Language
+
+`ReadError` is Layer 0's own error type. It covers both local filesystem and HTTP failures with structured context that serves two consumers: **decorators** (which need to route programmatically: retry? refresh token?) and **users** (who need a helpful message, not a stack trace).
+
+See `ERRORS.md` § ReadError for the full type definitions. Summary of the design:
+
+```rust
+pub enum ReadError {
+    /// An actual I/O failure — network or filesystem.
+    /// Carries full context: which source, what operation, structured reason, raw diagnostic.
+    Failed(ReadFailure),
+
+    /// Opaque tunnel for decorator errors (Auth, Retry, Quota).
+    /// Decorators inject here. Core carries blindly. Products open and downcast.
+    Transport(Box<dyn Error + Send + Sync>),
+
+    /// Requested bytes don't exist (HTTP 416, read past EOF).
+    /// Format parsers treat this as CorruptHeader — their offset math was wrong.
+    OutOfBounds { offset: u64, len: u64, size: u64 },
+}
+
+pub struct ReadFailure {
+    pub source:     SourceInfo,      // LocalFile { path } | Http { url }
+    pub operation:  ReadOperation,   // Open | SizeCheck | ReadRange { offset, len }
+    pub kind:       ReadErrorKind,   // structured reason for routing + display
+    pub diagnostic: String,          // raw error from underlying library (logs only)
+}
+```
+
+`ReadErrorKind` has specific variants for every failure mode — network transport level (timeout, TLS, DNS), HTTP application level (status codes with headers + body for decorator inspection), and local filesystem (permission denied, file not found, disk I/O error, file locked). Each variant carries enough structured data to generate a genuinely helpful user message without string parsing.
+
+**How format parsers convert `ReadError → ArchiveError`:**
+- `ReadError::Failed(..)` → `ArchiveError::Io(ReadError::Failed(..))`
+- `ReadError::Transport(box)` → `ArchiveError::Io(ReadError::Transport(box))` — tunnel preserved
+- `ReadError::OutOfBounds { .. }` → `ArchiveError::CorruptHeader { .. }` — semantic upconversion
 
 ### HttpReadAt — Cloud Performance Requirements
 
@@ -110,7 +171,7 @@ pub trait ReadAt: Send + Sync {
 
 **Request coalescing.** If the format parser requests two ranges within 64 KB of each other, merge them into one HTTP Range request. Downloading 64 KB of intermediate "gap" bytes is faster than paying 150 ms of latency for a second request.
 
-**Core's `HttpReadAt` is stateless and dumb.** It accepts optional static headers (for pre-authenticated requests), makes one request, returns the result or an error. It does NOT handle auth refresh, retries, or rate limits — those are product-level concerns handled via `ReadAt` decorators from horizontal crates (see `ERRORS.md`).
+**Core's `HttpReadAt` is stateless and dumb.** It accepts optional static headers (for pre-authenticated requests), makes one Range request, returns the response body as a streaming `AsyncRead`. It does NOT handle auth refresh, retries, or rate limits — those are product-level concerns handled via `ReadAt` decorators from horizontal crates (see `ERRORS.md`). Errors are returned as structured `ReadError` variants (`HttpStatus`, `NetworkTimeout`, `RangeNotSupported`, etc.) — never as raw `reqwest::Error`.
 
 **Auth, retry, and rate-limit handling** are implemented as `ReadAt` decorators from horizontal crates (e.g., `archive-auth`, `archive-retry`), assembled by the product (Layer 4) and passed down through the state layer into core. Core receives a composed `ReadAt` and is unaware of the decorator stack. See `ERRORS.md` § Decorator Construction.
 
@@ -210,7 +271,7 @@ match method {
     CompressionMethod::Deflate => Ok(Box::new(DeflateDecoder::new(input))),
     #[cfg(feature = "lzma")]
     CompressionMethod::Lzma2 => Ok(Box::new(Lzma2Decoder::new(input, properties)?)),
-    _ => Err(ArchiveError::UnsupportedMethod { method }),
+    _ => Err(ArchiveError::UnsupportedCompression { algorithm: method.to_string() }),
 }
 ```
 
@@ -243,7 +304,7 @@ impl CompressionMethod {
 }
 ```
 
-Useful for the UI: if an archive contains LZMA2 entries but the build doesn't include LZMA support, show "unsupported compression method" per-entry rather than failing entirely.
+Useful for the UI: if an archive contains LZMA2 entries but the build doesn't include LZMA support, show "unsupported compression" per-entry rather than failing entirely.
 
 ### Pipeline Assembly
 
@@ -258,19 +319,26 @@ For write, the simple linear path covers all real-world cases: filter → compre
 
 ### Async/Sync Boundary (spawn_blocking)
 
-I/O is async (ReadAt returns futures, maps to HTTP Range headers).
+I/O is async (ReadAt returns futures and `AsyncRead` streams).
 Decompression is CPU-bound (heavy math, holds a thread) — it MUST run in `tokio::task::spawn_blocking`.
 
-**Pattern for extraction:**
+**Pattern for extraction (streaming):**
 ```
-1. async: read_range(offset, len) → Bytes          // HTTP or disk
-2. spawn_blocking: decompress(bytes) → Vec<u8>     // CPU-bound
-3. async: write output / return to caller
+1. async: read_range(offset, len) → Box<dyn AsyncRead>   // streaming HTTP body or file read
+2. bridge: SyncIoBridge wraps AsyncRead into sync Read    // for the decompressor
+3. spawn_blocking:                                        // CPU-bound
+     decoder = build_decoder(method, bridged_reader)
+     io::copy(decoder, sink)                              // stream through, bounded memory
+     verify CRC
 ```
 
-**Key difference from zesven's model:** Zesven calls `read_to_end()` and pulls the entire archive into RAM before parsing. We must NOT do this — fetch only the specific byte ranges needed. A 50 GB cloud archive cannot live in RAM.
+The decompressor reads incrementally from the bridged stream. The sink receives decompressed chunks as they're produced. At no point is the entire compressed or decompressed payload held in memory — even for a 4 GB entry.
 
-**CRC verification** runs in a separate `spawn_blocking` call after decompression — don't block the I/O thread on hashing. Corrupted files are deleted before returning the error.
+**For small header reads** (EOCD, central directory), format parsers use `read_bytes()` which collects a bounded range into `Bytes`. These are always small (< 1 MiB) and safe to buffer.
+
+**Key difference from zesven's model:** Zesven calls `read_to_end()` and pulls the entire archive into RAM before parsing. We fetch exact byte ranges and stream them through the pipeline.
+
+**CRC verification** runs inside the same `spawn_blocking` — hash incrementally as decompressed bytes flow through. No second pass needed.
 
 ### External Crate Mapping
 
@@ -306,10 +374,31 @@ The extraction pipeline is always: **decrypt → decompress → (maybe reverse f
 pub trait ArchiveReader {
     fn entries(&self) -> &[ArchiveEntry];
     fn entries_clean(&self) -> Vec<&ArchiveEntry>;
+
     /// Bytes that must be downloaded+decompressed to produce this entry.
     fn extraction_cost(&self, entry: &ArchiveEntry) -> u64;
-    async fn extract(&self, entry: &ArchiveEntry) -> Result<Bytes, ArchiveError>;
+
+    /// Extract entry, streaming decompressed bytes to `sink`. Returns bytes written.
+    /// The base interface is always a sink — never returns Bytes directly.
+    async fn extract<W: AsyncWrite + Send + Unpin>(
+        &self, entry: &ArchiveEntry, sink: &mut W,
+    ) -> Result<u64, ArchiveError>;
+
+    /// Decompress + verify CRC, write nothing. Essential for integrity checking.
     async fn test(&self, entry: &ArchiveEntry) -> Result<(), ArchiveError>;
+}
+```
+
+**Sink-based extraction.** `extract()` writes decompressed bytes to any `AsyncWrite` — a file, an HTTP response body, a `Vec<u8>`, `/dev/null` (for test mode). The caller decides the destination, core never buffers the full output.
+
+**Convenience for in-memory use** (CLI, small entries, tests) — lives on the state layer `Archive`, not on `ArchiveCore`:
+```rust
+impl Archive {  // state layer Archive
+    pub async fn extract_to_bytes(&self, entry: &ArchiveEntry) -> Result<Bytes, StateError> {
+        let mut buf = Vec::with_capacity(entry.uncompressed_size as usize);
+        self.extract(entry, &mut buf).await?;
+        Ok(Bytes::from(buf))
+    }
 }
 ```
 
@@ -317,8 +406,6 @@ pub trait ArchiveReader {
 - **ZIP**: returns `entry.compressed_size` (every entry is independently seekable)
 - **7z solid block**: returns `sum(compressed_sizes_of_all_preceding_entries_in_folder) + entry.compressed_size`
 - State layer / UI shows: *"Sniping this 1 MB file requires downloading 500 MB. Proceed?"*
-
-`test()` = decompress + verify CRC without writing to disk. Essential for integrity checking.
 
 ### Internal Location Data
 
@@ -350,7 +437,7 @@ fn zip_method(id: u16) -> Result<CompressionMethod> {
         12 => Ok(CompressionMethod::BZip2),
         14 => Ok(CompressionMethod::Lzma),
         93 => Ok(CompressionMethod::Zstd),
-        _ => Err(ArchiveError::UnsupportedMethod { .. }),
+        _ => Err(ArchiveError::UnsupportedCompression { algorithm: id.to_string() }),
     }
 }
 
@@ -360,7 +447,7 @@ fn sevenz_method(id: &[u8]) -> Result<CompressionMethod> {
         [0x00] => Ok(CompressionMethod::Store),
         [0x21] => Ok(CompressionMethod::Lzma2),
         [0x04, 0x01, 0x08] => Ok(CompressionMethod::Deflate),
-        _ => Err(ArchiveError::UnsupportedMethod { .. }),
+        _ => Err(ArchiveError::UnsupportedCompression { algorithm: id.to_string() }),
     }
 }
 ```
@@ -455,16 +542,16 @@ The universal cache and session layer. Sits between products (Layer 4) and the s
 
 **Responsibilities:**
 - Receives a `ReadAt` from the product above (possibly decorated — state layer doesn't know or care)
-- Passes the `ReadAt` to `Archive::open()` in core
-- Manages `Session` (in-memory handle wrapping a live `Archive`)
+- Passes the `ReadAt` to `ArchiveCore::open()` in core
+- Manages `Archive` (the product-facing handle wrapping a live `ArchiveCore`)
 - Manages `ArchiveCache` (on-disk cross-session metadata cache with invalidation)
 - Builds `EntryTree` (virtual folder structure derived from flat entry names)
 - Translates `ArchiveError` → `StateError` for core errors it understands
-- Tunnels `ArchiveError::Transport` blindly as `StateError::Transport` — does not inspect or downcast
+- Tunnels `ReadError::Transport` (inside `ArchiveError::Io`) blindly as `StateError::Transport` — does not inspect or downcast
 - Handles password prompts (encrypted archives are a universal concern)
 
 **Key types** (all owned by state layer):
-- `Session` — in-memory session for an open archive
+- `Archive` — product-facing handle to an open archive (wraps `ArchiveCore` + cache + entry tree)
 - `StateError` — error type for product consumption (see `ERRORS.md`)
 - `EntryTree` / `TreeNode` — virtual folder structure
 - `ArchiveCache` / `ArchiveFingerprint` — cross-session metadata + location cache
@@ -535,10 +622,12 @@ Each product is an actual binary (or library consumed via FFI). It assembles the
 
 ## Layer 3 — Archive Facade (Stateless)
 
-### Archive Struct (exists, needs expansion)
+### ArchiveCore Struct (exists, needs expansion)
 
 ```rust
-pub struct Archive {
+// Internal to archive-core. Products never see this type directly —
+// they interact with Archive (the state layer handle) instead.
+pub(crate) struct ArchiveCore {
     inner: ArchiveInner,
 }
 
@@ -550,9 +639,9 @@ enum ArchiveInner {
 }
 ```
 
-`Archive::open(reader)` auto-detects format from the provided `ReadAt` and dispatches to the correct format parser. The `ReadAt` it receives may be decorated by the state layer (Layer 3.5), but `Archive` is unaware of this — it only sees the `ReadAt` trait.
+`ArchiveCore::open(reader)` auto-detects format from the provided `ReadAt` and dispatches to the correct format parser. The `ReadAt` it receives may be decorated, but `ArchiveCore` is unaware — it only sees the `ReadAt` trait.
 
-**Stateless:** `Archive` holds no session state, no caches, no auth tokens. It is constructed, used, and dropped. The state layer above decides when to create it, what `ReadAt` to give it, and what to do with the results.
+**Stateless:** `ArchiveCore` holds no session state, no caches, no auth tokens. It is constructed, used, and dropped. The state layer (`Archive`) owns it and decides when to create it, what `ReadAt` to give it, and what to do with the results.
 
 ---
 
@@ -588,7 +677,9 @@ Format-specific location info (offsets, folder indexes, CRC values) stays inside
 
 Error handling follows a layered translation model. Each layer defines errors for its consumer — no layer exposes a lower layer's error types. Errors are either handled (retried, prompted) and disappear, or translated into the consumer's vocabulary.
 
-See **`ERRORS.md`** for the full error architecture: tier definitions (`ArchiveError`, `StateError`, decorator internal types), the `Transport` tunnel mechanism, translation flows, and the decorator injection pattern.
+`ArchiveError` is core's error type. It has NO `Transport` variant — the decorator tunnel lives inside `ReadError::Transport`, which is carried within `ArchiveError::Io(ReadError)`. This keeps `ArchiveError` clean: every variant is genuinely an archive/format concept.
+
+See **`ERRORS.md`** for the full error architecture: `ReadError` (I/O layer), `ArchiveError` (core), `StateError` (state layer), decorator error types, translation flows, and the injection pattern.
 
 ---
 
