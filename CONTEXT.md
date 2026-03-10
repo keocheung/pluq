@@ -13,7 +13,8 @@
 ### Agent Developer Guidelines
 
 1. **Commit Messages:** All agents MUST use **Conventional Commits** (e.g., `feat:`, `fix:`, `docs:`, `chore:`, `test:`). Scope the commit to the crate if applicable (e.g., `feat(archive-core): ...`). Do not use capitalized imperative mood strings without a conventional prefix.
-2. **Architecture:** `ARCHITECTURE.md` is the canonical specification for system architecture (layers, traits, formats, codecs). `ERRORS.md` is the canonical specification for error types and error flow across layers (the layered translation model, Transport tunnel, decorator pattern). Both are final — not RFCs. **If any value in `CONTEXT.md` conflicts with `ARCHITECTURE.md` or `ERRORS.md`, the spec file wins.** Agents must note any conflict they find and ask Stefan, but must assume the spec files are correct until told otherwise. `CONTEXT.md` tracks state; the spec files define truth.
+2. **Commit Message Bodies:** When adding a commit message body, use a **strict list-based format** with a hyphen and space (`-`) bullet points. Do not write paragraphs. This makes commits easier to scan.
+3. **Architecture:** `ARCHITECTURE.md` is the canonical specification for system architecture (layers, traits, formats, codecs). `ERRORS.md` is the canonical specification for error types and error flow across layers (the layered translation model, Transport tunnel, decorator pattern). Both are final — not RFCs. **If any value in `CONTEXT.md` conflicts with `ARCHITECTURE.md` or `ERRORS.md`, the spec file wins.** Agents must note any conflict they find and ask Stefan, but must assume the spec files are correct until told otherwise. `CONTEXT.md` tracks state; the spec files define truth.
 
 ### The Product
 
@@ -100,6 +101,7 @@ fn extract(&self, entry: &ArchiveEntry) -> Result<Bytes, ArchiveError>;
 ### Git Convention
 
 * Agents **MUST NOT** auto-commit or auto-push. Always ask Stefan for permission first. Commits should happen on a per-task basis after code review.
+* **Format:** Use the strict list-based format for commit message bodies (see Guidelines at the top of this document).
 
 ### Build Order (Roadmap)
 
