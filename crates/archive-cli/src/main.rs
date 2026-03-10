@@ -99,7 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .find(|e| e.name == entry)
                 .ok_or_else(|| format!("entry '{}' not found in archive", entry))?;
 
-            let data = archive.extract(found).await?;
+            let data = archive.extract_to_bytes(found).await?;
 
             let out_path = if output.is_dir() {
                 let file_name = std::path::Path::new(&entry).file_name().unwrap_or_default();

@@ -479,29 +479,18 @@ fn days_since_unix_epoch(year: u32, month: u32, day: u32) -> Option<u64> {
 
 /// Read the compressed data for a single entry by parsing its Local File
 /// Header to determine the actual data offset.
+///
+/// Used internally by tests and legacy callers. Extraction code should
+/// prefer [`resolve_data_offset`] + `read_stream` for streaming reads.
+#[allow(dead_code)]
 pub async fn read_local_file_data(
     reader: &impl ReadAt,
     location: &ZipEntryLocation,
     compressed_size: u64,
 ) -> Result<Bytes, ArchiveError> {
-    // Read the fixed-size part of the Local File Header (30 bytes).
-    let lfh = reader
-        .read_range(location.offset, 30)
+    let data_offset = resolve_data_offset(reader, location)
         .await
         .map_err(ArchiveError::Io)?;
-
-    let sig = read_u32_le(&lfh, 0);
-    if sig != LOCAL_FILE_HEADER_SIGNATURE {
-        return Err(ArchiveError::InvalidFormat {
-            message: format!("invalid Local File Header signature: {sig:#010x}"),
-        });
-    }
-
-    let name_len = read_u16_le(&lfh, 26) as u64;
-    let extra_len = read_u16_le(&lfh, 28) as u64;
-
-    // Compressed data starts right after the LFH + name + extra fields.
-    let data_offset = location.offset + 30 + name_len + extra_len;
 
     if compressed_size == 0 {
         return Ok(Bytes::new());
@@ -511,6 +500,37 @@ pub async fn read_local_file_data(
         .read_range(data_offset, compressed_size)
         .await
         .map_err(ArchiveError::Io)
+}
+
+/// Parse the Local File Header and return the byte offset of the compressed
+/// data that immediately follows it.
+///
+/// This is the "first half" of extraction — consumers call this then use
+/// `read_stream(data_offset, compressed_size)` to get a streaming reader.
+pub async fn resolve_data_offset(
+    reader: &impl ReadAt,
+    location: &ZipEntryLocation,
+) -> Result<u64, crate::io::ReadError> {
+    // Read the fixed-size part of the Local File Header (30 bytes).
+    let lfh = reader
+        .read_range(location.offset, 30)
+        .await?;
+
+    let sig = read_u32_le(&lfh, 0);
+    if sig != LOCAL_FILE_HEADER_SIGNATURE {
+        // We can't use ArchiveError here — this returns ReadError.
+        // Callers that want ArchiveError can map this.
+        // Use a sentinel Transport error so the caller can distinguish it.
+        return Err(crate::io::ReadError::Transport(
+            format!("invalid Local File Header signature: {sig:#010x}").into(),
+        ));
+    }
+
+    let name_len = read_u16_le(&lfh, 26) as u64;
+    let extra_len = read_u16_le(&lfh, 28) as u64;
+
+    // Compressed data starts right after the LFH + name + extra fields.
+    Ok(location.offset + 30 + name_len + extra_len)
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────

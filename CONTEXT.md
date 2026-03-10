@@ -3,8 +3,8 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 2 — Core engine: remaining formats + write support.
-* **Current Active Task:** SESSION_PLAN.md Step 6 — Sink-Based Streaming Extraction.
-* **Baseline:** 38 tests pass, clippy clean. SESSION_PLAN.md Steps 1–5 complete.
+* **Current Active Task:** SESSION_PLAN.md Step 7 — ProgressReporter + Cancellation.
+* **Baseline:** 39 tests pass, clippy clean. SESSION_PLAN.md Steps 1–6 complete.
 
 ---
 

@@ -5,10 +5,11 @@
 //! for entry in archive.entries() {
 //!     println!("{}", entry.name);
 //! }
-//! let data = archive.extract(&archive.entries()[0]).await?;
+//! let data = archive.extract_to_bytes(&archive.entries()[0]).await?;
 //! ```
 
 use bytes::Bytes;
+use tokio::io::AsyncWrite;
 
 use crate::io::Source;
 use crate::junk;
@@ -18,7 +19,7 @@ use crate::{ArchiveEntry, ArchiveError};
 /// A format-agnostic archive handle.
 ///
 /// Created via [`ArchiveCore::open`], which auto-detects the source type
-/// (local file or HTTP URL) and the archive format (ZIP, RAR, 7z, ...).
+/// (local file or HTTP URL) and the archive format (ZIP, RAR, 7z, ...)./
 ///
 /// This is the primary public API for the core layer. The state layer
 /// (`archive-state`) wraps this type — products should interact with
@@ -31,7 +32,7 @@ pub struct ArchiveCore {
 /// Hidden from consumers — they only see `ArchiveCore`.
 enum ArchiveInner {
     Zip(ZipArchive<Source>),
-    // Future: Rar(...), SevenZip(...), Tar(...)
+    // Future: Rar(...), SevenZip(...), Tar(...))
 }
 
 impl ArchiveCore {
@@ -85,13 +86,29 @@ impl ArchiveCore {
             .collect()
     }
 
-    /// Extract a single entry's contents, decompressing if needed.
+    /// Extract a single entry, streaming decompressed bytes to `sink`.
     ///
-    /// CRC verification is mandatory — never returns corrupted bytes.
-    pub async fn extract(&self, entry: &ArchiveEntry) -> Result<Bytes, ArchiveError> {
+    /// Returns the number of bytes written. CRC verification is mandatory.
+    ///
+    /// For convenience, see [`extract_to_bytes`](Self::extract_to_bytes).
+    pub async fn extract<W: AsyncWrite + Send + Unpin>(
+        &self,
+        entry: &ArchiveEntry,
+        sink: &mut W,
+    ) -> Result<u64, ArchiveError> {
         match &self.inner {
-            ArchiveInner::Zip(z) => z.extract(entry).await,
+            ArchiveInner::Zip(z) => z.extract(entry, sink).await,
         }
+    }
+
+    /// Extract a single entry into memory, returning decompressed bytes.
+    ///
+    /// Convenience wrapper around [`extract`](Self::extract) for small entries.
+    /// For large entries (multi-GB), use `extract()` with a file sink instead.
+    pub async fn extract_to_bytes(&self, entry: &ArchiveEntry) -> Result<Bytes, ArchiveError> {
+        let mut buf = Vec::with_capacity(entry.uncompressed_size as usize);
+        self.extract(entry, &mut buf).await?;
+        Ok(Bytes::from(buf))
     }
 
     /// Bytes that must be downloaded and decompressed to produce this entry.

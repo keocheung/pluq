@@ -4,7 +4,7 @@
 //! types like `ZipArchive`. Adding a new format (RAR, 7z, TAR) means implementing
 //! this trait — consumers see no change.
 
-use bytes::Bytes;
+use tokio::io::AsyncWrite;
 
 use crate::junk;
 use crate::{ArchiveEntry, ArchiveError};
@@ -12,9 +12,9 @@ use crate::{ArchiveEntry, ArchiveError};
 /// Unified read interface implemented by every format parser.
 ///
 /// Consumers (CLI, UI, server) use only this trait. Format-specific types
-/// (`ZipArchive`, `SevenZArchive`, …) are hidden behind [`Archive`].
+/// (`ZipArchive`, `SevenZArchive`, …) are hidden behind [`ArchiveCore`].
 ///
-/// [`Archive`]: crate::archive::Archive
+/// [`ArchiveCore`]: crate::facade::ArchiveCore
 pub trait ArchiveReader {
     /// All entries in the archive, including OS-generated junk.
     fn entries(&self) -> &[ArchiveEntry];
@@ -39,18 +39,21 @@ pub trait ArchiveReader {
     ///   the target entry in the same folder, plus the target's size
     fn extraction_cost(&self, entry: &ArchiveEntry) -> u64;
 
-    /// Extract a single entry, returning its decompressed bytes.
+    /// Extract a single entry, streaming decompressed bytes to `sink`.
     ///
-    /// CRC verification is mandatory — this method never returns bytes that
+    /// Returns the number of bytes written to `sink`.
+    ///
+    /// CRC verification is mandatory — this method never writes bytes that
     /// fail the integrity check.
-    fn extract(
+    fn extract<W: AsyncWrite + Send + Unpin>(
         &self,
         entry: &ArchiveEntry,
-    ) -> impl std::future::Future<Output = Result<Bytes, ArchiveError>> + Send;
+        sink: &mut W,
+    ) -> impl std::future::Future<Output = Result<u64, ArchiveError>> + Send;
 
     /// Decompress and verify CRC without retaining output.
     ///
-    /// Equivalent to `extract()` followed by discarding the bytes.
+    /// Equivalent to `extract()` to a no-op sink.
     /// Used for archive integrity checking (`archive-cli test` command).
     fn test(
         &self,
