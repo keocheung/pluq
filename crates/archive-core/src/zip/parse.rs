@@ -444,7 +444,7 @@ fn days_since_unix_epoch(year: u32, month: u32, day: u32) -> Option<u64> {
         return None;
     }
 
-    let is_leap = |y: u32| y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let is_leap = |y: u32| y.is_multiple_of(4) && (!y.is_multiple_of(100) || y.is_multiple_of(400));
 
     let mut days: u64 = 0;
 

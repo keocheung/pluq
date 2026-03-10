@@ -194,7 +194,7 @@ mod tests {
     use zip::CompressionMethod as ZipCrateMethod;
     use zip::write::SimpleFileOptions;
 
-    use crate::local::LocalReadAt;
+    use crate::io::LocalReadAt;
 
     use super::*;
 

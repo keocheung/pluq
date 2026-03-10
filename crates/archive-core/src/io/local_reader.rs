@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 use bytes::Bytes;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
-use crate::{ArchiveError, ReadAt};
+use super::ReadAt;
+use crate::ArchiveError;
 
 /// A [`ReadAt`] backed by a local file on disk.
 ///

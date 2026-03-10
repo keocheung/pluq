@@ -17,7 +17,7 @@ use crate::ArchiveEntry;
 /// | `desktop.ini`            | Windows | Explorer folder customisation        |
 /// | `ehthumbs.db`            | Windows | Windows Media Center thumbnail cache |
 /// | `.directory`             | Linux   | KDE folder-view settings             |
-
+///
 /// Returns `true` if this entry is an OS-generated junk file that should
 /// be hidden from the user by default.
 pub fn is_junk(entry: &ArchiveEntry) -> bool {

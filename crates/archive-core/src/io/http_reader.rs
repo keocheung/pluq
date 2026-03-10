@@ -4,7 +4,8 @@ use reqwest::{
     header::{CONTENT_LENGTH, HeaderMap, HeaderValue, RANGE},
 };
 
-use crate::{ArchiveError, ReadAt};
+use super::ReadAt;
+use crate::ArchiveError;
 
 /// A [`ReadAt`] backed by HTTP range requests.
 ///

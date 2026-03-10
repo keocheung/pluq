@@ -5,11 +5,12 @@
 
 use bytes::Bytes;
 
-use crate::{ArchiveError, HttpReadAt, LocalReadAt, ReadAt};
+use super::{HttpReadAt, LocalReadAt, ReadAt};
+use crate::ArchiveError;
 
 /// An I/O source that can be either a local file or an HTTP URL.
 ///
-/// Created automatically by [`Archive::open`](crate::Archive::open) based
+/// Created automatically by [`ArchiveCore::open`](crate::ArchiveCore::open) based
 /// on the source string, or manually for fine-grained control.
 pub enum Source {
     /// A file on the local filesystem.

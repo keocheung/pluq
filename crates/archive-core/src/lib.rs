@@ -1,17 +1,14 @@
-mod archive;
+mod archive_error;
 pub mod archive_reader;
 pub mod codec;
 mod entry;
-mod error;
-pub(crate) mod http;
+mod facade;
+pub mod io;
 pub mod junk;
-pub(crate) mod local;
-mod read_at;
-pub(crate) mod source;
 pub mod zip;
 
-// Primary public API — use this.
-pub use archive::Archive;
+// Primary public API — use this (via archive-state in production code).
+pub use facade::ArchiveCore;
 
 // Trait for format-agnostic archive operations.
 pub use archive_reader::ArchiveReader;
@@ -20,13 +17,10 @@ pub use archive_reader::ArchiveReader;
 pub use codec::CompressionMethod;
 
 // Data types.
+pub use archive_error::ArchiveError;
 pub use entry::ArchiveEntry;
-pub use error::ArchiveError;
 
-// Low-level building blocks (for power users / tests).
-pub use http::HttpReadAt;
-pub use local::LocalReadAt;
-pub use read_at::ReadAt;
-pub use source::Source;
+// I/O building blocks (for power users / tests).
+pub use io::{HttpReadAt, LocalReadAt, ReadAt, Source};
 pub use zip::ZipArchive;
 pub use zip::ZipIndex;

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-use archive_core::Archive;
+use archive_core::ArchiveCore;
 
 /// Archive Sniper — surgical archive extraction from local or cloud storage.
 #[derive(Parser)]
@@ -51,7 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Command::List { source, all } => {
-            let archive = Archive::open(&source).await?;
+            let archive = ArchiveCore::open(&source).await?;
 
             let entries: Vec<_> = if all {
                 archive.entries().iter().collect()
@@ -59,8 +59,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 archive.entries_clean()
             };
 
-            println!("  {:<12} {:<12} {}", "SIZE", "COMPRESSED", "NAME");
-            println!("  {:<12} {:<12} {}", "----", "----------", "----");
+            println!("  {:<12} {:<12} NAME", "SIZE", "COMPRESSED");
+            println!("  {:<12} {:<12} ----", "----", "----------");
 
             for entry in &entries {
                 if entry.is_directory {
@@ -91,7 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             entry,
             output,
         } => {
-            let archive = Archive::open(&source).await?;
+            let archive = ArchiveCore::open(&source).await?;
 
             let found = archive
                 .entries()
@@ -117,7 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         Command::Test { source, all } => {
-            let archive = Archive::open(&source).await?;
+            let archive = ArchiveCore::open(&source).await?;
 
             let entries: Vec<_> = if all {
                 archive.entries().iter().collect()

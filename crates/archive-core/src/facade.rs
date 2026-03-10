@@ -1,7 +1,7 @@
 //! High-level entry point for opening and working with archives.
 //!
 //! ```ignore
-//! let archive = Archive::open("https://example.com/data.zip").await?;
+//! let archive = ArchiveCore::open("https://example.com/data.zip").await?;
 //! for entry in archive.entries() {
 //!     println!("{}", entry.name);
 //! }
@@ -10,31 +10,31 @@
 
 use bytes::Bytes;
 
+use crate::io::Source;
 use crate::junk;
-use crate::source::Source;
 use crate::zip::ZipArchive;
 use crate::{ArchiveEntry, ArchiveError};
 
 /// A format-agnostic archive handle.
 ///
-/// Created via [`Archive::open`], which auto-detects the source type
+/// Created via [`ArchiveCore::open`], which auto-detects the source type
 /// (local file or HTTP URL) and the archive format (ZIP, RAR, 7z, ...).
 ///
-/// This is the primary public API. CLI, UI, server, and dev code should
-/// all go through this type rather than wiring up low-level readers
-/// and format parsers manually.
-pub struct Archive {
+/// This is the primary public API for the core layer. The state layer
+/// (`archive-state`) wraps this type — products should interact with
+/// `archive_state::Archive`, not this type directly.
+pub struct ArchiveCore {
     inner: ArchiveInner,
 }
 
 /// Internal enum for format-specific archive implementations.
-/// Hidden from consumers — they only see `Archive`.
+/// Hidden from consumers — they only see `ArchiveCore`.
 enum ArchiveInner {
     Zip(ZipArchive<Source>),
     // Future: Rar(...), SevenZip(...), Tar(...)
 }
 
-impl Archive {
+impl ArchiveCore {
     /// Open an archive from a local path or URL.
     ///
     /// Auto-detects:
@@ -45,10 +45,10 @@ impl Archive {
     ///
     /// ```ignore
     /// // Local file
-    /// let archive = Archive::open("/path/to/file.zip").await?;
+    /// let archive = ArchiveCore::open("/path/to/file.zip").await?;
     ///
     /// // Cloud file (Dropbox, Drive, etc.)
-    /// let archive = Archive::open("https://dropbox.com/...?dl=1").await?;
+    /// let archive = ArchiveCore::open("https://dropbox.com/...?dl=1").await?;
     /// ```
     pub async fn open(source: &str) -> Result<Self, ArchiveError> {
         let reader = Source::detect(source);
