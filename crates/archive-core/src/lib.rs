@@ -5,6 +5,7 @@ mod entry;
 mod facade;
 pub mod io;
 pub mod junk;
+mod progress;
 pub mod zip;
 
 // Primary public API — use this (via archive-state in production code).
@@ -19,6 +20,9 @@ pub use codec::CompressionMethod;
 // Data types.
 pub use archive_error::{ArchiveError, PasswordDetectionMethod};
 pub use entry::ArchiveEntry;
+
+// Progress reporting + cancellation.
+pub use progress::ProgressReporter;
 
 // I/O building blocks (for power users / tests).
 pub use io::{HttpReadAt, LocalReadAt, ReadAt, ReadError, Source};
