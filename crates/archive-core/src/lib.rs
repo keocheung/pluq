@@ -17,10 +17,10 @@ pub use archive_reader::ArchiveReader;
 pub use codec::CompressionMethod;
 
 // Data types.
-pub use archive_error::ArchiveError;
+pub use archive_error::{ArchiveError, PasswordDetectionMethod};
 pub use entry::ArchiveEntry;
 
 // I/O building blocks (for power users / tests).
-pub use io::{HttpReadAt, LocalReadAt, ReadAt, Source};
+pub use io::{HttpReadAt, LocalReadAt, ReadAt, ReadError, Source};
 pub use zip::ZipArchive;
 pub use zip::ZipIndex;

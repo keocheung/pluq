@@ -86,3 +86,26 @@ impl ArchiveError {
         matches!(self, Self::UnsupportedMethod { .. })
     }
 }
+
+// ── Password detection context ────────────────────────────────────────────────
+
+/// How encryption was detected on an archive entry.
+///
+/// Carried in [`ArchiveError::WrongPassword`] (Step 3) to give the state layer
+/// and product enough context to build a precise user-facing message.
+///
+/// Different detection methods have different confidence levels:
+/// - `EarlyHeaderValidation` — near-certain (header check failed before any data read)
+/// - `CrcMismatch` — high confidence (decryption produced wrong output)
+/// - `DecompressionFailure` — moderate confidence (decrypt worked but decompressor choked)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // used in Step 3 when added to ArchiveError::WrongPassword
+pub enum PasswordDetectionMethod {
+    /// Encryption flag in the local file header was set and validated early,
+    /// before any decompression was attempted.
+    EarlyHeaderValidation,
+    /// Decryption produced bytes that failed the CRC-32 integrity check.
+    CrcMismatch,
+    /// Decryption appeared to succeed but the decompressor rejected the bitstream.
+    DecompressionFailure,
+}
