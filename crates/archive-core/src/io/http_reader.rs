@@ -6,7 +6,6 @@ use reqwest::{
 
 use super::ReadAt;
 use super::read_error::{NetworkPhase, ReadErrorKind, ReadFailure, ReadOperation, SourceInfo};
-use crate::ArchiveError;
 use crate::io::ReadError;
 
 /// A [`ReadAt`] backed by HTTP range requests.
@@ -48,8 +47,8 @@ impl HttpReadAt {
     }
 }
 
-/// Classify a `reqwest::Error` into a `ReadErrorKind`, then wrap it into `ArchiveError::Io`.
-fn classify_reqwest_error(e: reqwest::Error, url: &str, op: ReadOperation) -> ArchiveError {
+/// Classify a `reqwest::Error` into a [`ReadError`].
+fn classify_reqwest_error(e: reqwest::Error, url: &str, op: ReadOperation) -> ReadError {
     let kind = if e.is_timeout() {
         ReadErrorKind::NetworkTimeout {
             phase: NetworkPhase::Transfer,
@@ -66,7 +65,7 @@ fn classify_reqwest_error(e: reqwest::Error, url: &str, op: ReadOperation) -> Ar
         ReadErrorKind::NetworkReset
     };
 
-    ArchiveError::Io(ReadError::Failed(ReadFailure {
+    ReadError::Failed(Box::new(ReadFailure {
         source: SourceInfo::Http {
             url: url.to_string(),
         },
@@ -77,7 +76,7 @@ fn classify_reqwest_error(e: reqwest::Error, url: &str, op: ReadOperation) -> Ar
 }
 
 impl ReadAt for HttpReadAt {
-    async fn read_range(&self, offset: u64, len: u64) -> Result<Bytes, ArchiveError> {
+    async fn read_range(&self, offset: u64, len: u64) -> Result<Bytes, ReadError> {
         if len == 0 {
             return Ok(Bytes::new());
         }
@@ -94,7 +93,7 @@ impl ReadAt for HttpReadAt {
             .header(
                 RANGE,
                 HeaderValue::from_str(&range_value).map_err(|e| {
-                    ArchiveError::Io(ReadError::Failed(ReadFailure {
+                    ReadError::Failed(Box::new(ReadFailure {
                         source: SourceInfo::Http {
                             url: self.url.clone(),
                         },
@@ -118,13 +117,13 @@ impl ReadAt for HttpReadAt {
             }
             StatusCode::RANGE_NOT_SATISFIABLE => {
                 // Server told us the range is invalid — map to OutOfBounds.
-                Err(ArchiveError::Io(ReadError::OutOfBounds {
+                Err(ReadError::OutOfBounds {
                     offset,
                     len,
                     size: 0, // We don't know the real size from a 416 alone.
-                }))
+                })
             }
-            status => Err(ArchiveError::Io(ReadError::Failed(ReadFailure {
+            status => Err(ReadError::Failed(Box::new(ReadFailure {
                 source: SourceInfo::Http {
                     url: self.url.clone(),
                 },
@@ -139,7 +138,7 @@ impl ReadAt for HttpReadAt {
         }
     }
 
-    async fn size(&self) -> Result<u64, ArchiveError> {
+    async fn size(&self) -> Result<u64, ReadError> {
         let op = ReadOperation::SizeCheck;
 
         let response = self
@@ -154,7 +153,7 @@ impl ReadAt for HttpReadAt {
             .headers()
             .get(CONTENT_LENGTH)
             .ok_or_else(|| {
-                ArchiveError::Io(ReadError::Failed(ReadFailure {
+                ReadError::Failed(Box::new(ReadFailure {
                     source: SourceInfo::Http {
                         url: self.url.clone(),
                     },
@@ -165,7 +164,7 @@ impl ReadAt for HttpReadAt {
             })?
             .to_str()
             .map_err(|e| {
-                ArchiveError::Io(ReadError::Failed(ReadFailure {
+                ReadError::Failed(Box::new(ReadFailure {
                     source: SourceInfo::Http {
                         url: self.url.clone(),
                     },
@@ -176,7 +175,7 @@ impl ReadAt for HttpReadAt {
             })?
             .parse::<u64>()
             .map_err(|e| {
-                ArchiveError::Io(ReadError::Failed(ReadFailure {
+                ReadError::Failed(Box::new(ReadFailure {
                     source: SourceInfo::Http {
                         url: self.url.clone(),
                     },
@@ -245,8 +244,8 @@ mod tests {
         let err = reader.read_range(9999, 100).await.unwrap_err();
 
         assert!(
-            matches!(err, ArchiveError::Io(ReadError::OutOfBounds { .. })),
-            "expected Io(OutOfBounds), got: {err:?}"
+            matches!(err, ReadError::OutOfBounds { .. }),
+            "expected OutOfBounds, got: {err:?}"
         );
     }
 

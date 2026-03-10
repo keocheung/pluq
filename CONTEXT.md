@@ -3,8 +3,9 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 2 — Core engine: remaining formats + write support.
-* **Current Active Task:** SESSION_PLAN.md Step 4 — Change `ReadAt` trait to return `ReadError` directly instead of `ArchiveError` (format parsers will convert at their boundaries).
+* **Current Active Task:** SESSION_PLAN.md Step 5 — Streaming ReadAt (Update `ReadAt` trait to support stream-based reading).
 * **Latest Changes:**
+  * [2026-03-10] Gemini: **Step 4 complete** — Changed `ReadAt` trait to return `ReadError` directly. Updated `local_reader.rs`, `http_reader.rs`, and `source.rs` to match. Boxed `ReadFailure` inside `ReadError::Failed` to fix `result_large_err` clippy warnings. Updated `zip/parse.rs` to convert `ReadError` to `ArchiveError::Io` at call boundaries. All 31 tests pass, clippy is clean.
   * [2026-03-10] Gemini: **Step 3 complete** — Migrated `ArchiveError` to New Design per ERRORS.md §Tier 1. Rewrote variants entirely (added `UnsupportedFormat`, `UnsupportedFeature`, `CorruptHeader`, etc.). Wired `PasswordDetectionMethod` into `WrongPassword`. Fixed all usage sites in `local_reader.rs`, `http_reader.rs`, `zip/mod.rs`, `zip/index.rs`, and `codec/mod.rs`. Fixed test assertions. All 31 tests pass.
   * [2026-03-10] Gemini: **Step 2 complete** — Defined ReadError type hierarchy (additive). Created `io/read_error.rs` with `ReadError`, `ReadFailure`, `SourceInfo`, `ReadOperation`, `ReadErrorKind`, `NetworkPhase` + `Display`/`Error` impls. Added `PasswordDetectionMethod` to `archive_error.rs`. Re-exported both from `lib.rs`. All 31 tests still pass.
   * [2026-03-10] Gemini: **Step 1 complete** — File restructure + `Archive` → `ArchiveCore` rename. Moved `read_at.rs`, `local.rs`, `http.rs`, `source.rs` into new `crates/archive-core/src/io/` submodule (renamed to `read_at.rs`, `local_reader.rs`, `http_reader.rs`, `source.rs`). Renamed `archive.rs` → `facade.rs` (struct `Archive` → `ArchiveCore`). Renamed `error.rs` → `archive_error.rs`. Updated `lib.rs` with `pub mod io;` and new re-exports. Updated `archive-cli/src/main.rs` and `zip/mod.rs` import for `LocalReadAt`. All 31 tests pass.

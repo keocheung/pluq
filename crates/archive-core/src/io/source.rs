@@ -6,7 +6,7 @@
 use bytes::Bytes;
 
 use super::{HttpReadAt, LocalReadAt, ReadAt};
-use crate::ArchiveError;
+use crate::io::ReadError;
 
 /// An I/O source that can be either a local file or an HTTP URL.
 ///
@@ -38,14 +38,14 @@ impl Source {
 }
 
 impl ReadAt for Source {
-    async fn read_range(&self, offset: u64, len: u64) -> Result<Bytes, ArchiveError> {
+    async fn read_range(&self, offset: u64, len: u64) -> Result<Bytes, ReadError> {
         match self {
             Source::Local(r) => r.read_range(offset, len).await,
             Source::Http(r) => r.read_range(offset, len).await,
         }
     }
 
-    async fn size(&self) -> Result<u64, ArchiveError> {
+    async fn size(&self) -> Result<u64, ReadError> {
         match self {
             Source::Local(r) => r.size().await,
             Source::Http(r) => r.size().await,

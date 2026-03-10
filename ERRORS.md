@@ -60,7 +60,8 @@ The I/O layer's own error language. Returned by `ReadAt::read_range()` and `Read
 
 pub enum ReadError {
     /// An actual I/O failure — network or filesystem.
-    Failed(ReadFailure),
+    /// Boxed because ReadFailure is 144 bytes (keeps ReadError at 32 bytes on the stack).
+    Failed(Box<ReadFailure>),
 
     /// Opaque tunnel for decorator errors (Auth, Retry, Quota).
     /// Decorators inject their own boxed error types here.

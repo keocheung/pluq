@@ -54,7 +54,7 @@ impl ZipIndex {
             message: format!("failed to serialize index: {e}"),
         })?;
         std::fs::write(path.as_ref(), &json).map_err(|e| {
-            ArchiveError::Io(ReadError::Failed(ReadFailure {
+            ArchiveError::Io(ReadError::Failed(Box::new(ReadFailure {
                 source: SourceInfo::LocalFile {
                     path: path.as_ref().to_path_buf(),
                 },
@@ -66,7 +66,7 @@ impl ZipIndex {
                     os_code: e.raw_os_error(),
                 },
                 diagnostic: e.to_string(),
-            }))
+            })))
         })?;
         Ok(())
     }
@@ -74,7 +74,7 @@ impl ZipIndex {
     /// Load an index from a JSON file on disk.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, ArchiveError> {
         let json = std::fs::read_to_string(path.as_ref()).map_err(|e| {
-            ArchiveError::Io(ReadError::Failed(ReadFailure {
+            ArchiveError::Io(ReadError::Failed(Box::new(ReadFailure {
                 source: SourceInfo::LocalFile {
                     path: path.as_ref().to_path_buf(),
                 },
@@ -83,7 +83,7 @@ impl ZipIndex {
                     os_code: e.raw_os_error(),
                 },
                 diagnostic: e.to_string(),
-            }))
+            })))
         })?;
         let index: ZipIndex =
             serde_json::from_str(&json).map_err(|e| ArchiveError::InvalidFormat {

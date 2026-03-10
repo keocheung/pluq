@@ -14,10 +14,13 @@ use bytes::Bytes;
 /// - [`Failed`](Self::Failed): structured failure with source, operation, and kind context.
 /// - [`Transport`](Self::Transport): opaque decorator error forwarded blindly.
 /// - [`OutOfBounds`](Self::OutOfBounds): read range exceeds source size.
+///
+/// `Failed` is boxed so this enum stays small on the stack — `ReadFailure` holds
+/// several heap-allocated fields (`String`, `PathBuf`, `Vec`, `Bytes`).
 #[derive(Debug)]
 pub enum ReadError {
-    /// A structured I/O failure with full diagnostic context.
-    Failed(ReadFailure),
+    /// A structured I/O failure with source info, operation context, and error kind.
+    Failed(Box<ReadFailure>),
     /// An opaque error from a [`ReadAt`](super::ReadAt) decorator (e.g. auth, metering).
     ///
     /// Carried blindly through the layers — only the originating decorator can downcast it.

@@ -134,7 +134,7 @@ pub struct Eocd {
 /// locate the ZIP64 EOCD Locator (immediately before the standard EOCD) and read
 /// the ZIP64 EOCD Record to get the real 64-bit field values.
 pub async fn find_eocd(reader: &impl ReadAt) -> Result<Eocd, ArchiveError> {
-    let file_size = reader.size().await?;
+    let file_size = reader.size().await.map_err(ArchiveError::Io)?;
 
     if file_size < EOCD_MIN_SIZE as u64 {
         return Err(ArchiveError::InvalidFormat {
@@ -145,7 +145,10 @@ pub async fn find_eocd(reader: &impl ReadAt) -> Result<Eocd, ArchiveError> {
     // Read the tail of the file (up to 65,557 bytes) to find the EOCD.
     let search_len = file_size.min(EOCD_SEARCH_LEN);
     let search_offset = file_size - search_len;
-    let tail = reader.read_range(search_offset, search_len).await?;
+    let tail = reader
+        .read_range(search_offset, search_len)
+        .await
+        .map_err(ArchiveError::Io)?;
 
     // Scan backwards for the standard EOCD signature.
     let tail_len = tail.len();
@@ -212,7 +215,8 @@ pub async fn find_eocd(reader: &impl ReadAt) -> Result<Eocd, ArchiveError> {
             // The ZIP64 EOCD Record is outside our tail buffer — do an extra read.
             let rec = reader
                 .read_range(eocd64_abs_offset, EOCD64_RECORD_MIN_SIZE as u64)
-                .await?;
+                .await
+                .map_err(ArchiveError::Io)?;
 
             if read_u32_le(&rec, 0) != EOCD64_RECORD_SIGNATURE {
                 return Err(ArchiveError::InvalidFormat {
@@ -255,7 +259,10 @@ pub async fn parse_central_directory(
     reader: &impl ReadAt,
     eocd: &Eocd,
 ) -> Result<(Vec<ArchiveEntry>, Vec<ZipEntryLocation>), ArchiveError> {
-    let cd_bytes = reader.read_range(eocd.cd_offset, eocd.cd_size).await?;
+    let cd_bytes = reader
+        .read_range(eocd.cd_offset, eocd.cd_size)
+        .await
+        .map_err(ArchiveError::Io)?;
 
     let capacity = eocd.entry_count.min(65536) as usize;
     let mut entries: Vec<ArchiveEntry> = Vec::with_capacity(capacity);
@@ -478,7 +485,10 @@ pub async fn read_local_file_data(
     compressed_size: u64,
 ) -> Result<Bytes, ArchiveError> {
     // Read the fixed-size part of the Local File Header (30 bytes).
-    let lfh = reader.read_range(location.offset, 30).await?;
+    let lfh = reader
+        .read_range(location.offset, 30)
+        .await
+        .map_err(ArchiveError::Io)?;
 
     let sig = read_u32_le(&lfh, 0);
     if sig != LOCAL_FILE_HEADER_SIGNATURE {
@@ -497,7 +507,10 @@ pub async fn read_local_file_data(
         return Ok(Bytes::new());
     }
 
-    reader.read_range(data_offset, compressed_size).await
+    reader
+        .read_range(data_offset, compressed_size)
+        .await
+        .map_err(ArchiveError::Io)
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
