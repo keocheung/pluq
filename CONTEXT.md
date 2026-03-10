@@ -3,8 +3,8 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 2 — Core engine: remaining formats + write support.
-* **Current Active Task:** SESSION_PLAN.md Step 9 — archive-state: Archive Handle + EntryTree + ArchiveCache.
-* **Baseline:** 50 tests pass, clippy clean. SESSION_PLAN.md Steps 1–8 complete.
+* **Current Active Task:** SESSION_PLAN.md Step 10 — CLI Migration to State Layer.
+* **Baseline:** 64 tests pass, clippy clean. SESSION_PLAN.md Steps 1–9 complete.
 
 ---
 
