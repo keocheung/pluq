@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-use archive_core::ArchiveCore;
+use archive_state::Archive;
 
 /// Archive Sniper — surgical archive extraction from local or cloud storage.
 #[derive(Parser)]
@@ -51,7 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Command::List { source, all } => {
-            let archive = ArchiveCore::open(&source).await?;
+            let archive = Archive::open(&source).await?;
 
             let entries: Vec<_> = if all {
                 archive.entries().iter().collect()
@@ -91,7 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             entry,
             output,
         } => {
-            let archive = ArchiveCore::open(&source).await?;
+            let archive = Archive::open(&source).await?;
 
             let found = archive
                 .entries()
@@ -117,7 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         Command::Test { source, all } => {
-            let archive = ArchiveCore::open(&source).await?;
+            let archive = Archive::open(&source).await?;
 
             let entries: Vec<_> = if all {
                 archive.entries().iter().collect()

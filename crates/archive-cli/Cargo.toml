@@ -4,6 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-archive-core = { path = "../archive-core" }
+archive-state = { path = "../archive-state" }
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
