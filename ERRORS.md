@@ -50,7 +50,7 @@
 
 ## Tier 0: `ReadError` (I/O Layer)
 
-The I/O layer's own error language. Returned by `ReadAt::read_range()` and `ReadAt::size()`. Covers both local filesystem and HTTP failures. Designed for two consumers:
+The I/O layer's own error language. Returned by all `ReadAt` methods (`read_range()`, `read_stream()`, `size()`). Covers both local filesystem and HTTP failures. Designed for two consumers:
 
 1. **Decorators** — need structured `ReadErrorKind` to route programmatically (retry? refresh token? give up?)
 2. **Users** (via products) — need `source`, `operation`, and `kind` to generate helpful messages
@@ -220,12 +220,13 @@ fn retry_delay(kind: &ReadErrorKind) -> Duration {
 
 ```rust
 // AuthReadAt — intercept 401, attempt token refresh.
+// Shows read_range; read_stream follows the same pattern.
 impl ReadAt for AuthReadAt {
     async fn read_range(&self, offset: u64, len: u64)
-        -> Result<Box<dyn AsyncRead + Send + Unpin>, ReadError>
+        -> Result<Bytes, ReadError>
     {
         match self.inner.read_range(offset, len).await {
-            Ok(stream) => Ok(stream),
+            Ok(bytes) => Ok(bytes),
             Err(ReadError::Failed(ref f))
                 if matches!(f.kind, ReadErrorKind::HttpStatus { code: 401, .. }) =>
             {
@@ -241,6 +242,31 @@ impl ReadAt for AuthReadAt {
                 }
             }
             Err(other) => Err(other),  // pass through
+        }
+    }
+
+    async fn read_stream(&self, offset: u64, len: u64)
+        -> Result<Box<dyn AsyncRead + Send + Unpin>, ReadError>
+    {
+        // Same 401-intercept pattern as read_range.
+        // Retries the connection; once a stream is returned, mid-stream errors
+        // are the caller's problem (retry at that level is not possible).
+        match self.inner.read_stream(offset, len).await {
+            Ok(stream) => Ok(stream),
+            Err(ReadError::Failed(ref f))
+                if matches!(f.kind, ReadErrorKind::HttpStatus { code: 401, .. }) =>
+            {
+                match self.token_provider.refresh().await {
+                    Ok(new_token) => {
+                        self.update_headers(new_token);
+                        self.inner.read_stream(offset, len).await
+                    }
+                    Err(e) => Err(ReadError::Transport(
+                        Box::new(AuthError::RefreshFailed { detail: e.to_string() })
+                    )),
+                }
+            }
+            Err(other) => Err(other),
         }
     }
 }
@@ -378,8 +404,8 @@ pub enum ArchiveError {
 **What format parsers do with `ReadError` from `ReadAt` calls:**
 
 ```rust
-// In a format parser:
-let header_bytes = self.reader.read_bytes(offset, len).await
+// In a format parser (header reads use read_range → Bytes):
+let header_bytes = self.reader.read_range(offset, len).await
     .map_err(|e| match e {
         ReadError::OutOfBounds { offset, len, size } =>
             ArchiveError::CorruptHeader {
@@ -388,6 +414,11 @@ let header_bytes = self.reader.read_bytes(offset, len).await
             },
         other => ArchiveError::Io(other),  // everything else wraps directly
     })?;
+
+// For entry data extraction, use read_stream → AsyncRead:
+let stream = self.reader.read_stream(data_offset, compressed_size).await
+    .map_err(ArchiveError::Io)?;
+// stream is piped through SyncIoBridge → decoder → sink (see ARCHITECTURE.md § Async/Sync Boundary)
 ```
 
 ---
@@ -704,7 +735,7 @@ fn open_cloud_archive(&self, url: &str) -> Result<Archive, ServerError> {
 ```
 
 ```
-What core sees:          impl ReadAt ──── "give me a stream"
+What core sees:          impl ReadAt ──── "give me bytes / give me a stream"
 What's actually there:   MeteredReadAt → RetryReadAt → AuthReadAt → HttpReadAt
                          (server)        (retry crate)  (auth crate)  (core)
 

@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt};
 
 use super::ReadAt;
 use super::read_error::{ReadErrorKind, ReadFailure, ReadOperation, SourceInfo};
@@ -9,8 +9,8 @@ use crate::io::ReadError;
 
 /// A [`ReadAt`] backed by a local file on disk.
 ///
-/// Each call to [`read_range`](ReadAt::read_range) opens, seeks, and reads
-/// independently — no long-lived file handle is held.
+/// Each call to [`read_range`](ReadAt::read_range) or [`read_stream`](ReadAt::read_stream)
+/// opens the file fresh — no long-lived handle is held between calls.
 pub struct LocalReadAt {
     path: PathBuf,
 }
@@ -40,6 +40,10 @@ fn io_err_to_read(e: std::io::Error, path: &Path, op: ReadOperation) -> ReadErro
 
 impl ReadAt for LocalReadAt {
     async fn read_range(&self, offset: u64, len: u64) -> Result<Bytes, ReadError> {
+        if len == 0 {
+            return Ok(Bytes::new());
+        }
+
         let mut file = tokio::fs::File::open(&self.path)
             .await
             .map_err(|e| io_err_to_read(e, &self.path, ReadOperation::Open))?;
@@ -58,10 +62,6 @@ impl ReadAt for LocalReadAt {
             });
         }
 
-        if len == 0 {
-            return Ok(Bytes::new());
-        }
-
         file.seek(std::io::SeekFrom::Start(offset))
             .await
             .map_err(|e| io_err_to_read(e, &self.path, ReadOperation::ReadRange { offset, len }))?;
@@ -72,6 +72,42 @@ impl ReadAt for LocalReadAt {
             .map_err(|e| io_err_to_read(e, &self.path, ReadOperation::ReadRange { offset, len }))?;
 
         Ok(Bytes::from(buf))
+    }
+
+    async fn read_stream(
+        &self,
+        offset: u64,
+        len: u64,
+    ) -> Result<Box<dyn AsyncRead + Send + Unpin>, ReadError> {
+        if len == 0 {
+            return Ok(Box::new(tokio::io::empty()) as Box<dyn AsyncRead + Send + Unpin>);
+        }
+
+        let mut file = tokio::fs::File::open(&self.path)
+            .await
+            .map_err(|e| io_err_to_read(e, &self.path, ReadOperation::Open))?;
+
+        let file_size = file
+            .metadata()
+            .await
+            .map_err(|e| io_err_to_read(e, &self.path, ReadOperation::SizeCheck))?
+            .len();
+
+        if offset.saturating_add(len) > file_size {
+            return Err(ReadError::OutOfBounds {
+                offset,
+                len,
+                size: file_size,
+            });
+        }
+
+        file.seek(std::io::SeekFrom::Start(offset))
+            .await
+            .map_err(|e| io_err_to_read(e, &self.path, ReadOperation::ReadRange { offset, len }))?;
+
+        // Take exactly `len` bytes — prevents the reader from consuming beyond
+        // the requested range, even if the file is longer.
+        Ok(Box::new(file.take(len)) as Box<dyn AsyncRead + Send + Unpin>)
     }
 
     async fn size(&self) -> Result<u64, ReadError> {
@@ -152,5 +188,72 @@ mod tests {
         let reader = LocalReadAt::new(f.path());
 
         assert_eq!(reader.size().await.unwrap(), 10);
+    }
+
+    // ── read_stream tests ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn stream_read_matches_range_read() {
+        let data = b"streaming test content for local reader";
+        let f = temp_file(data);
+        let reader = LocalReadAt::new(f.path());
+
+        // read_range gives us Bytes
+        let buffered = reader.read_range(0, data.len() as u64).await.unwrap();
+
+        // read_stream should give the same bytes when collected
+        let mut stream = reader.read_stream(0, data.len() as u64).await.unwrap();
+        let mut collected = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut collected)
+            .await
+            .unwrap();
+
+        assert_eq!(buffered.as_ref(), collected.as_slice());
+    }
+
+    #[tokio::test]
+    async fn stream_read_with_offset() {
+        let data = b"hello archive sniper";
+        let f = temp_file(data);
+        let reader = LocalReadAt::new(f.path());
+
+        let mut stream = reader.read_stream(6, 7).await.unwrap();
+        let mut collected = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut collected)
+            .await
+            .unwrap();
+
+        assert_eq!(collected, b"archive");
+    }
+
+    #[tokio::test]
+    async fn stream_out_of_bounds_returns_error() {
+        let data = b"short";
+        let f = temp_file(data);
+        let reader = LocalReadAt::new(f.path());
+
+        let err = reader
+            .read_stream(0, data.len() as u64 + 1)
+            .await
+            .map(|_| ())
+            .unwrap_err();
+
+        assert!(
+            matches!(err, ReadError::OutOfBounds { .. }),
+            "expected OutOfBounds, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_zero_bytes_is_empty() {
+        let f = temp_file(b"something");
+        let reader = LocalReadAt::new(f.path());
+
+        let mut stream = reader.read_stream(0, 0).await.unwrap();
+        let mut collected = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut collected)
+            .await
+            .unwrap();
+        assert!(collected.is_empty());
     }
 }

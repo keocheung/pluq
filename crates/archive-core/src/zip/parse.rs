@@ -341,8 +341,8 @@ pub async fn parse_central_directory(
             is_directory,
             is_encrypted,
             modified_at,
-            compression_method,
             index,
+            compression_method,
         });
 
         locations.push(ZipEntryLocation {

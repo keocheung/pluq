@@ -4,6 +4,7 @@
 //! `ReadAt` implementations.
 
 use bytes::Bytes;
+use tokio::io::AsyncRead;
 
 use super::{HttpReadAt, LocalReadAt, ReadAt};
 use crate::io::ReadError;
@@ -42,6 +43,17 @@ impl ReadAt for Source {
         match self {
             Source::Local(r) => r.read_range(offset, len).await,
             Source::Http(r) => r.read_range(offset, len).await,
+        }
+    }
+
+    async fn read_stream(
+        &self,
+        offset: u64,
+        len: u64,
+    ) -> Result<Box<dyn AsyncRead + Send + Unpin>, ReadError> {
+        match self {
+            Source::Local(r) => r.read_stream(offset, len).await,
+            Source::Http(r) => r.read_stream(offset, len).await,
         }
     }
 

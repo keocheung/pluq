@@ -71,7 +71,7 @@ Layer 0: Raw bytes (disk, network, memory)
 1. Nothing leaks through boundaries — products never see `ArchiveCore`, `ZipArchive`, flate2, LocalReadAt, or ArchiveError. Products see `Archive` (state layer handle) + `StateError` + their own product-level error types.
 2. Codec layer is shared — Deflate lives once, all format parsers use the same instance
 3. ArchiveEntry has zero format-specific fields — format parsers hold location details privately
-4. **Streaming by default** — `ReadAt::read_range()` returns `AsyncRead`, not `Bytes`. `ArchiveReader::extract()` writes to a sink, not returns a buffer. No layer may eagerly buffer an entire entry — a 4 GB video or a 50 GB cloud archive cannot live in RAM. Convenience methods (`read_bytes()`, `extract_to_bytes()`) exist for small, bounded reads (headers, small entries).
+4. **Right tool for the job** — `ReadAt` has two read methods: `read_range()` returns `Bytes` (for bounded header/metadata reads), `read_stream()` returns `AsyncRead` (for large entry data extraction). Parsers use `read_range` for small reads. Extraction uses `read_stream` so a 4 GB entry never lives in RAM. `ArchiveReader::extract()` writes to a sink, not returns a buffer. Convenience methods (`extract_to_bytes()`) exist for small entries and tests.
 5. **Core is stateless** — Layers 0–3 hold no session state, no caches, no auth tokens. Universal state (cache, session, entry tree) lives in the state layer (Layer 3.5). Product-specific state (auth tokens, quota counters, billing) lives in horizontal crates composed at the product level (Layer 4). See `ERRORS.md` for how errors flow across layers.
 6. **I/O has its own error language** — `ReadAt` returns `ReadError` (not `ArchiveError`). `ReadError` is a standalone type covering both local filesystem and HTTP failures, with structured context for decorator routing and user-facing messages. Format parsers convert `ReadError → ArchiveError` at the boundary. See `ERRORS.md` § ReadError.
 
@@ -83,41 +83,33 @@ Layer 0: Raw bytes (disk, network, memory)
 
 ```rust
 pub trait ReadAt: Send + Sync {
-    /// Stream `len` bytes starting at `offset`. Returns a reader, not a buffer.
-    /// Callers decide whether to collect into memory or pipe to a sink.
+    /// Read `len` bytes starting at `offset` into memory.
+    /// Used by parsers for bounded header/metadata reads (EOCD, Central Directory, LFH).
     fn read_range(&self, offset: u64, len: u64)
+        -> impl Future<Output = Result<Bytes, ReadError>> + Send;
+
+    /// Stream `len` bytes starting at `offset` as an async reader.
+    /// Used by extraction for potentially large entry data (compressed file content).
+    /// Both production impls (LocalReadAt, HttpReadAt) must implement this — no default.
+    fn read_stream(&self, offset: u64, len: u64)
         -> impl Future<Output = Result<Box<dyn AsyncRead + Send + Unpin>, ReadError>> + Send;
 
+    /// Total size of the underlying source in bytes.
     fn size(&self)
         -> impl Future<Output = Result<u64, ReadError>> + Send;
 }
 ```
 
-**Streaming by default.** `read_range` returns an `AsyncRead` stream, not `Bytes`. For HTTP, this maps directly to a streaming `reqwest` response body — zero buffering. For a 4 GB stored ZIP entry, the HTTP response streams through the decompressor into the output file with bounded memory. The caller never holds the entire payload in RAM.
+**Two methods, two jobs.** `read_range` returns `Bytes` — simple, direct, what parsers need for small bounded reads (headers are always < 1 MiB). `read_stream` returns an `AsyncRead` — what extraction needs for potentially huge entry data. A 4 GB stored ZIP entry streams through the decompressor into the output file with bounded memory. The caller never holds the entire payload in RAM.
 
 **Returns `ReadError`, not `ArchiveError`.** The I/O layer has its own error vocabulary covering both local and remote failures, with structured context for decorator routing and user-facing messages. See § ReadError below.
 
-**Convenience for small reads.** Header parsing needs small bounded reads (EOCD, central directory — kilobytes). A blanket extension trait collects a stream into memory:
+Format parsers use `read_range()` for headers and `read_stream()` for entry data extraction.
 
-```rust
-pub trait ReadAtExt: ReadAt {
-    /// Collect a bounded range into memory. Use for headers and metadata only.
-    async fn read_bytes(&self, offset: u64, len: u64) -> Result<Bytes, ReadError> {
-        let mut reader = self.read_range(offset, len).await?;
-        let mut buf = Vec::with_capacity(len as usize);
-        reader.read_to_end(&mut buf).await.map_err(/* wrap as ReadError */)?;
-        Ok(Bytes::from(buf))
-    }
-}
-impl<T: ReadAt> ReadAtExt for T {}
-```
-
-Format parsers use `read_bytes()` for headers and `read_range()` for entry data extraction.
-
-**Implementations:**
-- `LocalReadAt` — opens file, seeks, returns a bounded `AsyncRead` over the file handle
-- `HttpReadAt` — HTTP Range request, returns the response body stream directly (zero copy)
-- `Source` enum — static dispatch over Local/Http (no vtables)
+**Implementations (both methods required, no defaults):**
+- `LocalReadAt` — `read_range`: opens file, seeks, reads into buffer. `read_stream`: opens file, seeks, returns `file.take(len)` (bounded `AsyncRead` over the file handle).
+- `HttpReadAt` — `read_range`: HTTP Range request, collects response via `.bytes()`. `read_stream`: HTTP Range request, returns the response body stream directly via `StreamReader` (zero copy).
+- `Source` enum — static dispatch over Local/Http (no vtables), delegates both methods.
 - `MultiVolumeReadAt` [future] — joins multiple files into one virtual ReadAt
   - User passes first volume (e.g., `archive.7z.001`)
   - I/O layer discovers siblings by naming convention (`.002`, `.003`, ...)
@@ -138,8 +130,8 @@ See `ERRORS.md` § ReadError for the full type definitions. Summary of the desig
 ```rust
 pub enum ReadError {
     /// An actual I/O failure — network or filesystem.
-    /// Carries full context: which source, what operation, structured reason, raw diagnostic.
-    Failed(ReadFailure),
+    /// Boxed because ReadFailure is 144 bytes (keeps ReadError at 32 bytes on the stack).
+    Failed(Box<ReadFailure>),
 
     /// Opaque tunnel for decorator errors (Auth, Retry, Quota).
     /// Decorators inject here. Core carries blindly. Products open and downcast.
@@ -171,7 +163,7 @@ pub struct ReadFailure {
 
 **Request coalescing.** If the format parser requests two ranges within 64 KB of each other, merge them into one HTTP Range request. Downloading 64 KB of intermediate "gap" bytes is faster than paying 150 ms of latency for a second request.
 
-**Core's `HttpReadAt` is stateless and dumb.** It accepts optional static headers (for pre-authenticated requests), makes one Range request, returns the response body as a streaming `AsyncRead`. It does NOT handle auth refresh, retries, or rate limits — those are product-level concerns handled via `ReadAt` decorators from horizontal crates (see `ERRORS.md`). Errors are returned as structured `ReadError` variants (`HttpStatus`, `NetworkTimeout`, `RangeNotSupported`, etc.) — never as raw `reqwest::Error`.
+**Core's `HttpReadAt` is stateless and dumb.** It accepts optional static headers (for pre-authenticated requests), makes one Range request, returns either buffered `Bytes` (`read_range`) or the response body as a streaming `AsyncRead` (`read_stream`). It does NOT handle auth refresh, retries, or rate limits — those are product-level concerns handled via `ReadAt` decorators from horizontal crates (see `ERRORS.md`). Errors are returned as structured `ReadError` variants (`HttpStatus`, `NetworkTimeout`, `RangeNotSupported`, etc.) — never as raw `reqwest::Error`.
 
 **Auth, retry, and rate-limit handling** are implemented as `ReadAt` decorators from horizontal crates (e.g., `archive-auth`, `archive-retry`), assembled by the product (Layer 4) and passed down through the state layer into core. Core receives a composed `ReadAt` and is unaware of the decorator stack. See `ERRORS.md` § Decorator Construction.
 
@@ -319,12 +311,12 @@ For write, the simple linear path covers all real-world cases: filter → compre
 
 ### Async/Sync Boundary (spawn_blocking)
 
-I/O is async (ReadAt returns futures and `AsyncRead` streams).
+I/O is async (ReadAt returns futures). Header reads use `read_range` (returns `Bytes`). Entry data extraction uses `read_stream` (returns `AsyncRead`).
 Decompression is CPU-bound (heavy math, holds a thread) — it MUST run in `tokio::task::spawn_blocking`.
 
-**Pattern for extraction (streaming):**
+**Pattern for extraction (streaming via `read_stream`):**
 ```
-1. async: read_range(offset, len) → Box<dyn AsyncRead>   // streaming HTTP body or file read
+1. async: read_stream(offset, len) → Box<dyn AsyncRead>  // streaming HTTP body or file read
 2. bridge: SyncIoBridge wraps AsyncRead into sync Read    // for the decompressor
 3. spawn_blocking:                                        // CPU-bound
      decoder = build_decoder(method, bridged_reader)
@@ -334,7 +326,7 @@ Decompression is CPU-bound (heavy math, holds a thread) — it MUST run in `toki
 
 The decompressor reads incrementally from the bridged stream. The sink receives decompressed chunks as they're produced. At no point is the entire compressed or decompressed payload held in memory — even for a 4 GB entry.
 
-**For small header reads** (EOCD, central directory), format parsers use `read_bytes()` which collects a bounded range into `Bytes`. These are always small (< 1 MiB) and safe to buffer.
+**For header reads** (EOCD, central directory, local file headers), format parsers use `read_range()` which returns `Bytes` directly. These are always small (< 1 MiB) and safe to buffer.
 
 **Key difference from zesven's model:** Zesven calls `read_to_end()` and pulls the entire archive into RAM before parsing. We fetch exact byte ranges and stream them through the pipeline.
 
@@ -498,8 +490,8 @@ BCJ2 is structurally different from all other filters. It has **4 input streams*
 
 When extracting from a BCJ2 folder:
 1. Check `folder.uses_bcj2()` — if true, use the BCJ2-specific decoder path
-2. Issue up to 4 separate `read_range()` calls (one per pack stream) — ideally in parallel since ReadAt is stateless
-3. Pass all 4 data blobs to the BCJ2 decoder
+2. Issue up to 4 separate `read_stream()` calls (one per pack stream) — ideally in parallel since ReadAt is stateless
+3. Pipe all 4 streams through the BCJ2 decoder
 
 The ReadAt interface does NOT need to change. This is a format-parser concern, not an I/O concern.
 
@@ -584,7 +576,7 @@ pub struct MeteredReadAt<R: ReadAt> {
     bytes_read: Arc<AtomicU64>,
 }
 ```
-- Wraps `HttpReadAt` (or any cloud source) — counts bytes in `read_range()`
+- Wraps `HttpReadAt` (or any cloud source) — counts bytes in `read_range()` and `read_stream()`
 - `bytes_read.load()` at end of operation = billable amount
 - Per-operation accounting (each extract/list call gets a fresh meter or an operation ID)
 - Only the server product uses this. Client apps don't meter.

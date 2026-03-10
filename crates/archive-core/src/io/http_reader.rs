@@ -1,8 +1,11 @@
 use bytes::Bytes;
+use futures_util::TryStreamExt;
 use reqwest::{
     Client, StatusCode,
     header::{CONTENT_LENGTH, HeaderMap, HeaderValue, RANGE},
 };
+use tokio::io::AsyncRead;
+use tokio_util::io::StreamReader;
 
 use super::ReadAt;
 use super::read_error::{NetworkPhase, ReadErrorKind, ReadFailure, ReadOperation, SourceInfo};
@@ -11,8 +14,11 @@ use crate::io::ReadError;
 /// A [`ReadAt`] backed by HTTP range requests.
 ///
 /// Each call to [`read_range`](ReadAt::read_range) sends a GET with a
-/// `Range: bytes=start-end` header.  The server **must** support range
-/// requests (respond with `206 Partial Content`).
+/// `Range` header and collects the full response body into `Bytes`.
+///
+/// Each call to [`read_stream`](ReadAt::read_stream) sends the same GET
+/// but returns the response body as a streaming [`AsyncRead`] — zero-copy
+/// for large entry data extraction.
 ///
 /// An optional set of extra headers can be injected at construction time
 /// (e.g. `Authorization: Bearer <token>` for cloud storage APIs).
@@ -75,67 +81,94 @@ fn classify_reqwest_error(e: reqwest::Error, url: &str, op: ReadOperation) -> Re
     }))
 }
 
+/// Build and send a Range request, returning the in-flight response.
+/// Used by both `read_range` (which collects) and `read_stream` (which streams).
+async fn send_range_request(
+    client: &Client,
+    url: &str,
+    extra_headers: &HeaderMap,
+    offset: u64,
+    len: u64,
+) -> Result<reqwest::Response, ReadError> {
+    let range_end = offset + len - 1;
+    let range_value = format!("bytes={offset}-{range_end}");
+    let op = ReadOperation::ReadRange { offset, len };
+
+    let response = client
+        .get(url)
+        .headers(extra_headers.clone())
+        .header(
+            RANGE,
+            HeaderValue::from_str(&range_value).map_err(|e| {
+                ReadError::Failed(Box::new(ReadFailure {
+                    source: SourceInfo::Http { url: url.to_string() },
+                    operation: op.clone(),
+                    kind: ReadErrorKind::NetworkReset,
+                    diagnostic: format!("invalid range header: {e}"),
+                }))
+            })?,
+        )
+        .send()
+        .await
+        .map_err(|e| classify_reqwest_error(e, url, op.clone()))?;
+
+    match response.status() {
+        StatusCode::PARTIAL_CONTENT => Ok(response),
+        StatusCode::RANGE_NOT_SATISFIABLE => Err(ReadError::OutOfBounds {
+            offset,
+            len,
+            size: 0,
+        }),
+        status => Err(ReadError::Failed(Box::new(ReadFailure {
+            source: SourceInfo::Http { url: url.to_string() },
+            operation: op,
+            kind: ReadErrorKind::HttpStatus {
+                code: status.as_u16(),
+                headers: vec![],
+                body: None,
+            },
+            diagnostic: format!("unexpected HTTP status {status} for range request"),
+        }))),
+    }
+}
+
 impl ReadAt for HttpReadAt {
     async fn read_range(&self, offset: u64, len: u64) -> Result<Bytes, ReadError> {
         if len == 0 {
             return Ok(Bytes::new());
         }
 
-        // Range header is inclusive on both ends: "bytes=0-9" returns 10 bytes.
-        let range_end = offset + len - 1;
-        let range_value = format!("bytes={offset}-{range_end}");
         let op = ReadOperation::ReadRange { offset, len };
+        let response =
+            send_range_request(&self.client, &self.url, &self.extra_headers, offset, len).await?;
 
-        let response = self
-            .client
-            .get(&self.url)
-            .headers(self.extra_headers.clone())
-            .header(
-                RANGE,
-                HeaderValue::from_str(&range_value).map_err(|e| {
-                    ReadError::Failed(Box::new(ReadFailure {
-                        source: SourceInfo::Http {
-                            url: self.url.clone(),
-                        },
-                        operation: op.clone(),
-                        kind: ReadErrorKind::NetworkReset,
-                        diagnostic: format!("invalid range header: {e}"),
-                    }))
-                })?,
-            )
-            .send()
+        let body = response
+            .bytes()
             .await
-            .map_err(|e| classify_reqwest_error(e, &self.url, op.clone()))?;
+            .map_err(|e| classify_reqwest_error(e, &self.url, op))?;
 
-        match response.status() {
-            StatusCode::PARTIAL_CONTENT => {
-                let body = response
-                    .bytes()
-                    .await
-                    .map_err(|e| classify_reqwest_error(e, &self.url, op))?;
-                Ok(body)
-            }
-            StatusCode::RANGE_NOT_SATISFIABLE => {
-                // Server told us the range is invalid — map to OutOfBounds.
-                Err(ReadError::OutOfBounds {
-                    offset,
-                    len,
-                    size: 0, // We don't know the real size from a 416 alone.
-                })
-            }
-            status => Err(ReadError::Failed(Box::new(ReadFailure {
-                source: SourceInfo::Http {
-                    url: self.url.clone(),
-                },
-                operation: op,
-                kind: ReadErrorKind::HttpStatus {
-                    code: status.as_u16(),
-                    headers: vec![],
-                    body: None,
-                },
-                diagnostic: format!("unexpected HTTP status {status} for range request"),
-            }))),
+        Ok(body)
+    }
+
+    async fn read_stream(
+        &self,
+        offset: u64,
+        len: u64,
+    ) -> Result<Box<dyn AsyncRead + Send + Unpin>, ReadError> {
+        if len == 0 {
+            return Ok(Box::new(tokio::io::empty()) as Box<dyn AsyncRead + Send + Unpin>);
         }
+
+        let response =
+            send_range_request(&self.client, &self.url, &self.extra_headers, offset, len).await?;
+
+        // Wrap the response bytes_stream into an AsyncRead — zero buffering.
+        let stream = response
+            .bytes_stream()
+            .map_err(std::io::Error::other);
+        let async_read = StreamReader::new(stream);
+
+        Ok(Box::new(async_read) as Box<dyn AsyncRead + Send + Unpin>)
     }
 
     async fn size(&self) -> Result<u64, ReadError> {
@@ -154,9 +187,7 @@ impl ReadAt for HttpReadAt {
             .get(CONTENT_LENGTH)
             .ok_or_else(|| {
                 ReadError::Failed(Box::new(ReadFailure {
-                    source: SourceInfo::Http {
-                        url: self.url.clone(),
-                    },
+                    source: SourceInfo::Http { url: self.url.clone() },
                     operation: op.clone(),
                     kind: ReadErrorKind::RangeNotSupported,
                     diagnostic: "server did not return Content-Length header".into(),
@@ -165,9 +196,7 @@ impl ReadAt for HttpReadAt {
             .to_str()
             .map_err(|e| {
                 ReadError::Failed(Box::new(ReadFailure {
-                    source: SourceInfo::Http {
-                        url: self.url.clone(),
-                    },
+                    source: SourceInfo::Http { url: self.url.clone() },
                     operation: op.clone(),
                     kind: ReadErrorKind::RangeNotSupported,
                     diagnostic: format!("invalid Content-Length: {e}"),
@@ -176,9 +205,7 @@ impl ReadAt for HttpReadAt {
             .parse::<u64>()
             .map_err(|e| {
                 ReadError::Failed(Box::new(ReadFailure {
-                    source: SourceInfo::Http {
-                        url: self.url.clone(),
-                    },
+                    source: SourceInfo::Http { url: self.url.clone() },
                     operation: op,
                     kind: ReadErrorKind::RangeNotSupported,
                     diagnostic: format!("Content-Length not a number: {e}"),
@@ -191,6 +218,7 @@ impl ReadAt for HttpReadAt {
 
 #[cfg(test)]
 mod tests {
+    use tokio::io::AsyncReadExt;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{header, method},
@@ -203,12 +231,9 @@ mod tests {
         let server = MockServer::start().await;
         let full_data = b"hello archive sniper over http";
 
-        // Mock: GET with Range header → 206 + slice of data
         Mock::given(method("GET"))
             .and(header("range", "bytes=6-12"))
-            .respond_with(
-                ResponseTemplate::new(206).set_body_bytes(&full_data[6..13]), // "archive"
-            )
+            .respond_with(ResponseTemplate::new(206).set_body_bytes(&full_data[6..13]))
             .mount(&server)
             .await;
 
@@ -216,6 +241,13 @@ mod tests {
         let result = reader.read_range(6, 7).await.unwrap();
 
         assert_eq!(result.as_ref(), b"archive");
+    }
+
+    #[tokio::test]
+    async fn range_read_zero_length_returns_empty() {
+        let reader = HttpReadAt::new("http://localhost:1", Client::new());
+        let result = reader.read_range(0, 0).await.unwrap();
+        assert!(result.is_empty());
     }
 
     #[tokio::test]
@@ -250,14 +282,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zero_length_read_returns_empty() {
-        // Should not even hit the server.
-        let reader = HttpReadAt::new("http://localhost:1", Client::new());
-        let result = reader.read_range(0, 0).await.unwrap();
-        assert!(result.is_empty());
-    }
-
-    #[tokio::test]
     async fn extra_headers_are_sent() {
         let server = MockServer::start().await;
 
@@ -275,8 +299,55 @@ mod tests {
         );
 
         let reader = HttpReadAt::new(server.uri(), Client::new()).with_headers(auth_headers);
-
         let result = reader.read_range(0, 4).await.unwrap();
         assert_eq!(result.as_ref(), b"test");
+    }
+
+    // ── read_stream tests ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn stream_read_returns_correct_bytes() {
+        let server = MockServer::start().await;
+        let full_data = b"hello archive sniper over http";
+
+        Mock::given(method("GET"))
+            .and(header("range", "bytes=6-12"))
+            .respond_with(ResponseTemplate::new(206).set_body_bytes(&full_data[6..13]))
+            .mount(&server)
+            .await;
+
+        let reader = HttpReadAt::new(server.uri(), Client::new());
+        let mut stream = reader.read_stream(6, 7).await.unwrap();
+        let mut collected = Vec::new();
+        stream.read_to_end(&mut collected).await.unwrap();
+
+        assert_eq!(collected, b"archive");
+    }
+
+    #[tokio::test]
+    async fn stream_read_zero_length_returns_empty() {
+        let reader = HttpReadAt::new("http://localhost:1", Client::new());
+        let mut stream = reader.read_stream(0, 0).await.unwrap();
+        let mut collected = Vec::new();
+        stream.read_to_end(&mut collected).await.unwrap();
+        assert!(collected.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stream_server_returns_416_maps_to_out_of_bounds() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(416))
+            .mount(&server)
+            .await;
+
+        let reader = HttpReadAt::new(server.uri(), Client::new());
+        let err = reader.read_stream(9999, 100).await.map(|_| ()).unwrap_err();
+
+        assert!(
+            matches!(err, ReadError::OutOfBounds { .. }),
+            "expected OutOfBounds, got: {err:?}"
+        );
     }
 }
