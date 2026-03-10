@@ -3,8 +3,8 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 2 — Core engine: remaining formats + write support.
-* **Current Active Task:** SESSION_PLAN.md Step 11 — Final Verification + Cleanup.
-* **Baseline:** 64 tests pass, clippy clean. SESSION_PLAN.md Steps 1–10 complete.
+* **Current Active Task:** SESSION_PLAN.md complete. Next: RAR format parser.
+* **Baseline:** 64 tests pass, clippy clean. SESSION_PLAN.md Steps 1–11 complete.
 
 ---
 

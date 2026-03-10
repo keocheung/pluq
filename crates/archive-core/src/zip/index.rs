@@ -15,6 +15,10 @@ use crate::io::{
 use crate::{ArchiveEntry, ArchiveError};
 
 /// A cached, serializable snapshot of a ZIP archive's file listing.
+///
+/// **Superseded by [`archive_state::ArchiveCache`]** — format-agnostic and
+/// richer staleness detection. `ZipIndex` is kept for backwards compatibility
+/// and will be removed in a future release.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ZipIndex {
     /// Where the source archive lives (URL or file path).

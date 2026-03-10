@@ -11,8 +11,6 @@
 
 use std::time::{Duration, SystemTime};
 
-use bytes::Bytes;
-
 use crate::codec::CompressionMethod;
 use crate::{ArchiveEntry, ArchiveError, ReadAt};
 
@@ -476,31 +474,6 @@ fn days_since_unix_epoch(year: u32, month: u32, day: u32) -> Option<u64> {
 }
 
 // ── Local File Header + Data ───────────────────────────────────────────────
-
-/// Read the compressed data for a single entry by parsing its Local File
-/// Header to determine the actual data offset.
-///
-/// Used internally by tests and legacy callers. Extraction code should
-/// prefer [`resolve_data_offset`] + `read_stream` for streaming reads.
-#[allow(dead_code)]
-pub async fn read_local_file_data(
-    reader: &impl ReadAt,
-    location: &ZipEntryLocation,
-    compressed_size: u64,
-) -> Result<Bytes, ArchiveError> {
-    let data_offset = resolve_data_offset(reader, location)
-        .await
-        .map_err(ArchiveError::Io)?;
-
-    if compressed_size == 0 {
-        return Ok(Bytes::new());
-    }
-
-    reader
-        .read_range(data_offset, compressed_size)
-        .await
-        .map_err(ArchiveError::Io)
-}
 
 /// Parse the Local File Header and return the byte offset of the compressed
 /// data that immediately follows it.
