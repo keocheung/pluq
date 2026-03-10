@@ -1,0 +1,8 @@
+[package]
+name = "archive-state"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+archive-core = { path = "../archive-core" }
+thiserror = "2"
