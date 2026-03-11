@@ -3,14 +3,14 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 2 — Core engine: remaining formats + write support.
-* **Current Active Task:** SESSION_PLAN.md (ZIP hardening) — Steps 1 & 2 complete. Next: Step 3 (ZipCrypto / traditional encryption).
-* **Baseline:** 42 tests pass (archive-core: 42, archive: 25), clippy clean. Commit: `378b60f`.
+* **Current Active Task:** SESSION_PLAN.md (ZIP hardening) — Steps 1–3 complete. Next: Step 4 (WinZip AES encryption).
+* **Baseline:** 45 tests pass (archive-core: 45, archive: 25), clippy clean.
 * **Note:** `CoreError` replaces old `ArchiveError` (core error type). `ArchiveError` replaces old `StateError` (product-facing error type from the `archive` crate). `archive` crate replaces old `archive-state`.
 * **SESSION_PLAN progress:**
   - Step 1 ✅ — chunked 64 KB extraction loop, incremental CRC via `crc32fast::Hasher`
   - Step 2 ✅ — `ProgressReporter::on_bytes_progress` added; `Arc<Mutex<dyn ProgressReporter>>` threaded through `ZipArchive::extract` → `ArchiveReader` → `ArchiveCore` → `archive::Archive`; cancellation via `should_cancel()`; 3 new tests
-  - Step 3 🔲 — ZipCrypto (PKWARE traditional encryption): `zip/crypto.rs`, password param on extract
-  - Step 4 🔲 — WinZip AES encryption
+  - Step 3 ✅ — ZipCrypto (PKWARE traditional encryption): `zip/crypto.rs`, `password: Option<&[u8]>` on `extract` all the way to the state layer; 3 new tests
+  - Step 4 🔲 — WinZip AES encryption (AE-1/AE-2)
   - Step 5 🔲 — DoS protection (ratio check + entry count limit)
   - Step 6 🔲 — Integration test + CONTEXT.md update
 

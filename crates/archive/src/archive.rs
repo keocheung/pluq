@@ -50,9 +50,10 @@ impl Archive {
         entry: &ArchiveEntry,
         sink: &mut W,
         progress: Arc<Mutex<dyn ProgressReporter>>,
+        password: Option<&[u8]>,
     ) -> Result<u64, ArchiveError> {
         self.core
-            .extract(entry, sink, progress)
+            .extract(entry, sink, progress, password)
             .await
             .map_err(translate_core_error)
     }
@@ -61,9 +62,13 @@ impl Archive {
     ///
     /// Convenience wrapper around [`extract`](Self::extract) for small entries.
     /// For large entries, use `extract()` with a file sink instead.
-    pub async fn extract_to_bytes(&self, entry: &ArchiveEntry) -> Result<Bytes, ArchiveError> {
+    pub async fn extract_to_bytes(
+        &self,
+        entry: &ArchiveEntry,
+        password: Option<&[u8]>,
+    ) -> Result<Bytes, ArchiveError> {
         self.core
-            .extract_to_bytes(entry)
+            .extract_to_bytes(entry, password)
             .await
             .map_err(translate_core_error)
     }

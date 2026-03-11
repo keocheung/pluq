@@ -99,9 +99,10 @@ impl ArchiveCore {
         entry: &ArchiveEntry,
         sink: &mut W,
         progress: Arc<Mutex<dyn ProgressReporter>>,
+        password: Option<&[u8]>,
     ) -> Result<u64, CoreError> {
         match &self.inner {
-            ArchiveInner::Zip(z) => z.extract(entry, sink, progress).await,
+            ArchiveInner::Zip(z) => z.extract(entry, sink, progress, password).await,
         }
     }
 
@@ -109,10 +110,14 @@ impl ArchiveCore {
     ///
     /// Convenience wrapper around [`extract`](Self::extract) for small entries.
     /// For large entries (multi-GB), use `extract()` with a file sink instead.
-    pub async fn extract_to_bytes(&self, entry: &ArchiveEntry) -> Result<Bytes, CoreError> {
+    pub async fn extract_to_bytes(
+        &self,
+        entry: &ArchiveEntry,
+        password: Option<&[u8]>,
+    ) -> Result<Bytes, CoreError> {
         let mut buf = Vec::with_capacity(entry.uncompressed_size as usize);
         let progress = Arc::new(Mutex::new(()));
-        self.extract(entry, &mut buf, progress).await?;
+        self.extract(entry, &mut buf, progress, password).await?;
         Ok(Bytes::from(buf))
     }
 

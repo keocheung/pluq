@@ -53,6 +53,7 @@ pub trait ArchiveReader {
         entry: &ArchiveEntry,
         sink: &mut W,
         progress: Arc<Mutex<dyn ProgressReporter>>,
+        password: Option<&[u8]>,
     ) -> impl std::future::Future<Output = Result<u64, CoreError>> + Send;
 
     /// Decompress and verify CRC without retaining output.

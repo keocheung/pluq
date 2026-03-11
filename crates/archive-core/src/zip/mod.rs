@@ -13,9 +13,11 @@
 //! ```
 
 pub mod index;
+mod crypto;
 mod parse;
 
 pub use index::ZipIndex;
+use crypto::{ZipCryptoDecryptor, ZipCryptoReader};
 use parse::ZipEntryLocation;
 
 use std::io::Read;
@@ -28,7 +30,7 @@ use crate::archive_reader::ArchiveReader;
 use crate::codec::build_decoder;
 use crate::junk;
 use crate::progress::ProgressReporter;
-use crate::{ArchiveEntry, CoreError, ReadAt};
+use crate::{ArchiveEntry, CoreError, PasswordDetectionMethod, ReadAt};
 
 /// A parsed ZIP archive backed by any [`ReadAt`] source.
 ///
@@ -103,12 +105,13 @@ impl<R: ReadAt> ZipArchive<R> {
         entry: &ArchiveEntry,
         sink: &mut W,
         progress: Arc<Mutex<dyn ProgressReporter>>,
+        password: Option<&[u8]>,
     ) -> Result<u64, CoreError> {
         if entry.is_directory {
             return Ok(0);
         }
 
-        if entry.is_encrypted {
+        if entry.is_encrypted && password.is_none() {
             return Err(CoreError::PasswordRequired);
         }
 
@@ -149,11 +152,47 @@ impl<R: ReadAt> ZipArchive<R> {
         // async polling from the current runtime handle.
         let entry_name = entry.name.clone();
         let expected_crc = location.crc32;
+        let is_encrypted = entry.is_encrypted;
+        let password_bytes: Option<Vec<u8>> = password.map(|p| p.to_vec());
         let handle = tokio::runtime::Handle::current();
-        let sync_reader = SyncIoBridge::new_with_handle(compressed_stream, handle);
+        let mut sync_reader = SyncIoBridge::new_with_handle(compressed_stream, handle);
 
         let verified: Vec<u8> = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, CoreError> {
-            let mut decoder = build_decoder(method, sync_reader, &[])?;
+            // ── Decryption layer (ZipCrypto) ──────────────────────────────
+            // When encrypted, read the 12-byte encryption header, decrypt it,
+            // verify the last byte against the high byte of the expected CRC,
+            // then wrap the remaining stream in a decrypting reader.
+            let mut decoder = if is_encrypted {
+                let pwd = password_bytes.as_deref().unwrap(); // safe: is_encrypted implies password.is_some()
+
+                // Read and decrypt the 12-byte encryption header.
+                let mut enc_header = [0u8; 12];
+                sync_reader.read_exact(&mut enc_header).map_err(|io_err| {
+                    if let Some(inner) = io_err.into_inner()
+                        && let Ok(read_error) = inner.downcast::<crate::io::ReadError>()
+                    {
+                        return CoreError::Io(*read_error);
+                    }
+                    CoreError::InvalidFormat {
+                        message: format!("truncated encryption header for '{entry_name}'"),
+                    }
+                })?;
+
+                let mut decryptor = ZipCryptoDecryptor::new(pwd);
+                decryptor.decrypt(&mut enc_header);
+
+                // Early wrong-password check: byte 11 must match the high byte of the CRC.
+                if enc_header[11] != (expected_crc >> 24) as u8 {
+                    return Err(CoreError::WrongPassword {
+                        method: PasswordDetectionMethod::EarlyHeaderValidation,
+                    });
+                }
+
+                let crypto_reader = ZipCryptoReader::new(sync_reader, decryptor);
+                build_decoder(method, crypto_reader, &[])?
+            } else {
+                build_decoder(method, sync_reader, &[])?
+            };
 
             const CHUNK_SIZE: usize = 64 * 1024; // 64 KB
             let mut hasher = crc32fast::Hasher::new();
@@ -238,7 +277,7 @@ impl<R: ReadAt> ZipArchive<R> {
     /// Used for archive integrity checking.
     pub async fn test(&self, entry: &ArchiveEntry) -> Result<(), CoreError> {
         let progress = Arc::new(Mutex::new(()));
-        self.extract(entry, &mut tokio::io::sink(), progress)
+        self.extract(entry, &mut tokio::io::sink(), progress, None)
             .await
             .map(|_| ())
     }
@@ -258,8 +297,9 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for ZipArchive<R> {
         entry: &ArchiveEntry,
         sink: &mut W,
         progress: Arc<Mutex<dyn ProgressReporter>>,
+        password: Option<&[u8]>,
     ) -> Result<u64, CoreError> {
-        ZipArchive::extract(self, entry, sink, progress).await
+        ZipArchive::extract(self, entry, sink, progress, password).await
     }
 
     async fn test(&self, entry: &ArchiveEntry) -> Result<(), CoreError> {
@@ -273,6 +313,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use zip::CompressionMethod as ZipCrateMethod;
+    use zip::unstable::write::FileOptionsExt;
     use zip::write::SimpleFileOptions;
 
     use crate::codec::CompressionMethod;
@@ -299,10 +340,10 @@ mod tests {
         (tmp, reader)
     }
 
-    /// Helper: extract entry to a Vec<u8> (convenience for tests).
+    /// Helper: extract entry to a Vec<u8> (convenience for tests, no password).
     async fn extract_to_vec(zip: &ZipArchive<LocalReadAt>, entry: &ArchiveEntry) -> Vec<u8> {
         let mut buf = Vec::new();
-        zip.extract(entry, &mut buf, Arc::new(Mutex::new(())))
+        zip.extract(entry, &mut buf, Arc::new(Mutex::new(())), None)
             .await
             .unwrap();
         buf
@@ -403,7 +444,7 @@ mod tests {
         let zip = ZipArchive::open(reader).await.unwrap();
         let mut sink = Vec::new();
         let bytes_written = zip
-            .extract(&zip.entries()[0], &mut sink, Arc::new(Mutex::new(())))
+            .extract(&zip.entries()[0], &mut sink, Arc::new(Mutex::new(())), None)
             .await
             .unwrap();
         assert_eq!(bytes_written, content.len() as u64);
@@ -429,7 +470,7 @@ mod tests {
         let zip = ZipArchive::open(reader2).await.unwrap();
         let mut sink = tokio::io::sink();
         let result = zip
-            .extract(&zip.entries()[0], &mut sink, Arc::new(Mutex::new(())))
+            .extract(&zip.entries()[0], &mut sink, Arc::new(Mutex::new(())), None)
             .await;
 
         // Should be either CrcMismatch or an InvalidFormat decompression error
@@ -470,7 +511,7 @@ mod tests {
         // Must fail immediately with PasswordRequired — before any decompression attempt.
         let mut sink = tokio::io::sink();
         let result = zip
-            .extract(&zip.entries()[0], &mut sink, Arc::new(Mutex::new(())))
+            .extract(&zip.entries()[0], &mut sink, Arc::new(Mutex::new(())), None)
             .await;
         assert!(
             matches!(result, Err(CoreError::PasswordRequired)),
@@ -543,7 +584,7 @@ mod tests {
         // extract() must fail with UnsupportedCompression — not a panic or InvalidFormat.
         let mut sink = tokio::io::sink();
         let result = zip
-            .extract(&zip.entries()[0], &mut sink, Arc::new(Mutex::new(())))
+            .extract(&zip.entries()[0], &mut sink, Arc::new(Mutex::new(())), None)
             .await;
         assert!(
             matches!(result, Err(CoreError::UnsupportedCompression { .. })),
@@ -617,7 +658,7 @@ mod tests {
 
         let mut sink = tokio::io::sink();
         let result = zip
-            .extract(&zip.entries()[0], &mut sink, progress)
+            .extract(&zip.entries()[0], &mut sink, progress, None)
             .await;
 
         assert!(
@@ -668,7 +709,7 @@ mod tests {
             Arc::new(Mutex::new(ByteRecorder { state: Arc::clone(&state) }));
 
         let mut sink = tokio::io::sink();
-        zip.extract(&zip.entries()[0], &mut sink, progress)
+        zip.extract(&zip.entries()[0], &mut sink, progress, None)
             .await
             .unwrap();
 
@@ -708,5 +749,113 @@ mod tests {
             "expected InvalidFormat for truncated ZIP, got: {:?}",
             result.err()
         );
+    }
+
+    // ── ZipCrypto (traditional encryption) ────────────────────────────────
+
+    /// Helper: create a ZIP with traditional PKWARE encryption.
+    fn create_encrypted_test_zip(
+        password: &[u8],
+        files: &[(&str, &[u8], ZipCrateMethod)],
+    ) -> (tempfile::NamedTempFile, LocalReadAt) {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            for (name, data, method) in files {
+                let options = SimpleFileOptions::default()
+                    .compression_method(*method)
+                    .with_deprecated_encryption(password);
+                writer.start_file(*name, options).unwrap();
+                writer.write_all(data).unwrap();
+            }
+            let buf = writer.finish().unwrap().into_inner();
+            std::fs::write(tmp.path(), &buf).unwrap();
+        }
+        let reader = LocalReadAt::new(tmp.path());
+        (tmp, reader)
+    }
+
+    #[tokio::test]
+    async fn extract_traditional_encrypted_entry() {
+        let password = b"correct-horse";
+        let content = b"Secret message for Archive Sniper!";
+
+        let (_tmp, reader) = create_encrypted_test_zip(
+            password,
+            &[("secret.txt", content, ZipCrateMethod::Stored)],
+        );
+
+        let zip = ZipArchive::open(reader).await.unwrap();
+        assert!(zip.entries()[0].is_encrypted, "entry must be marked as encrypted");
+
+        let mut buf = Vec::new();
+        zip.extract(&zip.entries()[0], &mut buf, Arc::new(Mutex::new(())), Some(password))
+            .await
+            .unwrap();
+
+        assert_eq!(buf.as_slice(), content);
+    }
+
+    #[tokio::test]
+    async fn wrong_password_detected_early() {
+        let password = b"correct-horse";
+        let content = b"Secret message for Archive Sniper!";
+
+        let (_tmp, reader) = create_encrypted_test_zip(
+            password,
+            &[("secret.txt", content, ZipCrateMethod::Stored)],
+        );
+
+        let zip = ZipArchive::open(reader).await.unwrap();
+
+        let mut sink = tokio::io::sink();
+        let result = zip
+            .extract(
+                &zip.entries()[0],
+                &mut sink,
+                Arc::new(Mutex::new(())),
+                Some(b"wrong-password"),
+            )
+            .await;
+
+        // The early header check catches most wrong passwords (1/256 false-negative rate).
+        // If it slips through, the CRC or decompressor will still catch it.
+        assert!(
+            matches!(
+                result,
+                Err(CoreError::WrongPassword {
+                    method: PasswordDetectionMethod::EarlyHeaderValidation
+                }) | Err(CoreError::CrcMismatch { .. })
+                    | Err(CoreError::BitstreamError { .. })
+            ),
+            "expected WrongPassword, CrcMismatch, or BitstreamError, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn extract_encrypted_deflated_entry() {
+        let password = b"deflate-test-pw";
+        // Repeating data that compresses well with Deflate.
+        let content: Vec<u8> = b"Archive Sniper ZipCrypto test with Deflate compression. "
+            .iter()
+            .cycle()
+            .take(1024)
+            .copied()
+            .collect();
+
+        let (_tmp, reader) = create_encrypted_test_zip(
+            password,
+            &[("deflated_secret.txt", &content, ZipCrateMethod::Deflated)],
+        );
+
+        let zip = ZipArchive::open(reader).await.unwrap();
+        assert!(zip.entries()[0].is_encrypted, "entry must be marked as encrypted");
+
+        let mut buf = Vec::new();
+        zip.extract(&zip.entries()[0], &mut buf, Arc::new(Mutex::new(())), Some(password))
+            .await
+            .unwrap();
+
+        assert_eq!(buf, content);
     }
 }
