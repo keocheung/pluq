@@ -158,6 +158,10 @@ Format priority order: **ZIP → RAR → 7z → TAR** (by real-world usage).
 * **Web site** — consumes the SaaS API (Phase 3). Not a Rust product. Metered/freemium.
 * Only starts once Phase 2 is fully proven via CLI
 
+#### Phase X+1 (Future Ideas — Unscheduled)
+
+* **TAR.GZ random-access index (`zran`-style):** During a full TAR.GZ listing scan, periodically snapshot the gzip decompressor state (sliding window, ~32KB each) at byte-offset checkpoints. Store this index alongside the entry offsets. On a later targeted extraction, seek to the nearest checkpoint, restore decompressor state, and decompress only from there — instead of from byte 0. Enables partial extraction from `.tar.gz` without full decompression. Trade-off: index size vs. seek granularity. Reference: `zlib/examples/zran.c`.
+
 #### Phase X (Future) — Cloud Archiving ("Vault" / "Reverse Snipe")
 
 * Stream files from cloud → compress on our servers → stream archive back to cloud
