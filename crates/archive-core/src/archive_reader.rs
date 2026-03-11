@@ -4,9 +4,12 @@
 //! types like `ZipArchive`. Adding a new format (RAR, 7z, TAR) means implementing
 //! this trait — consumers see no change.
 
+use std::sync::{Arc, Mutex};
+
 use tokio::io::AsyncWrite;
 
 use crate::junk;
+use crate::progress::ProgressReporter;
 use crate::{ArchiveEntry, CoreError};
 
 /// Unified read interface implemented by every format parser.
@@ -49,6 +52,7 @@ pub trait ArchiveReader {
         &self,
         entry: &ArchiveEntry,
         sink: &mut W,
+        progress: Arc<Mutex<dyn ProgressReporter>>,
     ) -> impl std::future::Future<Output = Result<u64, CoreError>> + Send;
 
     /// Decompress and verify CRC without retaining output.

@@ -1,3 +1,6 @@
+use std::sync::{Arc, Mutex};
+
+use archive_core::ProgressReporter;
 use archive_core::{ArchiveCore, ArchiveEntry};
 use bytes::Bytes;
 use tokio::io::AsyncWrite;
@@ -46,9 +49,10 @@ impl Archive {
         &self,
         entry: &ArchiveEntry,
         sink: &mut W,
+        progress: Arc<Mutex<dyn ProgressReporter>>,
     ) -> Result<u64, ArchiveError> {
         self.core
-            .extract(entry, sink)
+            .extract(entry, sink, progress)
             .await
             .map_err(translate_core_error)
     }

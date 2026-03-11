@@ -8,11 +8,14 @@
 //! let data = archive.extract_to_bytes(&archive.entries()[0]).await?;
 //! ```
 
+use std::sync::{Arc, Mutex};
+
 use bytes::Bytes;
 use tokio::io::AsyncWrite;
 
 use crate::io::Source;
 use crate::junk;
+use crate::progress::ProgressReporter;
 use crate::zip::ZipArchive;
 use crate::{ArchiveEntry, CoreError};
 
@@ -95,9 +98,10 @@ impl ArchiveCore {
         &self,
         entry: &ArchiveEntry,
         sink: &mut W,
+        progress: Arc<Mutex<dyn ProgressReporter>>,
     ) -> Result<u64, CoreError> {
         match &self.inner {
-            ArchiveInner::Zip(z) => z.extract(entry, sink).await,
+            ArchiveInner::Zip(z) => z.extract(entry, sink, progress).await,
         }
     }
 
@@ -107,7 +111,8 @@ impl ArchiveCore {
     /// For large entries (multi-GB), use `extract()` with a file sink instead.
     pub async fn extract_to_bytes(&self, entry: &ArchiveEntry) -> Result<Bytes, CoreError> {
         let mut buf = Vec::with_capacity(entry.uncompressed_size as usize);
-        self.extract(entry, &mut buf).await?;
+        let progress = Arc::new(Mutex::new(()));
+        self.extract(entry, &mut buf, progress).await?;
         Ok(Bytes::from(buf))
     }
 
@@ -128,4 +133,5 @@ impl ArchiveCore {
             ArchiveInner::Zip(z) => z.test(entry).await,
         }
     }
+
 }

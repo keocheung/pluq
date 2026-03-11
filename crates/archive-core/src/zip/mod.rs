@@ -19,6 +19,7 @@ pub use index::ZipIndex;
 use parse::ZipEntryLocation;
 
 use std::io::Read;
+use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio_util::io::SyncIoBridge;
@@ -26,6 +27,7 @@ use tokio_util::io::SyncIoBridge;
 use crate::archive_reader::ArchiveReader;
 use crate::codec::build_decoder;
 use crate::junk;
+use crate::progress::ProgressReporter;
 use crate::{ArchiveEntry, CoreError, ReadAt};
 
 /// A parsed ZIP archive backed by any [`ReadAt`] source.
@@ -100,6 +102,7 @@ impl<R: ReadAt> ZipArchive<R> {
         &self,
         entry: &ArchiveEntry,
         sink: &mut W,
+        progress: Arc<Mutex<dyn ProgressReporter>>,
     ) -> Result<u64, CoreError> {
         if entry.is_directory {
             return Ok(0);
@@ -151,10 +154,20 @@ impl<R: ReadAt> ZipArchive<R> {
 
         let verified: Vec<u8> = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, CoreError> {
             let mut decoder = build_decoder(method, sync_reader, &[])?;
-            let mut buf = Vec::with_capacity(uncompressed_size as usize);
-            decoder
-                .read_to_end(&mut buf)
-                .map_err(|io_err| {
+
+            const CHUNK_SIZE: usize = 64 * 1024; // 64 KB
+            let mut hasher = crc32fast::Hasher::new();
+            let mut total_written: u64 = 0;
+            let mut chunk_buf = vec![0u8; CHUNK_SIZE];
+            let mut verified_buf = Vec::with_capacity(uncompressed_size as usize);
+
+            {
+                let mut p = progress.lock().unwrap();
+                p.on_entry_start(&entry_name, uncompressed_size);
+            }
+
+            loop {
+                let n = decoder.read(&mut chunk_buf).map_err(|io_err| {
                     // Try to recover a structured ReadError embedded by read_stream impls.
                     // If the io::Error wraps a ReadError (from mid-stream failure), extract it.
                     // Otherwise, it's a decompressor error — classify as BitstreamError.
@@ -167,10 +180,28 @@ impl<R: ReadAt> ZipArchive<R> {
                         detail: format!("decompression failed for '{entry_name}'"),
                     }
                 })?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&chunk_buf[..n]);
+                verified_buf.extend_from_slice(&chunk_buf[..n]);
+                total_written += n as u64;
+
+                {
+                    let mut p = progress.lock().unwrap();
+                    p.on_bytes_progress(total_written);
+                    if p.should_cancel() {
+                        p.on_entry_complete(&entry_name, false);
+                        return Err(CoreError::Cancelled);
+                    }
+                }
+            }
 
             // CRC32 verification — mandatory before returning any bytes.
-            let actual_crc = crc32fast::hash(&buf);
+            let actual_crc = hasher.finalize();
             if actual_crc != expected_crc {
+                let mut p = progress.lock().unwrap();
+                p.on_entry_complete(&entry_name, false);
                 return Err(CoreError::CrcMismatch {
                     entry: entry_name,
                     expected: expected_crc,
@@ -178,7 +209,12 @@ impl<R: ReadAt> ZipArchive<R> {
                 });
             }
 
-            Ok(buf)
+            {
+                let mut p = progress.lock().unwrap();
+                p.on_entry_complete(&entry_name, true);
+            }
+
+            Ok(verified_buf)
         })
         .await
         .map_err(|e| CoreError::BitstreamError {
@@ -201,7 +237,10 @@ impl<R: ReadAt> ZipArchive<R> {
     /// Equivalent to [`extract`](Self::extract) to a no-op async sink.
     /// Used for archive integrity checking.
     pub async fn test(&self, entry: &ArchiveEntry) -> Result<(), CoreError> {
-        self.extract(entry, &mut tokio::io::sink()).await.map(|_| ())
+        let progress = Arc::new(Mutex::new(()));
+        self.extract(entry, &mut tokio::io::sink(), progress)
+            .await
+            .map(|_| ())
     }
 }
 
@@ -218,8 +257,9 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for ZipArchive<R> {
         &self,
         entry: &ArchiveEntry,
         sink: &mut W,
+        progress: Arc<Mutex<dyn ProgressReporter>>,
     ) -> Result<u64, CoreError> {
-        ZipArchive::extract(self, entry, sink).await
+        ZipArchive::extract(self, entry, sink, progress).await
     }
 
     async fn test(&self, entry: &ArchiveEntry) -> Result<(), CoreError> {
@@ -230,6 +270,7 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for ZipArchive<R> {
 #[cfg(test)]
 mod tests {
     use std::io::{Cursor, Write};
+    use std::sync::{Arc, Mutex};
 
     use zip::CompressionMethod as ZipCrateMethod;
     use zip::write::SimpleFileOptions;
@@ -261,7 +302,9 @@ mod tests {
     /// Helper: extract entry to a Vec<u8> (convenience for tests).
     async fn extract_to_vec(zip: &ZipArchive<LocalReadAt>, entry: &ArchiveEntry) -> Vec<u8> {
         let mut buf = Vec::new();
-        zip.extract(entry, &mut buf).await.unwrap();
+        zip.extract(entry, &mut buf, Arc::new(Mutex::new(())))
+            .await
+            .unwrap();
         buf
     }
 
@@ -359,7 +402,10 @@ mod tests {
         let (_tmp, reader) = create_test_zip(&[("count.txt", content, ZipCrateMethod::Stored)]);
         let zip = ZipArchive::open(reader).await.unwrap();
         let mut sink = Vec::new();
-        let bytes_written = zip.extract(&zip.entries()[0], &mut sink).await.unwrap();
+        let bytes_written = zip
+            .extract(&zip.entries()[0], &mut sink, Arc::new(Mutex::new(())))
+            .await
+            .unwrap();
         assert_eq!(bytes_written, content.len() as u64);
         assert_eq!(sink, content);
     }
@@ -382,7 +428,9 @@ mod tests {
         let reader2 = LocalReadAt::new(&path);
         let zip = ZipArchive::open(reader2).await.unwrap();
         let mut sink = tokio::io::sink();
-        let result = zip.extract(&zip.entries()[0], &mut sink).await;
+        let result = zip
+            .extract(&zip.entries()[0], &mut sink, Arc::new(Mutex::new(())))
+            .await;
 
         // Should be either CrcMismatch or an InvalidFormat decompression error
         assert!(
@@ -421,7 +469,9 @@ mod tests {
 
         // Must fail immediately with PasswordRequired — before any decompression attempt.
         let mut sink = tokio::io::sink();
-        let result = zip.extract(&zip.entries()[0], &mut sink).await;
+        let result = zip
+            .extract(&zip.entries()[0], &mut sink, Arc::new(Mutex::new(())))
+            .await;
         assert!(
             matches!(result, Err(CoreError::PasswordRequired)),
             "expected PasswordRequired, got: {result:?}"
@@ -492,11 +542,151 @@ mod tests {
 
         // extract() must fail with UnsupportedCompression — not a panic or InvalidFormat.
         let mut sink = tokio::io::sink();
-        let result = zip.extract(&zip.entries()[0], &mut sink).await;
+        let result = zip
+            .extract(&zip.entries()[0], &mut sink, Arc::new(Mutex::new(())))
+            .await;
         assert!(
             matches!(result, Err(CoreError::UnsupportedCompression { .. })),
             "expected UnsupportedCompression, got: {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn chunked_extraction_produces_identical_output() {
+        // ~200 KB of repeating data — compresses well with Deflate, and the
+        // decompressed output spans at least three 64 KB chunks.
+        let content: Vec<u8> = (0u32..)
+            .flat_map(|i| i.to_le_bytes())
+            .take(200 * 1024)
+            .collect();
+
+        let (_tmp, reader) =
+            create_test_zip(&[("large.bin", &content, ZipCrateMethod::Deflated)]);
+        let zip = ZipArchive::open(reader).await.unwrap();
+        let data = extract_to_vec(&zip, &zip.entries()[0]).await;
+
+        assert_eq!(data, content, "chunked extraction must be byte-for-byte identical");
+    }
+
+    #[tokio::test]
+    async fn cancellation_stops_extraction() {
+        // Shared state accessed both by the reporter (inside spawn_blocking) and the test.
+        #[derive(Default)]
+        struct State {
+            chunks_seen: u32,
+            entry_start_called: bool,
+            entry_complete_called: bool,
+            complete_success: Option<bool>,
+        }
+
+        struct CancelAfterFirstChunk {
+            state: Arc<Mutex<State>>,
+        }
+
+        impl ProgressReporter for CancelAfterFirstChunk {
+            fn on_entry_start(&mut self, _name: &str, _size: u64) {
+                self.state.lock().unwrap().entry_start_called = true;
+            }
+            fn on_bytes_progress(&mut self, _bytes_so_far: u64) {
+                self.state.lock().unwrap().chunks_seen += 1;
+            }
+            fn on_entry_complete(&mut self, _name: &str, success: bool) {
+                let mut s = self.state.lock().unwrap();
+                s.entry_complete_called = true;
+                s.complete_success = Some(success);
+            }
+            fn should_cancel(&self) -> bool {
+                self.state.lock().unwrap().chunks_seen >= 1
+            }
+        }
+
+        // ~200 KB — enough to span multiple 64 KB chunks.
+        let content: Vec<u8> = (0u32..)
+            .flat_map(|i| i.to_le_bytes())
+            .take(200 * 1024)
+            .collect();
+
+        let (_tmp, reader) =
+            create_test_zip(&[("large.bin", &content, ZipCrateMethod::Deflated)]);
+        let zip = ZipArchive::open(reader).await.unwrap();
+
+        let state = Arc::new(Mutex::new(State::default()));
+        let progress: Arc<Mutex<dyn ProgressReporter>> = Arc::new(Mutex::new(
+            CancelAfterFirstChunk { state: Arc::clone(&state) },
+        ));
+
+        let mut sink = tokio::io::sink();
+        let result = zip
+            .extract(&zip.entries()[0], &mut sink, progress)
+            .await;
+
+        assert!(
+            matches!(result, Err(CoreError::Cancelled)),
+            "expected Cancelled, got: {result:?}"
+        );
+
+        let s = state.lock().unwrap();
+        assert!(s.entry_start_called, "on_entry_start must be called");
+        assert!(s.entry_complete_called, "on_entry_complete must be called on cancellation");
+        assert_eq!(
+            s.complete_success,
+            Some(false),
+            "on_entry_complete must report success=false on cancellation"
+        );
+    }
+
+    #[tokio::test]
+    async fn progress_reports_bytes() {
+        #[derive(Default)]
+        struct State {
+            reported: Vec<u64>,
+        }
+
+        struct ByteRecorder {
+            state: Arc<Mutex<State>>,
+        }
+
+        impl ProgressReporter for ByteRecorder {
+            fn on_bytes_progress(&mut self, bytes_so_far: u64) {
+                self.state.lock().unwrap().reported.push(bytes_so_far);
+            }
+        }
+
+        // ~200 KB — produces multiple progress callbacks.
+        let content: Vec<u8> = (0u32..)
+            .flat_map(|i| i.to_le_bytes())
+            .take(200 * 1024)
+            .collect();
+        let uncompressed_size = content.len() as u64;
+
+        let (_tmp, reader) =
+            create_test_zip(&[("large.bin", &content, ZipCrateMethod::Deflated)]);
+        let zip = ZipArchive::open(reader).await.unwrap();
+
+        let state = Arc::new(Mutex::new(State::default()));
+        let progress: Arc<Mutex<dyn ProgressReporter>> =
+            Arc::new(Mutex::new(ByteRecorder { state: Arc::clone(&state) }));
+
+        let mut sink = tokio::io::sink();
+        zip.extract(&zip.entries()[0], &mut sink, progress)
+            .await
+            .unwrap();
+
+        let s = state.lock().unwrap();
+        assert!(
+            s.reported.len() > 1,
+            "expected multiple progress callbacks, got {}",
+            s.reported.len()
+        );
+        assert_eq!(
+            *s.reported.last().unwrap(),
+            uncompressed_size,
+            "final progress value must equal uncompressed_size"
+        );
+        // Values must be strictly increasing.
+        for w in s.reported.windows(2) {
+            assert!(w[1] > w[0], "progress values must be strictly increasing");
+        }
     }
 
     #[tokio::test]
