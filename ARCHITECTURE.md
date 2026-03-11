@@ -19,7 +19,7 @@ Six layers. Each has one job. Nothing leaks between them.
 │  Each product:                                                     │
 │    - Assembles ReadAt decorator stack from horizontal crates        │
 │    - Passes composed ReadAt down to state layer                    │
-│    - Opens StateError::Transport tunnel for decorator errors       │
+│    - Opens ArchiveError::Transport tunnel for decorator errors       │
 │    - Defines own error type (ServerError, AppError, CliError)      │
 │                                                                    │
 │  Horizontal crates (optional, picked per product):                 │
@@ -31,7 +31,7 @@ Six layers. Each has one job. Nothing leaks between them.
 ┌──────────────────────▼───────────────────────────────────────────┐
 │  Layer 3.5: State Layer (universal cache)                         │
 │  Archive, ArchiveCache, EntryTree                                 │
-│  Translates ArchiveError → StateError (core errors only)          │
+│  Translates CoreError → ArchiveError (core errors only)          │
 │  Tunnels ReadError::Transport blindly (re-wraps for product)      │
 │  See ERRORS.md for error flow                                     │
 └──────────────────────┬───────────────────────────────────────────┘
@@ -68,12 +68,12 @@ Layer 0: Raw bytes (disk, network, memory)
 ```
 
 **The five rules:**
-1. Nothing leaks through boundaries — products never see `ArchiveCore`, `ZipArchive`, flate2, LocalReadAt, or ArchiveError. Products see `Archive` (state layer handle) + `StateError` + their own product-level error types.
+1. Nothing leaks through boundaries — products never see `ArchiveCore`, `ZipArchive`, flate2, LocalReadAt, or CoreError. Products see `Archive` (state layer handle) + `ArchiveError` + their own product-level error types.
 2. Codec layer is shared — Deflate lives once, all format parsers use the same instance
 3. ArchiveEntry has zero format-specific fields — format parsers hold location details privately
 4. **Right tool for the job** — `ReadAt` has two read methods: `read_range()` returns `Bytes` (for bounded header/metadata reads), `read_stream()` returns `AsyncRead` (for large entry data extraction). Parsers use `read_range` for small reads. Extraction uses `read_stream` so a 4 GB entry never lives in RAM. `ArchiveReader::extract()` writes to a sink, not returns a buffer. Convenience methods (`extract_to_bytes()`) exist for small entries and tests.
 5. **Core is stateless** — Layers 0–3 hold no session state, no caches, no auth tokens. Universal state (cache, session, entry tree) lives in the state layer (Layer 3.5). Product-specific state (auth tokens, quota counters, billing) lives in horizontal crates composed at the product level (Layer 4). See `ERRORS.md` for how errors flow across layers.
-6. **I/O has its own error language** — `ReadAt` returns `ReadError` (not `ArchiveError`). `ReadError` is a standalone type covering both local filesystem and HTTP failures, with structured context for decorator routing and user-facing messages. Format parsers convert `ReadError → ArchiveError` at the boundary. See `ERRORS.md` § ReadError.
+6. **I/O has its own error language** — `ReadAt` returns `ReadError` (not `CoreError`). `ReadError` is a standalone type covering both local filesystem and HTTP failures, with structured context for decorator routing and user-facing messages. Format parsers convert `ReadError → CoreError` at the boundary. See `ERRORS.md` § ReadError.
 
 ---
 
@@ -102,7 +102,7 @@ pub trait ReadAt: Send + Sync {
 
 **Two methods, two jobs.** `read_range` returns `Bytes` — simple, direct, what parsers need for small bounded reads (headers are always < 1 MiB). `read_stream` returns an `AsyncRead` — what extraction needs for potentially huge entry data. A 4 GB stored ZIP entry streams through the decompressor into the output file with bounded memory. The caller never holds the entire payload in RAM.
 
-**Returns `ReadError`, not `ArchiveError`.** The I/O layer has its own error vocabulary covering both local and remote failures, with structured context for decorator routing and user-facing messages. See § ReadError below.
+**Returns `ReadError`, not `CoreError`.** The I/O layer has its own error vocabulary covering both local and remote failures, with structured context for decorator routing and user-facing messages. See § ReadError below.
 
 Format parsers use `read_range()` for headers and `read_stream()` for entry data extraction.
 
@@ -152,10 +152,10 @@ pub struct ReadFailure {
 
 `ReadErrorKind` has specific variants for every failure mode — network transport level (timeout, TLS, DNS), HTTP application level (status codes with headers + body for decorator inspection), and local filesystem (permission denied, file not found, disk I/O error, file locked). Each variant carries enough structured data to generate a genuinely helpful user message without string parsing.
 
-**How format parsers convert `ReadError → ArchiveError`:**
-- `ReadError::Failed(..)` → `ArchiveError::Io(ReadError::Failed(..))`
-- `ReadError::Transport(box)` → `ArchiveError::Io(ReadError::Transport(box))` — tunnel preserved
-- `ReadError::OutOfBounds { .. }` → `ArchiveError::CorruptHeader { .. }` — semantic upconversion
+**How format parsers convert `ReadError → CoreError`:**
+- `ReadError::Failed(..)` → `CoreError::Io(ReadError::Failed(..))`
+- `ReadError::Transport(box)` → `CoreError::Io(ReadError::Transport(box))` — tunnel preserved
+- `ReadError::OutOfBounds { .. }` → `CoreError::CorruptHeader { .. }` — semantic upconversion
 
 ### HttpReadAt — Cloud Performance Requirements
 
@@ -252,7 +252,7 @@ pub fn build_decoder(
     method: CompressionMethod,
     input: impl Read + Send + 'static,
     properties: &[u8],
-) -> Result<Box<dyn Decoder>, ArchiveError>
+) -> Result<Box<dyn Decoder>, CoreError>
 ```
 
 One function, all dispatch. Use `#[cfg(feature)]` on individual match arms — if a feature is disabled at compile time, the `_` fallthrough fires a clean `UnsupportedMethod` error rather than a panic or dead code warning:
@@ -263,7 +263,7 @@ match method {
     CompressionMethod::Deflate => Ok(Box::new(DeflateDecoder::new(input))),
     #[cfg(feature = "lzma")]
     CompressionMethod::Lzma2 => Ok(Box::new(Lzma2Decoder::new(input, properties)?)),
-    _ => Err(ArchiveError::UnsupportedCompression { algorithm: method.to_string() }),
+    _ => Err(CoreError::UnsupportedCompression { algorithm: method.to_string() }),
 }
 ```
 
@@ -278,7 +278,7 @@ pub struct CodecConfig {
 }
 ```
 
-Pass `CodecConfig` into `build_decoder()`. If the archive's LZMA2 properties request a dictionary larger than the cap → `ArchiveError::ResourceLimitExceeded`. Reasonable defaults: desktop = `None`, mobile/cloud server = `Some(128 MiB)`.
+Pass `CodecConfig` into `build_decoder()`. If the archive's LZMA2 properties request a dictionary larger than the cap → `CoreError::ResourceLimitExceeded`. Reasonable defaults: desktop = `None`, mobile/cloud server = `Some(128 MiB)`.
 
 ### Runtime Feature Check
 
@@ -332,6 +332,8 @@ The decompressor reads incrementally from the bridged stream. The sink receives 
 
 **CRC verification** runs inside the same `spawn_blocking` — hash incrementally as decompressed bytes flow through. No second pass needed.
 
+**Mid-stream error recovery:** `read_stream` implementations embed `ReadError` inside `io::Error` before returning the `AsyncRead`. When `SyncIoBridge` surfaces an `io::Error` during decompression, the extraction code recovers the original `ReadError` via `into_inner()` + `downcast::<ReadError>()`. If the downcast succeeds, the error is a stream I/O failure and becomes `CoreError::Io(read_error)`. If it fails, the error originated from the decompressor itself and becomes `CoreError::BitstreamError`. This preserves structured error context (`SourceInfo`, `ReadErrorKind`) across the async→sync boundary.
+
 ### External Crate Mapping
 
 | Algorithm | Crate        | Pure Rust? | Cross-platform notes |
@@ -374,19 +376,19 @@ pub trait ArchiveReader {
     /// The base interface is always a sink — never returns Bytes directly.
     async fn extract<W: AsyncWrite + Send + Unpin>(
         &self, entry: &ArchiveEntry, sink: &mut W,
-    ) -> Result<u64, ArchiveError>;
+    ) -> Result<u64, CoreError>;
 
     /// Decompress + verify CRC, write nothing. Essential for integrity checking.
-    async fn test(&self, entry: &ArchiveEntry) -> Result<(), ArchiveError>;
+    async fn test(&self, entry: &ArchiveEntry) -> Result<(), CoreError>;
 }
 ```
 
 **Sink-based extraction.** `extract()` writes decompressed bytes to any `AsyncWrite` — a file, an HTTP response body, a `Vec<u8>`, `/dev/null` (for test mode). The caller decides the destination, core never buffers the full output.
 
-**Convenience for in-memory use** (CLI, small entries, tests) — lives on the state layer `Archive`, not on `ArchiveCore`:
+**Convenience for in-memory use** (CLI, small entries, tests) — available on both `ArchiveCore` (for tests and internal use) and `Archive` (for products):
 ```rust
 impl Archive {  // state layer Archive
-    pub async fn extract_to_bytes(&self, entry: &ArchiveEntry) -> Result<Bytes, StateError> {
+    pub async fn extract_to_bytes(&self, entry: &ArchiveEntry) -> Result<Bytes, ArchiveError> {
         let mut buf = Vec::with_capacity(entry.uncompressed_size as usize);
         self.extract(entry, &mut buf).await?;
         Ok(Bytes::from(buf))
@@ -429,7 +431,7 @@ fn zip_method(id: u16) -> Result<CompressionMethod> {
         12 => Ok(CompressionMethod::BZip2),
         14 => Ok(CompressionMethod::Lzma),
         93 => Ok(CompressionMethod::Zstd),
-        _ => Err(ArchiveError::UnsupportedCompression { algorithm: id.to_string() }),
+        _ => Err(CoreError::UnsupportedCompression { algorithm: id.to_string() }),
     }
 }
 
@@ -439,7 +441,7 @@ fn sevenz_method(id: &[u8]) -> Result<CompressionMethod> {
         [0x00] => Ok(CompressionMethod::Store),
         [0x21] => Ok(CompressionMethod::Lzma2),
         [0x04, 0x01, 0x08] => Ok(CompressionMethod::Deflate),
-        _ => Err(ArchiveError::UnsupportedCompression { algorithm: id.to_string() }),
+        _ => Err(CoreError::UnsupportedCompression { algorithm: id.to_string() }),
     }
 }
 ```
@@ -538,17 +540,17 @@ The universal cache and session layer. Sits between products (Layer 4) and the s
 - Manages `Archive` (the product-facing handle wrapping a live `ArchiveCore`)
 - Manages `ArchiveCache` (on-disk cross-session metadata cache with invalidation)
 - Builds `EntryTree` (virtual folder structure derived from flat entry names)
-- Translates `ArchiveError` → `StateError` for core errors it understands
-- Tunnels `ReadError::Transport` (inside `ArchiveError::Io`) blindly as `StateError::Transport` — does not inspect or downcast
+- Translates `CoreError` → `ArchiveError` for core errors it understands
+- Tunnels `ReadError::Transport` (inside `CoreError::Io`) blindly as `ArchiveError::Transport` — does not inspect or downcast
 - Handles password prompts (encrypted archives are a universal concern)
 
 **Key types** (all owned by state layer):
 - `Archive` — product-facing handle to an open archive (wraps `ArchiveCore` + cache + entry tree)
-- `StateError` — error type for product consumption (see `ERRORS.md`)
+- `ArchiveError` — error type for product consumption (see `ERRORS.md`)
 - `EntryTree` / `TreeNode` — virtual folder structure
 - `ArchiveCache` / `ArchiveFingerprint` — cross-session metadata + location cache
 
-**Crate placement:** `archive-state`, depends on `archive-core`. Pure cross-platform Rust. No dependency on any horizontal crate (auth, retry, metering). Platform-specific concerns (cache storage path) are injected via traits.
+**Crate placement:** `archive`, depends on `archive-core`. Pure cross-platform Rust. No dependency on any horizontal crate (auth, retry, metering). Platform-specific concerns (cache storage path) are injected via traits.
 
 See `ERRORS.md` for the full error translation flow and tunnel mechanism.
 
@@ -556,10 +558,10 @@ See `ERRORS.md` for the full error translation flow and tunnel mechanism.
 
 ## Horizontal Capabilities (Product-Level Crates)
 
-Optional crates that products pick from to compose their `ReadAt` decorator stack. Each crate depends on `archive-core` (for the `ReadAt` trait and `ArchiveError`), but NOT on `archive-state`. Products assemble decorators, compose them into a `ReadAt` stack, and pass the result down to the state layer.
+Optional crates that products pick from to compose their `ReadAt` decorator stack. Each crate depends on `archive-core` (for the `ReadAt` trait and `CoreError`), but NOT on `archive`. Products assemble decorators, compose them into a `ReadAt` stack, and pass the result down to the state layer.
 
 **`archive-auth`** — OAuth / token lifecycle decorator.
-- `AuthReadAt<R: ReadAt>` — intercepts HTTP 401 responses, boxes `AuthError::TokenExpired` into `ArchiveError::Transport`, lets the product handle refresh.
+- `AuthReadAt<R: ReadAt>` — intercepts HTTP 401 responses, boxes `AuthError::TokenExpired` into `CoreError::Transport`, lets the product handle refresh.
 - `AuthError` — `TokenExpired`, `RefreshFailed`, etc.
 - Products that handle OAuth in the host language (e.g., Kotlin/Swift on mobile) can skip this crate entirely and pass pre-authenticated headers to `HttpReadAt::with_headers()`.
 
@@ -583,7 +585,7 @@ pub struct MeteredReadAt<R: ReadAt> {
 
 **How decorators create tunneled errors:**
 
-Each decorator intercepts errors from the `ReadAt` below it. If the error is something the decorator recognizes (e.g., HTTP 401), it boxes its own error type into `ArchiveError::Transport`. Core carries the box blindly. The state layer carries it blindly. The product at the top opens the box, downcasts to the types it knows about (from the horizontal crates it depends on), and handles or reports them.
+Each decorator intercepts errors from the `ReadAt` below it. If the error is something the decorator recognizes (e.g., HTTP 401), it boxes its own error type into `CoreError::Transport`. Core carries the box blindly. The state layer carries it blindly. The product at the top opens the box, downcasts to the types it knows about (from the horizontal crates it depends on), and handles or reports them.
 
 See `ERRORS.md` § Transport Tunnel for the full multi-hop flow.
 
@@ -594,18 +596,18 @@ See `ERRORS.md` § Transport Tunnel for the full multi-hop flow.
 Each product is an actual binary (or library consumed via FFI). It assembles the full stack: horizontal crates (if needed) → state layer → core.
 
 **Server/SaaS** — serves the web version. The web site can't do direct HTTP range requests (CORS, no Range header control), so it goes through the server API. This is the only metered/freemium path.
-- Assembles: `archive-core` + `archive-state` + `archive-auth` + `archive-retry` + metering (internal)
-- Defines `ServerError` — extends `StateError` with `QuotaExceeded`, `AuthenticationFailed`, etc.
+- Assembles: `archive-core` + `archive` + `archive-auth` + `archive-retry` + metering (internal)
+- Defines `ServerError` — extends `ArchiveError` with `QuotaExceeded`, `AuthenticationFailed`, etc.
 - Billing, quota accounting, OAuth for cloud providers (Dropbox, Drive) all live here.
 
 **KMP Apps (Android / iOS / Desktop)** — standalone products. They are independent cloud snipers — connect directly to Dropbox/Drive, fetch ranges, extract. Buy once, no metering. Built with Compose Multiplatform, consuming the Rust core via UniFFI.
-- Assembles: `archive-core` + `archive-state` + optionally `archive-auth` (or handle OAuth in Kotlin/Swift)
+- Assembles: `archive-core` + `archive` + optionally `archive-auth` (or handle OAuth in Kotlin/Swift)
 - Defines `AppError`
 - Full local archive management (read + write) plus direct cloud sniping
 - No dependency on the server for core functionality
 
 **CLI** — thin shell for dev and power users.
-- Assembles: `archive-core` + `archive-state`, minimal or no decorators
+- Assembles: `archive-core` + `archive`, minimal or no decorators
 - Defines `CliError`
 
 **Web site** — not a Rust product. Consumes the server's HTTP API. Metered/freemium.
@@ -619,7 +621,7 @@ Each product is an actual binary (or library consumed via FFI). It assembles the
 ```rust
 // Internal to archive-core. Products never see this type directly —
 // they interact with Archive (the state layer handle) instead.
-pub(crate) struct ArchiveCore {
+pub struct ArchiveCore {
     inner: ArchiveInner,
 }
 
@@ -665,13 +667,13 @@ pub struct ArchiveEntry {
 
 Format-specific location info (offsets, folder indexes, CRC values) stays inside the format parser's internal parallel array, keyed by `index`.
 
-### ArchiveError
+### CoreError
 
 Error handling follows a layered translation model. Each layer defines errors for its consumer — no layer exposes a lower layer's error types. Errors are either handled (retried, prompted) and disappear, or translated into the consumer's vocabulary.
 
-`ArchiveError` is core's error type. It has NO `Transport` variant — the decorator tunnel lives inside `ReadError::Transport`, which is carried within `ArchiveError::Io(ReadError)`. This keeps `ArchiveError` clean: every variant is genuinely an archive/format concept.
+`CoreError` is core's error type. It has NO `Transport` variant — the decorator tunnel lives inside `ReadError::Transport`, which is carried within `CoreError::Io(ReadError)`. This keeps `CoreError` clean: every variant is genuinely an archive/format concept.
 
-See **`ERRORS.md`** for the full error architecture: `ReadError` (I/O layer), `ArchiveError` (core), `StateError` (state layer), decorator error types, translation flows, and the injection pattern.
+See **`ERRORS.md`** for the full error architecture: `ReadError` (I/O layer), `CoreError` (core), `ArchiveError` (state layer), decorator error types, translation flows, and the injection pattern.
 
 ---
 

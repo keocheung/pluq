@@ -26,7 +26,7 @@ use tokio_util::io::SyncIoBridge;
 use crate::archive_reader::ArchiveReader;
 use crate::codec::build_decoder;
 use crate::junk;
-use crate::{ArchiveEntry, ArchiveError, ReadAt};
+use crate::{ArchiveEntry, CoreError, ReadAt};
 
 /// A parsed ZIP archive backed by any [`ReadAt`] source.
 ///
@@ -51,7 +51,7 @@ impl<R: ReadAt> ZipArchive<R> {
     /// Open a ZIP archive by reading its EOCD and Central Directory.
     ///
     /// This issues exactly **2 range reads** (or 1 if the file is small).
-    pub async fn open(reader: R) -> Result<Self, ArchiveError> {
+    pub async fn open(reader: R) -> Result<Self, CoreError> {
         let eocd = parse::find_eocd(&reader).await?;
         let (entries, locations) = parse::parse_central_directory(&reader, &eocd).await?;
 
@@ -100,13 +100,13 @@ impl<R: ReadAt> ZipArchive<R> {
         &self,
         entry: &ArchiveEntry,
         sink: &mut W,
-    ) -> Result<u64, ArchiveError> {
+    ) -> Result<u64, CoreError> {
         if entry.is_directory {
             return Ok(0);
         }
 
         if entry.is_encrypted {
-            return Err(ArchiveError::PasswordRequired);
+            return Err(CoreError::PasswordRequired);
         }
 
         let location = &self.locations[entry.index];
@@ -117,10 +117,10 @@ impl<R: ReadAt> ZipArchive<R> {
             .await
             .map_err(|e| match e {
                 // LFH signature mismatch — structural corruption
-                crate::io::ReadError::Transport(msg) => ArchiveError::InvalidFormat {
+                crate::io::ReadError::Transport(msg) => CoreError::InvalidFormat {
                     message: msg.to_string(),
                 },
-                other => ArchiveError::Io(other),
+                other => CoreError::Io(other),
             })?;
 
         let compressed_size = entry.compressed_size;
@@ -128,7 +128,7 @@ impl<R: ReadAt> ZipArchive<R> {
 
         // Map the raw method ID to the shared CompressionMethod enum.
         let method = parse::zip_method_to_codec(location.method_id).ok_or_else(|| {
-            ArchiveError::UnsupportedCompression {
+            CoreError::UnsupportedCompression {
                 algorithm: format!("ZIP method id {}", location.method_id),
             }
         })?;
@@ -139,7 +139,7 @@ impl<R: ReadAt> ZipArchive<R> {
             .reader
             .read_stream(data_offset, compressed_size)
             .await
-            .map_err(ArchiveError::Io)?;
+            .map_err(CoreError::Io)?;
 
         // ── Step 3 (spawn_blocking): decompress + CRC verify ─────────────
         // SyncIoBridge wraps the AsyncRead into a sync Read by driving the
@@ -149,19 +149,29 @@ impl<R: ReadAt> ZipArchive<R> {
         let handle = tokio::runtime::Handle::current();
         let sync_reader = SyncIoBridge::new_with_handle(compressed_stream, handle);
 
-        let verified: Vec<u8> = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, ArchiveError> {
+        let verified: Vec<u8> = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, CoreError> {
             let mut decoder = build_decoder(method, sync_reader, &[])?;
             let mut buf = Vec::with_capacity(uncompressed_size as usize);
             decoder
                 .read_to_end(&mut buf)
-                .map_err(|e| ArchiveError::BitstreamError {
-                    detail: format!("decompression failed for '{entry_name}': {e}"),
+                .map_err(|io_err| {
+                    // Try to recover a structured ReadError embedded by read_stream impls.
+                    // If the io::Error wraps a ReadError (from mid-stream failure), extract it.
+                    // Otherwise, it's a decompressor error — classify as BitstreamError.
+                    if let Some(inner) = io_err.into_inner()
+                        && let Ok(read_error) = inner.downcast::<crate::io::ReadError>()
+                    {
+                        return CoreError::Io(*read_error);
+                    }
+                    CoreError::BitstreamError {
+                        detail: format!("decompression failed for '{entry_name}'"),
+                    }
                 })?;
 
             // CRC32 verification — mandatory before returning any bytes.
             let actual_crc = crc32fast::hash(&buf);
             if actual_crc != expected_crc {
-                return Err(ArchiveError::CrcMismatch {
+                return Err(CoreError::CrcMismatch {
                     entry: entry_name,
                     expected: expected_crc,
                     actual: actual_crc,
@@ -171,7 +181,7 @@ impl<R: ReadAt> ZipArchive<R> {
             Ok(buf)
         })
         .await
-        .map_err(|e| ArchiveError::BitstreamError {
+        .map_err(|e| CoreError::BitstreamError {
             detail: format!("decompression task panicked: {e}"),
         })??;
 
@@ -179,7 +189,7 @@ impl<R: ReadAt> ZipArchive<R> {
         let bytes_written = verified.len() as u64;
         sink.write_all(&verified)
             .await
-            .map_err(|e| ArchiveError::BitstreamError {
+            .map_err(|e| CoreError::BitstreamError {
                 detail: format!("write to sink failed: {e}"),
             })?;
 
@@ -190,7 +200,7 @@ impl<R: ReadAt> ZipArchive<R> {
     ///
     /// Equivalent to [`extract`](Self::extract) to a no-op async sink.
     /// Used for archive integrity checking.
-    pub async fn test(&self, entry: &ArchiveEntry) -> Result<(), ArchiveError> {
+    pub async fn test(&self, entry: &ArchiveEntry) -> Result<(), CoreError> {
         self.extract(entry, &mut tokio::io::sink()).await.map(|_| ())
     }
 }
@@ -208,11 +218,11 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for ZipArchive<R> {
         &self,
         entry: &ArchiveEntry,
         sink: &mut W,
-    ) -> Result<u64, ArchiveError> {
+    ) -> Result<u64, CoreError> {
         ZipArchive::extract(self, entry, sink).await
     }
 
-    async fn test(&self, entry: &ArchiveEntry) -> Result<(), ArchiveError> {
+    async fn test(&self, entry: &ArchiveEntry) -> Result<(), CoreError> {
         ZipArchive::test(self, entry).await
     }
 }
@@ -376,9 +386,9 @@ mod tests {
 
         // Should be either CrcMismatch or an InvalidFormat decompression error
         assert!(
-            matches!(result, Err(ArchiveError::CrcMismatch { .. }))
-                || matches!(result, Err(ArchiveError::BitstreamError { .. }))
-                || matches!(result, Err(ArchiveError::InvalidFormat { .. })),
+            matches!(result, Err(CoreError::CrcMismatch { .. }))
+                || matches!(result, Err(CoreError::BitstreamError { .. }))
+                || matches!(result, Err(CoreError::InvalidFormat { .. })),
             "expected CrcMismatch, BitstreamError or InvalidFormat, got: {result:?}"
         );
     }
@@ -413,7 +423,7 @@ mod tests {
         let mut sink = tokio::io::sink();
         let result = zip.extract(&zip.entries()[0], &mut sink).await;
         assert!(
-            matches!(result, Err(ArchiveError::PasswordRequired)),
+            matches!(result, Err(CoreError::PasswordRequired)),
             "expected PasswordRequired, got: {result:?}"
         );
     }
@@ -484,7 +494,7 @@ mod tests {
         let mut sink = tokio::io::sink();
         let result = zip.extract(&zip.entries()[0], &mut sink).await;
         assert!(
-            matches!(result, Err(ArchiveError::UnsupportedCompression { .. })),
+            matches!(result, Err(CoreError::UnsupportedCompression { .. })),
             "expected UnsupportedCompression, got: {result:?}"
         );
     }
@@ -504,7 +514,7 @@ mod tests {
         let result = ZipArchive::open(reader2).await;
 
         assert!(
-            matches!(result, Err(ArchiveError::InvalidFormat { .. })),
+            matches!(result, Err(CoreError::InvalidFormat { .. })),
             "expected InvalidFormat for truncated ZIP, got: {:?}",
             result.err()
         );

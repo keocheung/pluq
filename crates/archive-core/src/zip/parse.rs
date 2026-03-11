@@ -12,7 +12,7 @@
 use std::time::{Duration, SystemTime};
 
 use crate::codec::CompressionMethod;
-use crate::{ArchiveEntry, ArchiveError, ReadAt};
+use crate::{ArchiveEntry, CoreError, ReadAt};
 
 // ── Filename decoding ─────────────────────────────────────────────────────
 
@@ -131,11 +131,11 @@ pub struct Eocd {
 /// If the standard EOCD contains sentinel values (`0xFFFF` / `0xFFFFFFFF`), we
 /// locate the ZIP64 EOCD Locator (immediately before the standard EOCD) and read
 /// the ZIP64 EOCD Record to get the real 64-bit field values.
-pub async fn find_eocd(reader: &impl ReadAt) -> Result<Eocd, ArchiveError> {
-    let file_size = reader.size().await.map_err(ArchiveError::Io)?;
+pub async fn find_eocd(reader: &impl ReadAt) -> Result<Eocd, CoreError> {
+    let file_size = reader.size().await.map_err(CoreError::Io)?;
 
     if file_size < EOCD_MIN_SIZE as u64 {
-        return Err(ArchiveError::InvalidFormat {
+        return Err(CoreError::InvalidFormat {
             message: "file too small to be a valid ZIP".into(),
         });
     }
@@ -146,7 +146,7 @@ pub async fn find_eocd(reader: &impl ReadAt) -> Result<Eocd, ArchiveError> {
     let tail = reader
         .read_range(search_offset, search_len)
         .await
-        .map_err(ArchiveError::Io)?;
+        .map_err(CoreError::Io)?;
 
     // Scan backwards for the standard EOCD signature.
     let tail_len = tail.len();
@@ -158,7 +158,7 @@ pub async fn find_eocd(reader: &impl ReadAt) -> Result<Eocd, ArchiveError> {
         }
     }
 
-    let pos = eocd_pos.ok_or_else(|| ArchiveError::InvalidFormat {
+    let pos = eocd_pos.ok_or_else(|| CoreError::InvalidFormat {
         message: "EOCD signature not found — not a valid ZIP file".into(),
     })?;
 
@@ -183,14 +183,14 @@ pub async fn find_eocd(reader: &impl ReadAt) -> Result<Eocd, ArchiveError> {
     // ── ZIP64 path ────────────────────────────────────────────────────────
     // The ZIP64 EOCD Locator sits immediately before the standard EOCD.
     if pos < EOCD64_LOCATOR_SIZE {
-        return Err(ArchiveError::InvalidFormat {
+        return Err(CoreError::InvalidFormat {
             message: "ZIP64 EOCD Locator not found in scanned tail".into(),
         });
     }
 
     let locator_pos = pos - EOCD64_LOCATOR_SIZE;
     if read_u32_le(&tail, locator_pos) != EOCD64_LOCATOR_SIGNATURE {
-        return Err(ArchiveError::InvalidFormat {
+        return Err(CoreError::InvalidFormat {
             message: "ZIP64 EOCD Locator signature missing".into(),
         });
     }
@@ -214,10 +214,10 @@ pub async fn find_eocd(reader: &impl ReadAt) -> Result<Eocd, ArchiveError> {
             let rec = reader
                 .read_range(eocd64_abs_offset, EOCD64_RECORD_MIN_SIZE as u64)
                 .await
-                .map_err(ArchiveError::Io)?;
+                .map_err(CoreError::Io)?;
 
             if read_u32_le(&rec, 0) != EOCD64_RECORD_SIGNATURE {
-                return Err(ArchiveError::InvalidFormat {
+                return Err(CoreError::InvalidFormat {
                     message: "ZIP64 EOCD Record signature mismatch".into(),
                 });
             }
@@ -231,7 +231,7 @@ pub async fn find_eocd(reader: &impl ReadAt) -> Result<Eocd, ArchiveError> {
     };
 
     if read_u32_le(&tail, eocd64_pos) != EOCD64_RECORD_SIGNATURE {
-        return Err(ArchiveError::InvalidFormat {
+        return Err(CoreError::InvalidFormat {
             message: "ZIP64 EOCD Record signature mismatch".into(),
         });
     }
@@ -256,11 +256,11 @@ pub async fn find_eocd(reader: &impl ReadAt) -> Result<Eocd, ArchiveError> {
 pub async fn parse_central_directory(
     reader: &impl ReadAt,
     eocd: &Eocd,
-) -> Result<(Vec<ArchiveEntry>, Vec<ZipEntryLocation>), ArchiveError> {
+) -> Result<(Vec<ArchiveEntry>, Vec<ZipEntryLocation>), CoreError> {
     let cd_bytes = reader
         .read_range(eocd.cd_offset, eocd.cd_size)
         .await
-        .map_err(ArchiveError::Io)?;
+        .map_err(CoreError::Io)?;
 
     let capacity = eocd.entry_count.min(65536) as usize;
     let mut entries: Vec<ArchiveEntry> = Vec::with_capacity(capacity);
@@ -269,14 +269,14 @@ pub async fn parse_central_directory(
 
     for index in 0..eocd.entry_count as usize {
         if cursor + 46 > cd_bytes.len() {
-            return Err(ArchiveError::InvalidFormat {
+            return Err(CoreError::InvalidFormat {
                 message: "unexpected end of Central Directory".into(),
             });
         }
 
         let sig = read_u32_le(&cd_bytes, cursor);
         if sig != CD_ENTRY_SIGNATURE {
-            return Err(ArchiveError::InvalidFormat {
+            return Err(CoreError::InvalidFormat {
                 message: format!("invalid CD entry signature: {sig:#010x}"),
             });
         }
@@ -298,7 +298,7 @@ pub async fn parse_central_directory(
         let name_end = name_start + name_len;
 
         if name_end > cd_bytes.len() {
-            return Err(ArchiveError::InvalidFormat {
+            return Err(CoreError::InvalidFormat {
                 message: "file name extends beyond Central Directory".into(),
             });
         }
@@ -491,8 +491,8 @@ pub async fn resolve_data_offset(
 
     let sig = read_u32_le(&lfh, 0);
     if sig != LOCAL_FILE_HEADER_SIGNATURE {
-        // We can't use ArchiveError here — this returns ReadError.
-        // Callers that want ArchiveError can map this.
+        // We can't use CoreError here — this returns ReadError.
+        // Callers that want CoreError can map this.
         // Use a sentinel Transport error so the caller can distinguish it.
         return Err(crate::io::ReadError::Transport(
             format!("invalid Local File Header signature: {sig:#010x}").into(),

@@ -3,7 +3,7 @@ use bytes::Bytes;
 use tokio::io::AsyncWrite;
 
 use crate::entry_tree::EntryTree;
-use crate::state_error::{translate_core_error, StateError};
+use crate::error::{translate_core_error, ArchiveError};
 
 /// Product-facing handle to an open archive.
 ///
@@ -16,7 +16,7 @@ pub struct Archive {
 
 impl Archive {
     /// Open an archive from a local path or URL.
-    pub async fn open(source: &str) -> Result<Self, StateError> {
+    pub async fn open(source: &str) -> Result<Self, ArchiveError> {
         // TODO: check ArchiveCache before parsing (requires fingerprint collection).
         let core = ArchiveCore::open(source)
             .await
@@ -46,7 +46,7 @@ impl Archive {
         &self,
         entry: &ArchiveEntry,
         sink: &mut W,
-    ) -> Result<u64, StateError> {
+    ) -> Result<u64, ArchiveError> {
         self.core
             .extract(entry, sink)
             .await
@@ -57,7 +57,7 @@ impl Archive {
     ///
     /// Convenience wrapper around [`extract`](Self::extract) for small entries.
     /// For large entries, use `extract()` with a file sink instead.
-    pub async fn extract_to_bytes(&self, entry: &ArchiveEntry) -> Result<Bytes, StateError> {
+    pub async fn extract_to_bytes(&self, entry: &ArchiveEntry) -> Result<Bytes, ArchiveError> {
         self.core
             .extract_to_bytes(entry)
             .await
@@ -70,7 +70,7 @@ impl Archive {
     }
 
     /// Decompress and verify CRC without retaining output.
-    pub async fn test(&self, entry: &ArchiveEntry) -> Result<(), StateError> {
+    pub async fn test(&self, entry: &ArchiveEntry) -> Result<(), ArchiveError> {
         self.core
             .test(entry)
             .await

@@ -9,7 +9,7 @@ use crate::io::ReadError;
 /// `is_corruption()`, etc.) for broad categorisation.
 #[non_exhaustive]
 #[derive(Debug, Error)]
-pub enum ArchiveError {
+pub enum CoreError {
     /// Underlying I/O or network error.
     ///
     /// Wraps a [`ReadError`] from the I/O layer — see that type for structured details
@@ -77,13 +77,13 @@ pub enum ArchiveError {
     Cancelled,
 }
 
-impl From<ReadError> for ArchiveError {
+impl From<ReadError> for CoreError {
     fn from(e: ReadError) -> Self {
-        ArchiveError::Io(e)
+        CoreError::Io(e)
     }
 }
 
-impl ArchiveError {
+impl CoreError {
     /// True for errors where retrying with different input might succeed
     /// (wrong password, cancellation).
     pub fn is_recoverable(&self) -> bool {
@@ -132,7 +132,7 @@ impl ArchiveError {
 
 /// How encryption was detected on an archive entry.
 ///
-/// Carried in [`ArchiveError::WrongPassword`] to give the state layer
+/// Carried in [`CoreError::WrongPassword`] to give the state layer
 /// and product enough context to build a precise user-facing message.
 ///
 /// Different detection methods have different confidence levels:

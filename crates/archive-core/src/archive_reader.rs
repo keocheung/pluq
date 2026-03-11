@@ -7,7 +7,7 @@
 use tokio::io::AsyncWrite;
 
 use crate::junk;
-use crate::{ArchiveEntry, ArchiveError};
+use crate::{ArchiveEntry, CoreError};
 
 /// Unified read interface implemented by every format parser.
 ///
@@ -49,7 +49,7 @@ pub trait ArchiveReader {
         &self,
         entry: &ArchiveEntry,
         sink: &mut W,
-    ) -> impl std::future::Future<Output = Result<u64, ArchiveError>> + Send;
+    ) -> impl std::future::Future<Output = Result<u64, CoreError>> + Send;
 
     /// Decompress and verify CRC without retaining output.
     ///
@@ -58,5 +58,5 @@ pub trait ArchiveReader {
     fn test(
         &self,
         entry: &ArchiveEntry,
-    ) -> impl std::future::Future<Output = Result<(), ArchiveError>> + Send;
+    ) -> impl std::future::Future<Output = Result<(), CoreError>> + Send;
 }

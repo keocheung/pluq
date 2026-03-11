@@ -1,9 +1,9 @@
 mod archive;
 mod cache;
 mod entry_tree;
-mod state_error;
+mod error;
 
 pub use archive::Archive;
 pub use cache::{ArchiveCache, ArchiveFingerprint};
 pub use entry_tree::{EntryTree, TreeNode};
-pub use state_error::{build_user_message, translate_core_error, StateError};
+pub use error::{build_user_message, translate_core_error, ArchiveError};

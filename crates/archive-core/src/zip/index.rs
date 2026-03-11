@@ -12,11 +12,11 @@ use crate::io::{
     ReadError,
     read_error::{ReadErrorKind, ReadFailure, ReadOperation, SourceInfo},
 };
-use crate::{ArchiveEntry, ArchiveError};
+use crate::{ArchiveEntry, CoreError};
 
 /// A cached, serializable snapshot of a ZIP archive's file listing.
 ///
-/// **Superseded by [`archive_state::ArchiveCache`]** — format-agnostic and
+/// **Superseded by [`archive::ArchiveCache`]** — format-agnostic and
 /// richer staleness detection. `ZipIndex` is kept for backwards compatibility
 /// and will be removed in a future release.
 #[derive(Debug, Serialize, Deserialize)]
@@ -53,12 +53,12 @@ impl ZipIndex {
     }
 
     /// Serialize this index to a JSON file on disk.
-    pub fn save(&self, path: impl AsRef<Path>) -> Result<(), ArchiveError> {
-        let json = serde_json::to_string_pretty(self).map_err(|e| ArchiveError::InvalidFormat {
+    pub fn save(&self, path: impl AsRef<Path>) -> Result<(), CoreError> {
+        let json = serde_json::to_string_pretty(self).map_err(|e| CoreError::InvalidFormat {
             message: format!("failed to serialize index: {e}"),
         })?;
         std::fs::write(path.as_ref(), &json).map_err(|e| {
-            ArchiveError::Io(ReadError::Failed(Box::new(ReadFailure {
+            CoreError::Io(ReadError::Failed(Box::new(ReadFailure {
                 source: SourceInfo::LocalFile {
                     path: path.as_ref().to_path_buf(),
                 },
@@ -76,9 +76,9 @@ impl ZipIndex {
     }
 
     /// Load an index from a JSON file on disk.
-    pub fn load(path: impl AsRef<Path>) -> Result<Self, ArchiveError> {
+    pub fn load(path: impl AsRef<Path>) -> Result<Self, CoreError> {
         let json = std::fs::read_to_string(path.as_ref()).map_err(|e| {
-            ArchiveError::Io(ReadError::Failed(Box::new(ReadFailure {
+            CoreError::Io(ReadError::Failed(Box::new(ReadFailure {
                 source: SourceInfo::LocalFile {
                     path: path.as_ref().to_path_buf(),
                 },
@@ -90,7 +90,7 @@ impl ZipIndex {
             })))
         })?;
         let index: ZipIndex =
-            serde_json::from_str(&json).map_err(|e| ArchiveError::InvalidFormat {
+            serde_json::from_str(&json).map_err(|e| CoreError::InvalidFormat {
                 message: format!("failed to deserialize index: {e}"),
             })?;
         Ok(index)

@@ -8,7 +8,7 @@
 //!   or `lzma-rust2` directly.
 //! - [`build_decoder`] is the single dispatch point. Add a new algorithm by adding a
 //!   match arm here — format parsers see no change.
-//! - Algorithms not yet implemented return [`ArchiveError::UnsupportedCompression`] rather
+//! - Algorithms not yet implemented return [`CoreError::UnsupportedCompression`] rather
 //!   than panicking or linking dead code.
 
 mod deflate;
@@ -19,7 +19,7 @@ pub use store::StoreDecoder;
 
 use std::io::{self, Read, Write};
 
-use crate::ArchiveError;
+use crate::CoreError;
 
 // ── CompressionMethod ──────────────────────────────────────────────────────
 
@@ -118,16 +118,16 @@ pub trait Encoder: Write + Send {
 /// Pass `&[]` for codecs that don't need properties (Store, Deflate).
 ///
 /// # Errors
-/// Returns [`ArchiveError::UnsupportedCompression`] if the method is not compiled in.
+/// Returns [`CoreError::UnsupportedCompression`] if the method is not compiled in.
 pub fn build_decoder<'a>(
     method: CompressionMethod,
     input: impl Read + Send + 'a,
     _properties: &[u8],
-) -> Result<Box<dyn Decoder + 'a>, ArchiveError> {
+) -> Result<Box<dyn Decoder + 'a>, CoreError> {
     match method {
         CompressionMethod::Store => Ok(Box::new(StoreDecoder::new(input))),
         CompressionMethod::Deflate => Ok(Box::new(DeflateDecoder::new(input))),
-        other => Err(ArchiveError::UnsupportedCompression {
+        other => Err(CoreError::UnsupportedCompression {
             algorithm: other.to_string(),
         }),
     }
@@ -197,7 +197,7 @@ mod tests {
         ] {
             let result = build_decoder(method, dummy, &[]);
             assert!(
-                matches!(result, Err(ArchiveError::UnsupportedCompression { .. })),
+                matches!(result, Err(CoreError::UnsupportedCompression { .. })),
                 "{method} should return UnsupportedCompression, got: {:?}",
                 result.err()
             );

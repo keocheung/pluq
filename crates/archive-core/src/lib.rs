@@ -1,4 +1,4 @@
-mod archive_error;
+mod core_error;
 pub mod archive_reader;
 pub mod codec;
 mod entry;
@@ -8,7 +8,7 @@ pub mod junk;
 mod progress;
 pub mod zip;
 
-// Primary public API — use this (via archive-state in production code).
+// Primary public API — use this (via archive crate in production code).
 pub use facade::ArchiveCore;
 
 // Trait for format-agnostic archive operations.
@@ -18,7 +18,7 @@ pub use archive_reader::ArchiveReader;
 pub use codec::CompressionMethod;
 
 // Data types.
-pub use archive_error::{ArchiveError, PasswordDetectionMethod};
+pub use core_error::{CoreError, PasswordDetectionMethod};
 pub use entry::ArchiveEntry;
 
 // Progress reporting + cancellation.

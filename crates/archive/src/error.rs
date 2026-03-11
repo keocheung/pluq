@@ -1,18 +1,18 @@
 use archive_core::io::read_error::{
     NetworkPhase, ReadErrorKind, ReadFailure, SourceInfo,
 };
-use archive_core::{ArchiveError, ReadError};
+use archive_core::{CoreError, ReadError};
 
-// ── StateError ────────────────────────────────────────────────────────────────
+// ── ArchiveError ────────────────────────────────────────────────────────────────
 
 /// User-facing errors produced by the state layer.
 ///
 /// Core errors are *translated* into these variants — products never see
-/// `ArchiveError` or `ReadError` directly. `Transport` errors are forwarded
+/// `CoreError` or `ReadError` directly. `Transport` errors are forwarded
 /// blindly so decorators (auth, metering) can downcast their own types.
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
-pub enum StateError {
+pub enum ArchiveError {
     #[error("file corrupted: {filename}")]
     FileCorrupted { filename: String },
 
@@ -44,60 +44,60 @@ pub enum StateError {
 
 // ── Error translation ─────────────────────────────────────────────────────────
 
-/// Translate a core `ArchiveError` into a user-facing `StateError`.
+/// Translate a core `CoreError` into a user-facing `ArchiveError`.
 ///
 /// This is the single translation boundary: core errors never escape the
 /// state layer. Transport errors are forwarded opaquely so decorators
 /// (auth, metering, etc.) can downcast their own payloads.
-pub fn translate_core_error(err: ArchiveError) -> StateError {
+pub fn translate_core_error(err: CoreError) -> ArchiveError {
     match err {
         // I/O errors: route by ReadError variant.
-        ArchiveError::Io(ReadError::Transport(boxed)) => StateError::Transport(boxed),
-        ArchiveError::Io(ReadError::Failed(f)) => StateError::ConnectionFailed {
+        CoreError::Io(ReadError::Transport(boxed)) => ArchiveError::Transport(boxed),
+        CoreError::Io(ReadError::Failed(f)) => ArchiveError::ConnectionFailed {
             detail: build_user_message(&f),
         },
-        ArchiveError::Io(ReadError::OutOfBounds { .. }) => StateError::Internal {
+        CoreError::Io(ReadError::OutOfBounds { .. }) => ArchiveError::Internal {
             detail: "unexpected OutOfBounds at state layer".into(),
         },
 
         // Corruption.
-        ArchiveError::CrcMismatch { entry, .. } => StateError::FileCorrupted { filename: entry },
-        ArchiveError::InvalidFormat { message } => StateError::UnsupportedFormat {
+        CoreError::CrcMismatch { entry, .. } => ArchiveError::FileCorrupted { filename: entry },
+        CoreError::InvalidFormat { message } => ArchiveError::UnsupportedFormat {
             detail: message,
         },
-        ArchiveError::CorruptHeader { reason, .. } => StateError::FileCorrupted {
+        CoreError::CorruptHeader { reason, .. } => ArchiveError::FileCorrupted {
             filename: format!("header: {reason}"),
         },
-        ArchiveError::BitstreamError { detail } => StateError::FileCorrupted {
+        CoreError::BitstreamError { detail } => ArchiveError::FileCorrupted {
             filename: format!("decompression: {detail}"),
         },
 
         // Encryption.
-        ArchiveError::PasswordRequired => StateError::PasswordNeeded,
-        ArchiveError::WrongPassword { .. } => StateError::PasswordNeeded,
+        CoreError::PasswordRequired => ArchiveError::PasswordNeeded,
+        CoreError::WrongPassword { .. } => ArchiveError::PasswordNeeded,
 
         // Unsupported.
-        ArchiveError::UnsupportedFormat { format } => StateError::UnsupportedFormat {
+        CoreError::UnsupportedFormat { format } => ArchiveError::UnsupportedFormat {
             detail: format,
         },
-        ArchiveError::UnsupportedCompression { algorithm } => StateError::UnsupportedFormat {
+        CoreError::UnsupportedCompression { algorithm } => ArchiveError::UnsupportedFormat {
             detail: algorithm,
         },
-        ArchiveError::UnsupportedFeature { detail } => StateError::UnsupportedFormat { detail },
+        CoreError::UnsupportedFeature { detail } => ArchiveError::UnsupportedFormat { detail },
 
         // Security.
-        ArchiveError::PathTraversal { path } => StateError::SecurityRisk {
+        CoreError::PathTraversal { path } => ArchiveError::SecurityRisk {
             detail: format!("dangerous path: {path}"),
         },
-        ArchiveError::SymlinkTargetEscape { path, target } => StateError::SecurityRisk {
+        CoreError::SymlinkTargetEscape { path, target } => ArchiveError::SecurityRisk {
             detail: format!("dangerous symlink: {path} -> {target}"),
         },
 
         // Cancellation.
-        ArchiveError::Cancelled => StateError::Cancelled,
+        CoreError::Cancelled => ArchiveError::Cancelled,
 
-        // Catch-all for any future variants added to ArchiveError.
-        other => StateError::Internal {
+        // Catch-all for any future variants added to CoreError.
+        other => ArchiveError::Internal {
             detail: other.to_string(),
         },
     }
@@ -163,12 +163,12 @@ mod tests {
     use archive_core::io::read_error::{
         NetworkPhase, ReadErrorKind, ReadFailure, ReadOperation, SourceInfo,
     };
-    use archive_core::{ArchiveError, PasswordDetectionMethod, ReadError};
+    use archive_core::{CoreError, PasswordDetectionMethod, ReadError};
 
     use super::*;
 
-    fn make_failed(kind: ReadErrorKind) -> ArchiveError {
-        ArchiveError::Io(ReadError::Failed(Box::new(ReadFailure {
+    fn make_failed(kind: ReadErrorKind) -> CoreError {
+        CoreError::Io(ReadError::Failed(Box::new(ReadFailure {
             source: SourceInfo::Http {
                 url: "https://example.com/file.zip".into(),
             },
@@ -182,81 +182,81 @@ mod tests {
     fn transport_is_tunnelled() {
         let boxed: Box<dyn std::error::Error + Send + Sync> =
             Box::new(std::io::Error::other("auth expired"));
-        let err = ArchiveError::Io(ReadError::Transport(boxed));
-        assert!(matches!(translate_core_error(err), StateError::Transport(_)));
+        let err = CoreError::Io(ReadError::Transport(boxed));
+        assert!(matches!(translate_core_error(err), ArchiveError::Transport(_)));
     }
 
     #[test]
     fn out_of_bounds_becomes_internal() {
-        let err = ArchiveError::Io(ReadError::OutOfBounds {
+        let err = CoreError::Io(ReadError::OutOfBounds {
             offset: 0,
             len: 100,
             size: 50,
         });
         assert!(matches!(
             translate_core_error(err),
-            StateError::Internal { .. }
+            ArchiveError::Internal { .. }
         ));
     }
 
     #[test]
     fn crc_mismatch_becomes_file_corrupted() {
-        let err = ArchiveError::CrcMismatch {
+        let err = CoreError::CrcMismatch {
             entry: "file.txt".into(),
             expected: 0xDEAD,
             actual: 0xBEEF,
         };
         assert!(matches!(
             translate_core_error(err),
-            StateError::FileCorrupted { filename } if filename == "file.txt"
+            ArchiveError::FileCorrupted { filename } if filename == "file.txt"
         ));
     }
 
     #[test]
     fn password_required_becomes_password_needed() {
         assert!(matches!(
-            translate_core_error(ArchiveError::PasswordRequired),
-            StateError::PasswordNeeded
+            translate_core_error(CoreError::PasswordRequired),
+            ArchiveError::PasswordNeeded
         ));
     }
 
     #[test]
     fn wrong_password_becomes_password_needed() {
         assert!(matches!(
-            translate_core_error(ArchiveError::WrongPassword {
+            translate_core_error(CoreError::WrongPassword {
                 method: PasswordDetectionMethod::CrcMismatch
             }),
-            StateError::PasswordNeeded
+            ArchiveError::PasswordNeeded
         ));
     }
 
     #[test]
     fn unsupported_compression_becomes_unsupported_format() {
-        let err = ArchiveError::UnsupportedCompression {
+        let err = CoreError::UnsupportedCompression {
             algorithm: "LZMA2".into(),
         };
         assert!(matches!(
             translate_core_error(err),
-            StateError::UnsupportedFormat { detail } if detail == "LZMA2"
+            ArchiveError::UnsupportedFormat { detail } if detail == "LZMA2"
         ));
     }
 
     #[test]
     fn path_traversal_becomes_security_risk() {
-        let err = ArchiveError::PathTraversal {
+        let err = CoreError::PathTraversal {
             path: "../etc/passwd".into(),
         };
         assert!(matches!(
             translate_core_error(err),
-            StateError::SecurityRisk { .. }
+            ArchiveError::SecurityRisk { .. }
         ));
     }
 
     #[test]
     fn cancelled_maps_to_cancelled() {
         assert!(matches!(
-            translate_core_error(ArchiveError::Cancelled),
-            StateError::Cancelled
+            translate_core_error(CoreError::Cancelled),
+            ArchiveError::Cancelled
         ));
     }
 
@@ -265,7 +265,7 @@ mod tests {
         let msg = match translate_core_error(make_failed(ReadErrorKind::NetworkTimeout {
             phase: NetworkPhase::Connect,
         })) {
-            StateError::ConnectionFailed { detail } => detail,
+            ArchiveError::ConnectionFailed { detail } => detail,
             other => panic!("unexpected: {other:?}"),
         };
         assert!(msg.contains("timed out"), "got: {msg}");
@@ -273,7 +273,7 @@ mod tests {
 
     #[test]
     fn build_user_message_file_not_found() {
-        let err = ArchiveError::Io(ReadError::Failed(Box::new(ReadFailure {
+        let err = CoreError::Io(ReadError::Failed(Box::new(ReadFailure {
             source: SourceInfo::LocalFile {
                 path: PathBuf::from("/tmp/test.zip"),
             },
@@ -282,7 +282,7 @@ mod tests {
             diagnostic: "ENOENT".into(),
         })));
         let msg = match translate_core_error(err) {
-            StateError::ConnectionFailed { detail } => detail,
+            ArchiveError::ConnectionFailed { detail } => detail,
             other => panic!("unexpected: {other:?}"),
         };
         assert!(msg.contains("moved or deleted"), "got: {msg}");
@@ -295,7 +295,7 @@ mod tests {
             headers: vec![],
             body: None,
         })) {
-            StateError::ConnectionFailed { detail } => detail,
+            ArchiveError::ConnectionFailed { detail } => detail,
             other => panic!("unexpected: {other:?}"),
         };
         assert!(msg.contains("404"), "got: {msg}");

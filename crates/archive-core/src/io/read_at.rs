@@ -13,7 +13,7 @@ use crate::io::ReadError;
 /// - [`read_range`](Self::read_range) returns `Bytes` — simple, for bounded header/metadata reads.
 /// - [`read_stream`](Self::read_stream) returns `AsyncRead` — for large entry data extraction.
 ///
-/// Returns `ReadError`, not `ArchiveError`. Format parsers convert at their call boundaries.
+/// Returns `ReadError`, not `CoreError`. Format parsers convert at their call boundaries.
 pub trait ReadAt: Send + Sync {
     /// Read `len` bytes at `offset` into memory. for bounded header/metadata reads.
     ///

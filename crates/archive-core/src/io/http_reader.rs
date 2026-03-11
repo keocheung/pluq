@@ -163,9 +163,17 @@ impl ReadAt for HttpReadAt {
             send_range_request(&self.client, &self.url, &self.extra_headers, offset, len).await?;
 
         // Wrap the response bytes_stream into an AsyncRead — zero buffering.
-        let stream = response
-            .bytes_stream()
-            .map_err(std::io::Error::other);
+        // Mid-stream errors are embedded as ReadError inside io::Error so the
+        // extraction code can recover structured context after SyncIoBridge.
+        let url = self.url.clone();
+        let stream = response.bytes_stream().map_err(move |e| {
+            let read_error = classify_reqwest_error(
+                e,
+                &url,
+                ReadOperation::ReadRange { offset, len },
+            );
+            std::io::Error::other(read_error)
+        });
         let async_read = StreamReader::new(stream);
 
         Ok(Box::new(async_read) as Box<dyn AsyncRead + Send + Unpin>)

@@ -14,7 +14,7 @@ use tokio::io::AsyncWrite;
 use crate::io::Source;
 use crate::junk;
 use crate::zip::ZipArchive;
-use crate::{ArchiveEntry, ArchiveError};
+use crate::{ArchiveEntry, CoreError};
 
 /// A format-agnostic archive handle.
 ///
@@ -22,8 +22,8 @@ use crate::{ArchiveEntry, ArchiveError};
 /// (local file or HTTP URL) and the archive format (ZIP, RAR, 7z, ...)./
 ///
 /// This is the primary public API for the core layer. The state layer
-/// (`archive-state`) wraps this type — products should interact with
-/// `archive_state::Archive`, not this type directly.
+/// (`archive`) wraps this type — products should interact with
+/// `archive::Archive`, not this type directly.
 pub struct ArchiveCore {
     inner: ArchiveInner,
 }
@@ -51,7 +51,7 @@ impl ArchiveCore {
     /// // Cloud file (Dropbox, Drive, etc.)
     /// let archive = ArchiveCore::open("https://dropbox.com/...?dl=1").await?;
     /// ```
-    pub async fn open(source: &str) -> Result<Self, ArchiveError> {
+    pub async fn open(source: &str) -> Result<Self, CoreError> {
         let reader = Source::detect(source);
 
         // For now, try ZIP. When we add RAR/7z, we'll try multiple formats
@@ -95,7 +95,7 @@ impl ArchiveCore {
         &self,
         entry: &ArchiveEntry,
         sink: &mut W,
-    ) -> Result<u64, ArchiveError> {
+    ) -> Result<u64, CoreError> {
         match &self.inner {
             ArchiveInner::Zip(z) => z.extract(entry, sink).await,
         }
@@ -105,7 +105,7 @@ impl ArchiveCore {
     ///
     /// Convenience wrapper around [`extract`](Self::extract) for small entries.
     /// For large entries (multi-GB), use `extract()` with a file sink instead.
-    pub async fn extract_to_bytes(&self, entry: &ArchiveEntry) -> Result<Bytes, ArchiveError> {
+    pub async fn extract_to_bytes(&self, entry: &ArchiveEntry) -> Result<Bytes, CoreError> {
         let mut buf = Vec::with_capacity(entry.uncompressed_size as usize);
         self.extract(entry, &mut buf).await?;
         Ok(Bytes::from(buf))
@@ -123,7 +123,7 @@ impl ArchiveCore {
     /// Decompress and verify CRC without retaining output.
     ///
     /// Used for archive integrity checking.
-    pub async fn test(&self, entry: &ArchiveEntry) -> Result<(), ArchiveError> {
+    pub async fn test(&self, entry: &ArchiveEntry) -> Result<(), CoreError> {
         match &self.inner {
             ArchiveInner::Zip(z) => z.test(entry).await,
         }

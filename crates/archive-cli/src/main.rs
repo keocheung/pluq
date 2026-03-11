@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-use archive_state::Archive;
+use archive::Archive;
 
 /// Archive Sniper — surgical archive extraction from local or cloud storage.
 #[derive(Parser)]

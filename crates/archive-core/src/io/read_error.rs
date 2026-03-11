@@ -7,8 +7,8 @@ use bytes::Bytes;
 
 /// Error returned by [`ReadAt`](super::ReadAt) implementations.
 ///
-/// This is the I/O layer's own error language — independent of [`ArchiveError`](crate::ArchiveError).
-/// Format parsers convert `ReadError → ArchiveError` at their call boundaries.
+/// This is the I/O layer's own error language — independent of [`CoreError`](crate::CoreError).
+/// Format parsers convert `ReadError → CoreError` at their call boundaries.
 ///
 /// # Variants
 /// - [`Failed`](Self::Failed): structured failure with source, operation, and kind context.
@@ -58,7 +58,7 @@ impl std::error::Error for ReadError {
 ///
 /// Carries enough information to:
 /// - Build a human-readable message without string matching.
-/// - Route to the correct [`StateError`](crate::archive_error) variant.
+/// - Route to the correct [`ArchiveError`](archive::ArchiveError) variant.
 /// - Log with meaningful source and operation context.
 #[derive(Debug)]
 pub struct ReadFailure {

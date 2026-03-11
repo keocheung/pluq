@@ -33,7 +33,7 @@ pub struct ArchiveEntry {
     /// `true` if this entry's data is encrypted.
     ///
     /// Attempting to extract an encrypted entry without a password will return
-    /// [`ArchiveError::PasswordRequired`].
+    /// [`CoreError::PasswordRequired`].
     pub is_encrypted: bool,
 
     /// Last-modified timestamp, if present in the archive.

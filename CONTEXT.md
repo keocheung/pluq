@@ -3,8 +3,9 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 2 — Core engine: remaining formats + write support.
-* **Current Active Task:** SESSION_PLAN.md complete. Next: RAR format parser.
+* **Current Active Task:** Naming convention renames complete. Next: RAR format parser.
 * **Baseline:** 64 tests pass, clippy clean. SESSION_PLAN.md Steps 1–11 complete.
+* **Note:** `CoreError` replaces old `ArchiveError` (core error type). `ArchiveError` replaces old `StateError` (product-facing error type from the `archive` crate). `archive` crate replaces old `archive-state`.
 
 ---
 
@@ -57,8 +58,8 @@ fn size(&self) -> impl Future<Output = Result<u64, ReadError>> + Send;
 Abstracts *what format* the bytes represent. Each format gets its own implementation.
 
 ```rust
-fn entries(&self) -> Result<Vec<ArchiveEntry>, ArchiveError>;
-fn extract(&self, entry: &ArchiveEntry) -> Result<Bytes, ArchiveError>;
+fn entries(&self) -> Result<Vec<ArchiveEntry>, CoreError>;
+fn extract(&self, entry: &ArchiveEntry) -> Result<Bytes, CoreError>;
 ```
 
 * The state layer (Layer 3.5) talks to `ArchiveReader` / `Archive`. Products (CLI, server, KMP apps) talk to the state layer.
@@ -94,7 +95,7 @@ fn extract(&self, entry: &ArchiveEntry) -> Result<Bytes, ArchiveError>;
 ### Architecture Convention
 
 * **`archive-core`** holds all stateless archive logic (parsing, extraction, codecs, format detection). The core entry point is `Archive::open(reader)` which takes a `ReadAt` and auto-detects format. Core is stateless — no auth, no retries, no caching.
-* **`archive-state`** [TO BUILD] is the State Layer (Layer 3.5) — a **universal cache layer**. It holds session state, metadata caching (`ArchiveCache`), and entry tree building (`EntryTree`). It does NOT hold auth, retry, billing, or quota logic — those are product-level concerns in horizontal crates (see `ARCHITECTURE.md` § Horizontal Capabilities). The state layer receives a `ReadAt` from the product above (possibly decorated, but state layer doesn't know or care), passes it to core, translates core errors into `StateError`, and tunnels decorator errors blindly. All products go through the state layer — never call `archive-core` directly.
+* **`archive`** [TO BUILD] is the State Layer (Layer 3.5) — a **universal cache layer**. It holds session state, metadata caching (`ArchiveCache`), and entry tree building (`EntryTree`). It does NOT hold auth, retry, billing, or quota logic — those are product-level concerns in horizontal crates (see `ARCHITECTURE.md` § Horizontal Capabilities). The state layer receives a `ReadAt` from the product above (possibly decorated, but state layer doesn't know or care), passes it to core, translates core errors into `ArchiveError`, and tunnels decorator errors blindly. All products go through the state layer — never call `archive-core` directly.
 * **`archive-cli`** is a **thin shell** — just parses arguments and calls the state layer. If CLI code gets "fat," that's a smell that the state layer or core is missing a high-level API.
 * **`archive-dev`** should ideally use the CLI as an entry point (`cargo run -p archive-cli -- ...`). If dev needs to write code, it should call `Archive::open()` — if that's not enough, the core is missing something.
 
@@ -111,7 +112,7 @@ fn extract(&self, entry: &ArchiveEntry) -> Result<Bytes, ArchiveError>;
 
 #### Phase 1 — Foundation [COMPLETE ✅]
 
-* `ReadAt` trait (local + HTTP), `ArchiveError`
+* `ReadAt` trait (local + HTTP), `CoreError`
 * ZIP parser (EOCD + Central Directory, Deflate/Store) — our own code
 * `ZipIndex` — JSON-serializable cache for parsed listings
 * `archive-cli` — `list` / `extract` subcommands (local + HTTP auto-detect)
@@ -130,7 +131,7 @@ Format priority order: **ZIP → RAR → 7z → TAR** (by real-world usage).
 **Active — shared infrastructure (cheaper now, benefits all formats):**
 
 * Additional shared codecs (LZMA, BZip2, Zstd) — ZIP uses them, 7z needs them
-* State layer (`archive-state`) — universal cache layer: session boundary, metadata cache, entry tree, error translation
+* State layer (`archive`) — universal cache layer: session boundary, metadata cache, entry tree, error translation
 
 **Active — format expansion:**
 
