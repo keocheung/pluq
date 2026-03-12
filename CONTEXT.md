@@ -3,8 +3,8 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 2 — Core engine: remaining formats + write support.
-* **Current Active Task:** SESSION_PLAN.md (ZIP hardening) — Steps 1–5 complete. Next: Step 6 (integration test + CONTEXT.md update).
-* **Baseline:** 77 tests pass (archive-core: 52, archive: 25), clippy clean.
+* **Current Active Task:** ZIP hardening complete. Next: RAR format parser.
+* **Baseline:** 84 tests pass (archive-core: 59, archive: 25), clippy clean.
 * **Note:** `CoreError` replaces old `ArchiveError` (core error type). `ArchiveError` replaces old `StateError` (product-facing error type from the `archive` crate). `archive` crate replaces old `archive-state`.
 * **SESSION_PLAN progress:**
   - Step 1 ✅ — chunked 64 KB extraction loop, incremental CRC via `crc32fast::Hasher`
@@ -12,7 +12,7 @@
   - Step 3 ✅ — ZipCrypto (PKWARE traditional encryption): `zip/crypto.rs`, `password: Option<&[u8]>` on `extract` all the way to the state layer; 3 new tests
   - Step 4 ✅ — WinZip AES encryption (AE-1/AE-2): `zip/aes.rs`, PBKDF2-HMAC-SHA1 key derivation, AES-CTR decryption, HMAC-SHA1 integrity; AES extra field (0x9901) parsed in CD; 4 new tests
   - Step 5 ✅ — DoS protection (ratio check + entry count limit)
-  - Step 6 🔲 — Integration test + CONTEXT.md update
+  - Step 6 ✅ — Integration test (`crates/archive-core/tests/zip_integration.rs`): 7 tests via `ArchiveCore::open()`; CONTEXT.md updated
 
 ---
 
