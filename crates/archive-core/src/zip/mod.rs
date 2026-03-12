@@ -228,6 +228,15 @@ impl<R: ReadAt> ZipArchive<R> {
             };
 
             const CHUNK_SIZE: usize = 64 * 1024; // 64 KB
+
+            // DoS protection: cap decompressed output to 1000× the compressed size,
+            // with a floor of 10 MB for small compressed inputs.
+            let max_output = if compressed_size > 0 {
+                compressed_size.saturating_mul(1000).max(10 * 1024 * 1024)
+            } else {
+                uncompressed_size.max(10 * 1024 * 1024)
+            };
+
             let mut hasher = crc32fast::Hasher::new();
             let mut total_written: u64 = 0;
             let mut chunk_buf = vec![0u8; CHUNK_SIZE];
@@ -258,6 +267,15 @@ impl<R: ReadAt> ZipArchive<R> {
                 hasher.update(&chunk_buf[..n]);
                 verified_buf.extend_from_slice(&chunk_buf[..n]);
                 total_written += n as u64;
+
+                if total_written > max_output {
+                    return Err(CoreError::ResourceLimitExceeded {
+                        message: format!(
+                            "decompression ratio exceeded for '{}': {} bytes from {} compressed",
+                            entry_name, total_written, compressed_size
+                        ),
+                    });
+                }
 
                 {
                     let mut p = progress.lock().unwrap();
@@ -999,6 +1017,109 @@ mod tests {
                     | Err(CoreError::BitstreamError { .. })
             ),
             "expected WrongPassword, CrcMismatch, or BitstreamError, got: {result:?}"
+        );
+    }
+
+    // ── DoS protection ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn zip_bomb_ratio_rejected() {
+        // 11 MB of zeros compresses to ~2 KB with Deflate (ratio ~5500:1), which
+        // vastly exceeds the 1000:1 limit and also blows past the 10 MB output floor.
+        // No patching needed — the real compressed_size in the archive is tiny.
+        let content = vec![0u8; 11 * 1024 * 1024];
+        let (_tmp, reader) =
+            create_test_zip(&[("bomb.bin", &content, ZipCrateMethod::Deflated)]);
+
+        // Confirm the archive actually compresses well (ratio > 1000:1).
+        let zip = ZipArchive::open(reader).await.unwrap();
+        let entry = &zip.entries()[0];
+        assert!(
+            entry.compressed_size < entry.uncompressed_size / 1000,
+            "test data must compress better than 1000:1 (got {}/{})",
+            entry.compressed_size,
+            entry.uncompressed_size
+        );
+
+        let mut sink = tokio::io::sink();
+        let result = zip
+            .extract(entry, &mut sink, Arc::new(Mutex::new(())), None)
+            .await;
+
+        assert!(
+            matches!(result, Err(CoreError::ResourceLimitExceeded { .. })),
+            "expected ResourceLimitExceeded for zip bomb, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn legitimate_high_ratio_allowed() {
+        // Cycling bytes 0–255 in a 100 KB file compresses moderately (ratio well under
+        // 1000:1), so the ratio check must not reject it.
+        let content: Vec<u8> = (0u8..=255).cycle().take(100 * 1024).collect();
+        let (_tmp, reader) =
+            create_test_zip(&[("normal.bin", &content, ZipCrateMethod::Deflated)]);
+        let zip = ZipArchive::open(reader).await.unwrap();
+
+        let entry = &zip.entries()[0];
+        assert!(
+            entry.compressed_size > entry.uncompressed_size / 1000,
+            "test data must not compress more than 1000:1 (got {}/{})",
+            entry.compressed_size,
+            entry.uncompressed_size
+        );
+
+        let data = extract_to_vec(&zip, entry).await;
+        assert_eq!(data, content, "legitimate high-ratio file must extract successfully");
+    }
+
+    #[tokio::test]
+    async fn excessive_entry_count_rejected() {
+        // Construct a fake ZIP64 archive that claims 20 million entries.
+        // MAX_ENTRY_COUNT is 10M, so parse_central_directory must reject it immediately.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        {
+            let absurd_count: u64 = 20_000_000;
+            let mut buf = Vec::new();
+
+            // ZIP64 EOCD Record (56 bytes total, starts at offset 0).
+            buf.extend_from_slice(&0x06064b50u32.to_le_bytes()); // signature
+            buf.extend_from_slice(&44u64.to_le_bytes());          // size of remaining record
+            buf.extend_from_slice(&45u16.to_le_bytes());          // version made by
+            buf.extend_from_slice(&45u16.to_le_bytes());          // version needed
+            buf.extend_from_slice(&0u32.to_le_bytes());           // disk number
+            buf.extend_from_slice(&0u32.to_le_bytes());           // disk with start of CD
+            buf.extend_from_slice(&absurd_count.to_le_bytes());   // entries on this disk
+            buf.extend_from_slice(&absurd_count.to_le_bytes());   // total entries
+            buf.extend_from_slice(&0u64.to_le_bytes());           // CD size
+            buf.extend_from_slice(&0u64.to_le_bytes());           // CD offset
+
+            // ZIP64 EOCD Locator (20 bytes): points back to offset 0.
+            buf.extend_from_slice(&0x07064b50u32.to_le_bytes()); // signature
+            buf.extend_from_slice(&0u32.to_le_bytes());           // disk with ZIP64 EOCD
+            buf.extend_from_slice(&0u64.to_le_bytes());           // offset of ZIP64 EOCD
+            buf.extend_from_slice(&1u32.to_le_bytes());           // total disks
+
+            // Standard EOCD (22 bytes): sentinel values trigger ZIP64 lookup.
+            buf.extend_from_slice(&0x06054b50u32.to_le_bytes()); // signature
+            buf.extend_from_slice(&0u16.to_le_bytes());           // disk number
+            buf.extend_from_slice(&0u16.to_le_bytes());           // CD start disk
+            buf.extend_from_slice(&0xFFFFu16.to_le_bytes());      // entries this disk (sentinel)
+            buf.extend_from_slice(&0xFFFFu16.to_le_bytes());      // total entries (sentinel)
+            buf.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes()); // CD size (sentinel)
+            buf.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes()); // CD offset (sentinel)
+            buf.extend_from_slice(&0u16.to_le_bytes());           // comment length
+
+            std::fs::write(tmp.path(), &buf).unwrap();
+        }
+
+        let reader = LocalReadAt::new(tmp.path());
+        let result = ZipArchive::open(reader).await;
+
+        assert!(
+            matches!(result, Err(CoreError::ResourceLimitExceeded { .. })),
+            "expected ResourceLimitExceeded for 20M entry count, got: {:?}",
+            result.err()
         );
     }
 

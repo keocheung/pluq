@@ -90,8 +90,6 @@ pub(crate) struct ZipEntryLocation {
 /// Parsed WinZip AES extra field (tag 0x9901).
 #[derive(Debug, Clone)]
 pub(crate) struct AesExtraInfo {
-    /// AE-1 (0x0001) or AE-2 (0x0002).
-    pub(crate) vendor_version: u16,
     /// Key strength: 1 = AES-128, 2 = AES-192, 3 = AES-256.
     pub(crate) strength: u8,
     /// The real compression method (Deflate, Store, …) hidden behind the AES marker.
@@ -271,6 +269,17 @@ pub async fn parse_central_directory(
     reader: &impl ReadAt,
     eocd: &Eocd,
 ) -> Result<(Vec<ArchiveEntry>, Vec<ZipEntryLocation>), CoreError> {
+    const MAX_ENTRY_COUNT: u64 = 10_000_000; // 10 million entries
+
+    if eocd.entry_count > MAX_ENTRY_COUNT {
+        return Err(CoreError::ResourceLimitExceeded {
+            message: format!(
+                "archive claims {} entries (max {})",
+                eocd.entry_count, MAX_ENTRY_COUNT
+            ),
+        });
+    }
+
     let cd_bytes = reader
         .read_range(eocd.cd_offset, eocd.cd_size)
         .await
@@ -448,11 +457,10 @@ fn parse_aes_extra(extra: &[u8]) -> Option<AesExtraInfo> {
 
         if tag == 0x9901 && size >= 7 && i + size <= extra.len() {
             // Layout: vendor_version(2) + vendor_id(2) + strength(1) + actual_method(2)
-            let vendor_version = read_u16_le(extra, i);
             // vendor_id bytes at i+2..i+4 should be b"AE" — we don't enforce this
             let strength = extra[i + 4];
             let actual_method_id = read_u16_le(extra, i + 5);
-            return Some(AesExtraInfo { vendor_version, strength, actual_method_id });
+            return Some(AesExtraInfo { strength, actual_method_id });
         }
 
         i += size;

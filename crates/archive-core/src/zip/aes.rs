@@ -178,10 +178,10 @@ fn read_exact(reader: &mut impl Read, buf: &mut [u8], context: &str) -> Result<(
 fn map_io_err(e: io::Error) -> CoreError {
     // Propagate structured ReadErrors from the SyncIoBridge; everything else
     // is an unexpected truncation.
-    if let Some(inner) = e.into_inner() {
-        if let Ok(re) = inner.downcast::<crate::io::ReadError>() {
-            return CoreError::Io(*re);
-        }
+    if let Some(inner) = e.into_inner()
+        && let Ok(re) = inner.downcast::<crate::io::ReadError>()
+    {
+        return CoreError::Io(*re);
     }
     CoreError::InvalidFormat {
         message: "I/O error reading AES encrypted data".into(),
