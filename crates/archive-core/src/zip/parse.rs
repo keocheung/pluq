@@ -78,10 +78,24 @@ const GP_FLAG_ENCRYPTED: u16 = 1 << 0;
 pub(crate) struct ZipEntryLocation {
     /// Byte offset of the Local File Header in the archive.
     pub(crate) offset: u64,
-    /// Raw ZIP compression method ID (0 = stored, 8 = deflate, …).
+    /// Raw ZIP compression method ID (0 = stored, 8 = deflate, 99 = AES, …).
     pub(crate) method_id: u16,
     /// CRC-32 of the uncompressed data, as stored in the Central Directory.
+    /// For AE-2 entries this is 0; rely on HMAC instead.
     pub(crate) crc32: u32,
+    /// Populated when method_id == 99 (WinZip AES marker).
+    pub(crate) aes_info: Option<AesExtraInfo>,
+}
+
+/// Parsed WinZip AES extra field (tag 0x9901).
+#[derive(Debug, Clone)]
+pub(crate) struct AesExtraInfo {
+    /// AE-1 (0x0001) or AE-2 (0x0002).
+    pub(crate) vendor_version: u16,
+    /// Key strength: 1 = AES-128, 2 = AES-192, 3 = AES-256.
+    pub(crate) strength: u8,
+    /// The real compression method (Deflate, Store, …) hidden behind the AES marker.
+    pub(crate) actual_method_id: u16,
 }
 
 // ── Helper: read little-endian integers from a byte slice ─────────────────
@@ -303,34 +317,47 @@ pub async fn parse_central_directory(
             });
         }
 
-        // ── ZIP64 extra field parsing ──────────────────────────────────────
+        // ── Extra field parsing (ZIP64 + AES) ─────────────────────────────
         let extra_start = name_end;
         let extra_end = extra_start + extra_len;
+        let mut aes_info: Option<AesExtraInfo> = None;
+
         if extra_end <= cd_bytes.len() {
+            let extra_slice = &cd_bytes[extra_start..extra_end];
+
             let need_zip64 = compressed_size == ZIP64_MAGIC32 as u64
                 || uncompressed_size == ZIP64_MAGIC32 as u64
                 || local_header_offset == ZIP64_MAGIC32 as u64;
 
             if need_zip64 {
                 parse_zip64_extra(
-                    &cd_bytes[extra_start..extra_end],
+                    extra_slice,
                     &mut uncompressed_size,
                     &mut compressed_size,
                     &mut local_header_offset,
                 );
             }
+
+            aes_info = parse_aes_extra(extra_slice);
         }
 
         // ── Derive entry fields ────────────────────────────────────────────
-        // GP bit 0 = encrypted.
-        let is_encrypted = general_purpose_flags & GP_FLAG_ENCRYPTED != 0;
+        // GP bit 0 = encrypted. AES entries (method 99) are always encrypted
+        // even if some tools don't set GP bit 0.
+        let is_encrypted =
+            (general_purpose_flags & GP_FLAG_ENCRYPTED != 0) || method_id == 99;
 
         let name = decode_zip_filename(&cd_bytes[name_start..name_end], general_purpose_flags);
         let is_directory = name.ends_with('/');
 
         let modified_at = dos_datetime_to_system_time(last_mod_date, last_mod_time);
 
-        let compression_method = zip_method_to_codec(method_id);
+        // For AES entries the real compression method lives in the extra field.
+        let compression_method = if let Some(ref aes) = aes_info {
+            zip_method_to_codec(aes.actual_method_id)
+        } else {
+            zip_method_to_codec(method_id)
+        };
 
         entries.push(ArchiveEntry {
             name,
@@ -347,6 +374,7 @@ pub async fn parse_central_directory(
             offset: local_header_offset,
             method_id,
             crc32,
+            aes_info,
         });
 
         cursor = name_end + extra_len + comment_len;
@@ -406,6 +434,30 @@ fn parse_zip64_extra(
 
         i += size;
     }
+}
+
+/// Scan extra fields for the WinZip AES tag (0x9901) and parse it.
+///
+/// Returns `None` if the tag is absent or malformed.
+fn parse_aes_extra(extra: &[u8]) -> Option<AesExtraInfo> {
+    let mut i = 0;
+    while i + 4 <= extra.len() {
+        let tag = read_u16_le(extra, i);
+        let size = read_u16_le(extra, i + 2) as usize;
+        i += 4;
+
+        if tag == 0x9901 && size >= 7 && i + size <= extra.len() {
+            // Layout: vendor_version(2) + vendor_id(2) + strength(1) + actual_method(2)
+            let vendor_version = read_u16_le(extra, i);
+            // vendor_id bytes at i+2..i+4 should be b"AE" — we don't enforce this
+            let strength = extra[i + 4];
+            let actual_method_id = read_u16_le(extra, i + 5);
+            return Some(AesExtraInfo { vendor_version, strength, actual_method_id });
+        }
+
+        i += size;
+    }
+    None
 }
 
 /// Convert a ZIP DOS-format date+time pair to `SystemTime`.

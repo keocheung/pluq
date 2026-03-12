@@ -13,12 +13,13 @@
 //! ```
 
 pub mod index;
+mod aes;
 mod crypto;
 mod parse;
 
 pub use index::ZipIndex;
 use crypto::{ZipCryptoDecryptor, ZipCryptoReader};
-use parse::ZipEntryLocation;
+use parse::{AesExtraInfo, ZipEntryLocation};
 
 use std::io::Read;
 use std::sync::{Arc, Mutex};
@@ -117,6 +118,11 @@ impl<R: ReadAt> ZipArchive<R> {
 
         let location = &self.locations[entry.index];
 
+        // Extract ZIP-specific fields before the async boundary so the
+        // spawn_blocking closure can own them without borrowing `self`.
+        let location_method_id = location.method_id;
+        let location_aes_info: Option<AesExtraInfo> = location.aes_info.clone();
+
         // ── Step 1 (async): resolve data offset via Local File Header ─────
         // LFH is 30 bytes — small, use read_range.
         let data_offset = parse::resolve_data_offset(&self.reader, location)
@@ -131,13 +137,6 @@ impl<R: ReadAt> ZipArchive<R> {
 
         let compressed_size = entry.compressed_size;
         let uncompressed_size = entry.uncompressed_size;
-
-        // Map the raw method ID to the shared CompressionMethod enum.
-        let method = parse::zip_method_to_codec(location.method_id).ok_or_else(|| {
-            CoreError::UnsupportedCompression {
-                algorithm: format!("ZIP method id {}", location.method_id),
-            }
-        })?;
 
         // ── Step 2 (async): get streaming AsyncRead for compressed data ────
         // read_stream returns a live byte stream — no buffering of multi-GB data.
@@ -158,12 +157,33 @@ impl<R: ReadAt> ZipArchive<R> {
         let mut sync_reader = SyncIoBridge::new_with_handle(compressed_stream, handle);
 
         let verified: Vec<u8> = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, CoreError> {
-            // ── Decryption layer (ZipCrypto) ──────────────────────────────
-            // When encrypted, read the 12-byte encryption header, decrypt it,
-            // verify the last byte against the high byte of the expected CRC,
-            // then wrap the remaining stream in a decrypting reader.
-            let mut decoder = if is_encrypted {
-                let pwd = password_bytes.as_deref().unwrap(); // safe: is_encrypted implies password.is_some()
+            // ── Determine decryption strategy ─────────────────────────────
+            let is_aes = location_aes_info.is_some() && is_encrypted;
+            // AES entries use HMAC for integrity. For AE-2 the CRC field is 0,
+            // so we skip the post-decompression CRC check for all AES entries.
+            let skip_crc_check = is_aes;
+
+            // ── Decryption + decoder setup ─────────────────────────────────
+            let mut decoder = if is_aes {
+                // ── WinZip AES path ────────────────────────────────────────
+                let aes = location_aes_info.as_ref().unwrap();
+                let pwd = password_bytes.as_deref().unwrap(); // safe: checked above
+
+                let decrypted =
+                    aes::decrypt_winzip_aes(&mut sync_reader, pwd, aes.strength, compressed_size)?;
+
+                let method = parse::zip_method_to_codec(aes.actual_method_id).ok_or_else(|| {
+                    CoreError::UnsupportedCompression {
+                        algorithm: format!(
+                            "ZIP AES actual method id {}",
+                            aes.actual_method_id
+                        ),
+                    }
+                })?;
+                build_decoder(method, std::io::Cursor::new(decrypted), &[])?
+            } else if is_encrypted {
+                // ── ZipCrypto (PKWARE traditional) path ────────────────────
+                let pwd = password_bytes.as_deref().unwrap(); // safe: checked above
 
                 // Read and decrypt the 12-byte encryption header.
                 let mut enc_header = [0u8; 12];
@@ -188,9 +208,22 @@ impl<R: ReadAt> ZipArchive<R> {
                     });
                 }
 
+                let method =
+                    parse::zip_method_to_codec(location_method_id).ok_or_else(|| {
+                        CoreError::UnsupportedCompression {
+                            algorithm: format!("ZIP method id {location_method_id}"),
+                        }
+                    })?;
                 let crypto_reader = ZipCryptoReader::new(sync_reader, decryptor);
                 build_decoder(method, crypto_reader, &[])?
             } else {
+                // ── Plain (unencrypted) path ───────────────────────────────
+                let method =
+                    parse::zip_method_to_codec(location_method_id).ok_or_else(|| {
+                        CoreError::UnsupportedCompression {
+                            algorithm: format!("ZIP method id {location_method_id}"),
+                        }
+                    })?;
                 build_decoder(method, sync_reader, &[])?
             };
 
@@ -236,16 +269,19 @@ impl<R: ReadAt> ZipArchive<R> {
                 }
             }
 
-            // CRC32 verification — mandatory before returning any bytes.
-            let actual_crc = hasher.finalize();
-            if actual_crc != expected_crc {
-                let mut p = progress.lock().unwrap();
-                p.on_entry_complete(&entry_name, false);
-                return Err(CoreError::CrcMismatch {
-                    entry: entry_name,
-                    expected: expected_crc,
-                    actual: actual_crc,
-                });
+            // CRC32 verification — skipped for AES entries (HMAC was already
+            // verified in decrypt_winzip_aes; AE-2 entries have CRC == 0).
+            if !skip_crc_check {
+                let actual_crc = hasher.finalize();
+                if actual_crc != expected_crc {
+                    let mut p = progress.lock().unwrap();
+                    p.on_entry_complete(&entry_name, false);
+                    return Err(CoreError::CrcMismatch {
+                        entry: entry_name,
+                        expected: expected_crc,
+                        actual: actual_crc,
+                    });
+                }
             }
 
             {
@@ -748,6 +784,140 @@ mod tests {
             matches!(result, Err(CoreError::InvalidFormat { .. })),
             "expected InvalidFormat for truncated ZIP, got: {:?}",
             result.err()
+        );
+    }
+
+    // ── WinZip AES encryption ──────────────────────────────────────────────
+
+    /// Helper: create a ZIP with WinZip AES-256 encryption.
+    fn create_aes_encrypted_test_zip(
+        password: &str,
+        files: &[(&str, &[u8], ZipCrateMethod)],
+    ) -> (tempfile::NamedTempFile, LocalReadAt) {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        {
+            let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            for (name, data, method) in files {
+                let options = SimpleFileOptions::default()
+                    .compression_method(*method)
+                    .with_aes_encryption(zip::AesMode::Aes256, password);
+                writer.start_file(*name, options).unwrap();
+                writer.write_all(data).unwrap();
+            }
+            let buf = writer.finish().unwrap().into_inner();
+            std::fs::write(tmp.path(), &buf).unwrap();
+        }
+        let reader = LocalReadAt::new(tmp.path());
+        (tmp, reader)
+    }
+
+    #[tokio::test]
+    async fn aes_entry_detected_as_encrypted() {
+        let (_tmp, reader) = create_aes_encrypted_test_zip(
+            "secret",
+            &[("file.txt", b"hello", ZipCrateMethod::Stored)],
+        );
+        let zip = ZipArchive::open(reader).await.unwrap();
+        let entry = &zip.entries()[0];
+        assert!(entry.is_encrypted, "AES entry must be flagged as encrypted");
+        // compression_method must reflect the real method (Store), not AES marker 99
+        assert_eq!(
+            entry.compression_method,
+            Some(CompressionMethod::Store),
+            "compression_method must show real method, not AES marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn extract_aes256_encrypted_entry() {
+        let password = "correct-horse-aes";
+        let content = b"Archive Sniper WinZip AES test content!";
+
+        let (_tmp, reader) = create_aes_encrypted_test_zip(
+            password,
+            &[("secret.txt", content, ZipCrateMethod::Stored)],
+        );
+        let zip = ZipArchive::open(reader).await.unwrap();
+        assert!(zip.entries()[0].is_encrypted);
+
+        let mut buf = Vec::new();
+        zip.extract(
+            &zip.entries()[0],
+            &mut buf,
+            Arc::new(Mutex::new(())),
+            Some(password.as_bytes()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(buf.as_slice(), content);
+    }
+
+    #[tokio::test]
+    async fn extract_aes256_deflated_encrypted_entry() {
+        let password = "deflate-aes-pw";
+        let content: Vec<u8> = b"Archive Sniper AES + Deflate pipeline test. "
+            .iter()
+            .cycle()
+            .take(2048)
+            .copied()
+            .collect();
+
+        let (_tmp, reader) = create_aes_encrypted_test_zip(
+            password,
+            &[("large.txt", &content, ZipCrateMethod::Deflated)],
+        );
+        let zip = ZipArchive::open(reader).await.unwrap();
+        assert_eq!(
+            zip.entries()[0].compression_method,
+            Some(CompressionMethod::Deflate),
+            "real method must be Deflate"
+        );
+
+        let mut buf = Vec::new();
+        zip.extract(
+            &zip.entries()[0],
+            &mut buf,
+            Arc::new(Mutex::new(())),
+            Some(password.as_bytes()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(buf, content);
+    }
+
+    #[tokio::test]
+    async fn aes_wrong_password_detected() {
+        let password = "correct-horse-aes";
+        let content = b"some sensitive data";
+
+        let (_tmp, reader) = create_aes_encrypted_test_zip(
+            password,
+            &[("secret.txt", content, ZipCrateMethod::Stored)],
+        );
+        let zip = ZipArchive::open(reader).await.unwrap();
+
+        let mut sink = tokio::io::sink();
+        let result = zip
+            .extract(
+                &zip.entries()[0],
+                &mut sink,
+                Arc::new(Mutex::new(())),
+                Some(b"wrong-password"),
+            )
+            .await;
+
+        assert!(
+            matches!(
+                result,
+                Err(CoreError::WrongPassword {
+                    method: PasswordDetectionMethod::EarlyHeaderValidation
+                }) | Err(CoreError::WrongPassword {
+                    method: PasswordDetectionMethod::CrcMismatch
+                })
+            ),
+            "expected WrongPassword (early or HMAC), got: {result:?}"
         );
     }
 
