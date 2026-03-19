@@ -6,6 +6,7 @@ edition = "2024"
 
 [dependencies]
 aes = "0.8"
+blake2s_simd = "1"
 bytes = "1"
 crc32fast = "1"
 ctr = "0.9"

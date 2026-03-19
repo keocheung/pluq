@@ -119,10 +119,7 @@ impl ArchiveCore {
     ) -> Result<u64, CoreError> {
         match &self.inner {
             ArchiveInner::Zip(z) => z.extract(entry, sink, progress, password).await,
-            // RAR extraction implemented in Step 5-6.
-            ArchiveInner::Rar(_) => Err(CoreError::UnsupportedFeature {
-                detail: "RAR extraction not yet implemented".into(),
-            }),
+            ArchiveInner::Rar(r) => r.extract(entry, sink, progress, password).await,
         }
     }
 
@@ -147,8 +144,7 @@ impl ArchiveCore {
     pub fn extraction_cost(&self, entry: &ArchiveEntry) -> u64 {
         match &self.inner {
             ArchiveInner::Zip(z) => z.extraction_cost(entry),
-            // RAR extraction_cost implemented in Step 5-6.
-            ArchiveInner::Rar(_) => entry.compressed_size,
+            ArchiveInner::Rar(r) => r.extraction_cost(entry),
         }
     }
 
@@ -158,10 +154,7 @@ impl ArchiveCore {
     pub async fn test(&self, entry: &ArchiveEntry) -> Result<(), CoreError> {
         match &self.inner {
             ArchiveInner::Zip(z) => z.test(entry).await,
-            // RAR test implemented in Step 5-6.
-            ArchiveInner::Rar(_) => Err(CoreError::UnsupportedFeature {
-                detail: "RAR test not yet implemented".into(),
-            }),
+            ArchiveInner::Rar(r) => r.test(entry).await,
         }
     }
 
