@@ -3,6 +3,10 @@
 //! All functions operate on `&[u8]` buffers already fetched via `ReadAt`.
 //! No I/O happens here — the scanner layer is responsible for fetching data.
 
+// Many struct fields are populated for use in Steps 3–6 (QO, extraction, encryption).
+// Suppress dead_code until those steps are implemented.
+#![allow(dead_code)]
+
 use crate::CoreError;
 
 // ── Signatures ────────────────────────────────────────────────────────────────
@@ -306,6 +310,7 @@ pub(crate) fn parse_file_header(
 ///
 /// Unknown record types are skipped gracefully. Parse errors within individual
 /// records are also skipped — a truncated record does not fail the whole header.
+#[allow(clippy::type_complexity)]
 fn parse_file_extra_area(
     data: &[u8],
     archive_offset: u64,

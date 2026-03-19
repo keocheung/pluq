@@ -3,8 +3,8 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 2 — Core engine: RAR read support + state layer.
-* **Current Active Task:** RAR5 Step 1 complete. Next: Step 2 — RarArchive + header scanning.
-* **Baseline:** 104 tests pass (archive-core: 79, archive: 25), clippy clean.
+* **Current Active Task:** RAR5 Step 2 complete. Next: Step 3 — Quick Open (QO) optimisation.
+* **Baseline:** 116 tests pass (archive-core: 91, archive: 25), clippy clean.
 * **Note:** `CoreError` replaces old `ArchiveError` (core error type). `ArchiveError` replaces old `StateError` (product-facing error type from the `archive` crate). `archive` crate replaces old `archive-state`.
 * **SESSION_PLAN progress:**
   - Step 1 ✅ — chunked 64 KB extraction loop, incremental CRC via `crc32fast::Hasher`
@@ -14,6 +14,7 @@
   - Step 5 ✅ — DoS protection (ratio check + entry count limit)
   - Step 6 ✅ — Integration test (`crates/archive-core/tests/zip_integration.rs`): 7 tests via `ArchiveCore::open()`; CONTEXT.md updated
   - RAR Step 1 ✅ — `rar/parse.rs`: `read_vint`, `parse_block_header` (CRC verified), `parse_file_header`, extra area (encrypt/hash/time), `parse_main_header` + `RarLocator`; 20 new tests
+  - RAR Step 2 ✅ — `rar/mod.rs`: `RarArchive<R>` + `RarEntryLocation`; sequential 64 KiB chunked scan; signature verification (RAR4 rejected gracefully); solid entry skipping; preamble + end-block capture for synthetic archive; 12 new tests
 
 ---
 
