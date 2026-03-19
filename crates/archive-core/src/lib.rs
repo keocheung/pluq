@@ -6,6 +6,7 @@ mod facade;
 pub mod io;
 pub mod junk;
 mod progress;
+pub mod rar;
 pub mod zip;
 
 // Primary public API — use this (via archive crate in production code).

@@ -3,8 +3,8 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 2 — Core engine: RAR read support + state layer.
-* **Current Active Task:** ZIP hardening complete. Next: RAR format parser.
-* **Baseline:** 84 tests pass (archive-core: 59, archive: 25), clippy clean.
+* **Current Active Task:** RAR5 Step 1 complete. Next: Step 2 — RarArchive + header scanning.
+* **Baseline:** 104 tests pass (archive-core: 79, archive: 25), clippy clean.
 * **Note:** `CoreError` replaces old `ArchiveError` (core error type). `ArchiveError` replaces old `StateError` (product-facing error type from the `archive` crate). `archive` crate replaces old `archive-state`.
 * **SESSION_PLAN progress:**
   - Step 1 ✅ — chunked 64 KB extraction loop, incremental CRC via `crc32fast::Hasher`
@@ -13,6 +13,7 @@
   - Step 4 ✅ — WinZip AES encryption (AE-1/AE-2): `zip/aes.rs`, PBKDF2-HMAC-SHA1 key derivation, AES-CTR decryption, HMAC-SHA1 integrity; AES extra field (0x9901) parsed in CD; 4 new tests
   - Step 5 ✅ — DoS protection (ratio check + entry count limit)
   - Step 6 ✅ — Integration test (`crates/archive-core/tests/zip_integration.rs`): 7 tests via `ArchiveCore::open()`; CONTEXT.md updated
+  - RAR Step 1 ✅ — `rar/parse.rs`: `read_vint`, `parse_block_header` (CRC verified), `parse_file_header`, extra area (encrypt/hash/time), `parse_main_header` + `RarLocator`; 20 new tests
 
 ---
 
