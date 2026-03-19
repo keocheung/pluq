@@ -2,7 +2,7 @@
 
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
-* **Current Phase:** Phase 2 — Core engine: remaining formats + write support.
+* **Current Phase:** Phase 2 — Core engine: RAR read support + state layer.
 * **Current Active Task:** ZIP hardening complete. Next: RAR format parser.
 * **Baseline:** 84 tests pass (archive-core: 59, archive: 25), clippy clean.
 * **Note:** `CoreError` replaces old `ArchiveError` (core error type). `ArchiveError` replaces old `StateError` (product-facing error type from the `archive` crate). `archive` crate replaces old `archive-state`.
@@ -26,22 +26,40 @@
 
 ### The Product
 
-**Archive Sniper** is a modern archive management tool. Think of it as a clean, modern replacement for WinRAR / 7-Zip / The Unarchiver, with a unique killer feature: **cloud sniping**.
+**Archive Sniper** is a surgical cloud archive extraction tool. Extract individual files from cloud-hosted archives (Google Drive, OneDrive, Dropbox) via HTTP range requests — without downloading the whole archive. Also works on local archives.
 
 > **⚠️ Working Name:** "Archive Sniper" is a placeholder. The final product name has not been decided. Keep code, crate names (`archive-core`, `archive-cli`), and comments name-agnostic where possible so renaming is painless later.
 
-**Core capabilities:**
+**v1 identity: Cloud sniping CLI with interactive TUI.**
 
-1. **Local management:** Browse, extract, and compress archives on disk.
-2. **Cloud sniping:** Extract individual files from cloud storage (Drive/Dropbox) via HTTP range requests — without downloading the whole archive.
-3. **Cloud archiving (future):** Compress files already on cloud storage into an archive. Streaming approach (user needs free space) or "Vault" approach (we temporarily hold data on S3 for users without enough space).
+The tool focuses on **extraction only** — no compression, no archive creation. The core experience: point snipe at a cloud URL or local file, browse the contents interactively, select what you need, extract it.
 
-**UX Philosophy:** Simplicity and sanity out of the box. The default experience should require **≤3 configuration choices** and satisfy the vast majority of users. A future "Advanced mode" may expose power-user options, but simplicity comes first.
+**v1 capabilities:**
 
-**Monetization (Credit-Based):**
+1. **Cloud sniping:** Extract individual files from Google Drive / OneDrive / Dropbox archives via HTTP range requests — without downloading the whole archive.
+2. **Local extraction:** Same TUI experience for local archives — browse, select, extract.
+3. **Interactive TUI:** `ratatui`-based archive browser — tree navigation, expand/collapse, pagination, select/deselect files and folders, selection overview, built-in fuzzy search.
+4. **Direct HTTP URL support:** Works on any URL that supports Range requests (S3, Backblaze, CDNs) — no auth needed.
+
+**Formats (read only, v1):** ZIP and RAR — the two snipe-friendly formats that support random access. TAR/TAR.GZ/7z are not snipe-friendly and are deferred to post-v1.
+
+**CLI interface:**
+
+* `snipe <url-or-path>` → interactive TUI browser
+* `snipe list <url-or-path>` → non-interactive listing (for scripting)
+* `snipe get <url-or-path> <path/glob>` → non-interactive extraction (for scripting)
+* `snipe test <url-or-path>` → verify archive integrity (decompress + CRC, extract nothing)
+* `snipe auth add/remove/list` → manage cloud provider OAuth tokens
+* `snipe feedback` → link to GitHub issues
+
+**UX Philosophy:** Simplicity and sanity out of the box. The default experience should require **≤3 configuration choices** and satisfy the vast majority of users. The "fun" factor comes from the interactive TUI — no memorizing file paths, no manual typing. Browse, search, select, extract.
+
+**Progressive enhancement:** Built-in fuzzy search works standalone. If `fzf` is installed, snipe can optionally delegate search to it for power users. Future plugin hooks at key decision points (search, select, browse) for external tools.
+
+**Monetization (future, post-v1):**
 
 * **Cloud sniping:** Freemium — 256MB/month free transfer, buy GB packs for more.
-* **Cloud archiving (Vault):** Separate pay-per-operation — user pays upfront based on estimated GB needed. Priced to cover S3 + bandwidth costs + margin. Not part of freemium quota.
+* **Cloud archiving (Vault):** Separate pay-per-operation. Not part of v1.
 
 ### Core Architecture (`archive-core`)
 
@@ -64,25 +82,27 @@ fn size(&self) -> impl Future<Output = Result<u64, ReadError>> + Send;
 
 Abstracts *what format* the bytes represent. Each format gets its own implementation.
 
-```rust
-fn entries(&self) -> Result<Vec<ArchiveEntry>, CoreError>;
-fn extract(&self, entry: &ArchiveEntry) -> Result<Bytes, CoreError>;
-```
+* `entries()` — returns the parsed entry list
+* `extract(entry, sink)` — streams decompressed bytes to a sink (file, buffer, etc.)
+* `test(entry)` — decompress + verify CRC, write nothing
+* `extraction_cost(entry)` — bytes that must be downloaded to produce this entry
 
-* The state layer (Layer 3.5) talks to `ArchiveReader` / `Archive`. Products (CLI, server, KMP apps) talk to the state layer.
+See `ARCHITECTURE.md` § ArchiveReader for the canonical trait definition.
+
+* The state layer (Layer 3.5) talks to `ArchiveReader` / `ArchiveCore`. Products talk to the state layer.
 * Each format implementation either uses our own parsing code or wraps an external crate.
 
-### Format Strategy
+### Format Strategy (v1 — snipe-friendly formats only)
 
-| Format     | Parser Strategy          | Sniping Support                          | Compression Info                             |
-|------------|--------------------------|------------------------------------------|----------------------------------------------|
-| **ZIP**    | Our own code + `flate2`  | ✅ Perfect (surgical)                    | Method stored per entry in local file header |
-| **TAR**    | Our own code             | ❌ Sequential scan                       | No compression (container only)              |
-| **TAR.GZ** | `flate2` + our TAR       | ❌ Full download                         | Must decompress from byte 0                  |
-| **RAR**    | Wrap external crate      | ✅ Good (non-solid) / ⚠️ Partial (solid) | Method in file header                        |
-| **7z**     | Wrap external crate      | ⚠️ Partial (block-based)                 | Method in header metadata                    |
+| Format     | Parser Strategy          | Sniping Support                          | v1 Scope |
+|------------|--------------------------|------------------------------------------|----------|
+| **ZIP**    | Our own code + `flate2`  | ✅ Perfect (surgical)                    | ✅ v1    |
+| **RAR**    | Wrap external crate      | ✅ Good (non-solid) / ⚠️ Partial (solid) | ✅ v1    |
+| **7z**     | Wrap external crate      | ⚠️ Partial (block-based)                 | Post-v1  |
+| **TAR**    | Our own code             | ❌ Sequential scan                       | Post-v1  |
+| **TAR.GZ** | `flate2` + our TAR       | ❌ Full download                         | Post-v1  |
 
-**Rationale:** Own code for simple/critical formats (ZIP, TAR) where we need surgical control over range requests. Wrap battle-tested external crates for complex/proprietary formats (RAR, 7z) where reimplementing compression algorithms isn't feasible.
+**Rationale:** v1 ships only snipe-friendly formats — ZIP and RAR support random access, making surgical cloud extraction possible. Formats that require sequential scanning or full download defeat the core value proposition and are deferred. Own code for ZIP (surgical control), wrap external crate for RAR (proprietary/complex).
 
 ### Technical Stack & Constraints
 
@@ -102,8 +122,8 @@ fn extract(&self, entry: &ArchiveEntry) -> Result<Bytes, CoreError>;
 ### Architecture Convention
 
 * **`archive-core`** holds all stateless archive logic (parsing, extraction, codecs, format detection). The core entry point is `Archive::open(reader)` which takes a `ReadAt` and auto-detects format. Core is stateless — no auth, no retries, no caching.
-* **`archive`** [TO BUILD] is the State Layer (Layer 3.5) — a **universal cache layer**. It holds session state, metadata caching (`ArchiveCache`), and entry tree building (`EntryTree`). It does NOT hold auth, retry, billing, or quota logic — those are product-level concerns in horizontal crates (see `ARCHITECTURE.md` § Horizontal Capabilities). The state layer receives a `ReadAt` from the product above (possibly decorated, but state layer doesn't know or care), passes it to core, translates core errors into `ArchiveError`, and tunnels decorator errors blindly. All products go through the state layer — never call `archive-core` directly.
-* **`archive-cli`** is a **thin shell** — just parses arguments and calls the state layer. If CLI code gets "fat," that's a smell that the state layer or core is missing a high-level API.
+* **`archive`** is the State Layer (Layer 3.5) — a **universal cache layer**. It holds session state, metadata caching (`ArchiveCache`), and entry tree building (`EntryTree`). It does NOT hold auth, retry, billing, or quota logic — those are product-level concerns in horizontal crates (see `ARCHITECTURE.md` § Horizontal Capabilities). The state layer receives a `ReadAt` from the product above (possibly decorated, but state layer doesn't know or care), passes it to core, translates core errors into `ArchiveError`, and tunnels decorator errors blindly. All products go through the state layer — never call `archive-core` directly.
+* **`archive-cli`** is the v1 product — the `snipe` binary. It owns the TUI (`ratatui`), CLI argument parsing (`clap`), OAuth flows, and cloud provider URL routing. Archive logic (parsing, extraction, decompression) must stay in the state layer or core — the CLI crate handles interaction, not archive internals.
 * **`archive-dev`** should ideally use the CLI as an entry point (`cargo run -p archive-cli -- ...`). If dev needs to write code, it should call `Archive::open()` — if that's not enough, the core is missing something.
 
 ### Git Convention
@@ -115,7 +135,7 @@ fn extract(&self, entry: &ArchiveEntry) -> Result<Bytes, CoreError>;
 
 > **CONTEXT.md is the single source of truth for project planning and build ordering.** `ARCHITECTURE.md` and `ERRORS.md` define *what* to build; this file defines *when* and *in what order*. Do not put ordering or priority lists in the spec files.
 
-**Philosophy: Core-first, CLI-first, UI-last.** The engine and CLI must reach feature parity before any UI work begins. This keeps the core UI-agnostic and means every capability can be tested without a UI.
+**Philosophy: Ship a focused, fun, complete cloud sniping CLI.** v1 is extraction-only with an interactive TUI. Compression, additional formats, and other products come after v1 ships.
 
 #### Phase 1 — Foundation [COMPLETE ✅]
 
@@ -124,53 +144,84 @@ fn extract(&self, entry: &ArchiveEntry) -> Result<Bytes, CoreError>;
 * `ZipIndex` — JSON-serializable cache for parsed listings
 * `archive-cli` — `list` / `extract` subcommands (local + HTTP auto-detect)
 
-#### Phase 2 — Core Engine: All Major Formats + Write Support [ACTIVE]
+#### Phase 2 — Core Engine: Snipe-Friendly Formats [ACTIVE]
 
-Goal: cover ~99% of real-world archives. Test everything via CLI.
-Format priority order: **ZIP → RAR → 7z → TAR** (by real-world usage).
+Goal: ZIP + RAR read support, state layer. Everything testable via CLI.
 
 **Done:**
 
 * ✅ Core abstractions — codec layer, `ArchiveReader` trait, error model (`ERRORS.md`), format-agnostic `ArchiveEntry`
 * ✅ ZIP read support — parsing, extraction, CRC verification, legacy filename decoding, cloud sniping E2E validated
 * ✅ CLI foundations — `list`, `extract`, `test` subcommands
+* ✅ ZIP hardening — chunked extraction, progress, ZipCrypto, WinZip AES, DoS protection
 
-**Active — shared infrastructure (cheaper now, benefits all formats):**
-
-* Additional shared codecs (LZMA, BZip2, Zstd) — ZIP uses them, 7z needs them
-* State layer (`archive`) — universal cache layer: session boundary, metadata cache, entry tree, error translation
-
-**Active — format expansion:**
+**Active:**
 
 * **RAR support** ← current task — wrap external crate (read + extract only)
-* **7z support** — wrap external crate (read + extract)
-* **TAR / TAR.GZ parser** — our own code (sequential; no cloud sniping)
+* State layer (`archive`) — universal cache layer: session boundary, metadata cache, entry tree, error translation
 
-**Later in Phase 2:**
+#### Phase 3 — Interactive TUI
 
-* **Write support (local):** Create ZIP and TAR archives (skip RAR — proprietary)
-* CLI: `compress` subcommand, progress reporting, multi-entry extract
+Goal: `ratatui`-based archive browser that makes extraction fun.
 
-#### Phase 3 — Cloud Sniping Server (SaaS)
+* Tree view of archive contents with pagination for huge archives
+* Directory navigation — expand/collapse folders
+* Select/deselect individual files or whole folders
+* Selection overview panel (what you've picked, total size, estimated transfer)
+* Built-in fuzzy search by filename
+* Progress display + "transferred X of Y" stats (the wow moment)
+* Optional `fzf` handoff for search when available (progressive enhancement)
 
-* HTTP API server — primarily serves the **web site** version, which can't do direct HTTP range requests (CORS, no Range header control)
-* OAuth token flow for Google Drive / Dropbox (server holds tokens for cloud providers)
-* Credit / quota accounting (freemium model) — metering and billing live **only** in the server crate
-* Client apps (Phase 4) are independent cloud snipers — they do NOT depend on this server for core functionality
+#### Phase 4 — Cloud Auth + Sniping E2E
 
-#### Phase 4 — Client Apps (KMP + CLI)
+Goal: OAuth flow for cloud providers, end-to-end cloud sniping.
 
-* **KMP (Kotlin Multiplatform) project** — Compose Multiplatform for shared UI across Android, iOS, and 3 desktop platforms (macOS, Windows, Linux). Rust core consumed via UniFFI.
-* Client apps are **standalone products**: buy once, no metering. They connect directly to Dropbox/Drive for cloud sniping. Full local archive management (read + write).
-* Client apps may optionally call the SaaS API in certain conditions (future consideration), but are independent by default.
-* **Web site** — consumes the SaaS API (Phase 3). Not a Rust product. Metered/freemium.
-* Only starts once Phase 2 is fully proven via CLI
+* `snipe auth add google` — browser-based OAuth dance, token storage
+* `snipe auth add onedrive` — Microsoft Graph API, range request support
+* `snipe auth add dropbox` — Dropbox API, range request support
+* `snipe auth list` / `snipe auth remove <provider>`
+* Direct HTTP URL support already works via `HttpReadAt` — just needs CLI wiring
+* Cloud provider URL detection + auto-routing (detect Drive/OneDrive/Dropbox URLs)
 
-#### Phase X+1 (Future Ideas — Unscheduled)
+#### Phase 5 — CLI Polish + Distribution
 
-* **TAR.GZ random-access index (`zran`-style):** During a full TAR.GZ listing scan, periodically snapshot the gzip decompressor state (sliding window, ~32KB each) at byte-offset checkpoints. Store this index alongside the entry offsets. On a later targeted extraction, seek to the nearest checkpoint, restore decompressor state, and decompress only from there — instead of from byte 0. Enables partial extraction from `.tar.gz` without full decompression. Trade-off: index size vs. seek granularity. Reference: `zlib/examples/zran.c`.
+Goal: shippable binary, installable everywhere.
 
-#### Phase X (Future) — Cloud Archiving ("Vault" / "Reverse Snipe")
+* Non-interactive CLI mode: `snipe list`, `snipe get`, `snipe auth`
+* Shell completions (from `clap`)
+* `snipe feedback` command (opens GitHub issues)
+* GitHub Actions release pipeline (Linux x86, macOS arm64/x86, Windows)
+* Homebrew tap
+* macOS notarization
+* `cargo install` from crates.io
 
+---
+
+#### Post-v1 — Future Phases (Unscheduled)
+
+**Write support + additional formats:**
+* Compression: ZIP, 7z, TAR.GZ creation (`snipe pack` subcommand)
+* TUI filesystem browser for selecting files to pack
+* 7z read support (wrap external crate)
+* TAR / TAR.GZ read support (own code, sequential)
+
+**Plugin hooks:**
+* External tool integration at key decision points (search, select, browse)
+* fzf, yazi, and other terminal tool interoperability
+
+**SaaS server:**
+* HTTP API for the web version (CORS workaround for browser-based sniping)
+* OAuth token management server-side
+* Credit/quota accounting (freemium model)
+
+**Client apps (KMP):**
+* Compose Multiplatform for Android, iOS, desktop
+* Rust core consumed via UniFFI
+* Standalone products, no metering
+
+**Cloud archiving ("Vault" / "Reverse Snipe"):**
 * Stream files from cloud → compress on our servers → stream archive back to cloud
-* Separate pay-per-operation billing
+
+**TAR.GZ random-access index (`zran`-style):**
+* Snapshot gzip decompressor state at checkpoints during full scan
+* On later extraction, seek to nearest checkpoint instead of byte 0

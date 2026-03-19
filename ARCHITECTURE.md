@@ -526,7 +526,7 @@ fn decode_zip_filename(bytes: &[u8], general_purpose_flags: u16) -> String {
 
 ---
 
-## Layer 3.5 — State Layer (Universal Cache) [TO BUILD]
+## Layer 3.5 — State Layer (Universal Cache)
 
 The universal cache and session layer. Sits between products (Layer 4) and the stateless core (Layers 0–3). Holds **only** state that every product benefits from: cached metadata, session handles, virtual folder trees. Products interact with the state layer, never with core directly.
 
@@ -606,9 +606,10 @@ Each product is an actual binary (or library consumed via FFI). It assembles the
 - Full local archive management (read + write) plus direct cloud sniping
 - No dependency on the server for core functionality
 
-**CLI** — thin shell for dev and power users.
-- Assembles: `archive-core` + `archive`, minimal or no decorators
+**CLI (`snipe`)** — the v1 product. Interactive TUI archive browser + cloud sniping from the terminal. Handles OAuth externally (browser flow → static bearer token via `HttpReadAt::with_headers()`), no `ReadAt` decorators needed.
+- Assembles: `archive-core` + `archive`, no decorators
 - Defines `CliError`
+- Owns: TUI (`ratatui`), CLI parsing (`clap`), OAuth flows, cloud provider URL routing
 
 **Web site** — not a Rust product. Consumes the server's HTTP API. Metered/freemium.
 
