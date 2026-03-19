@@ -3,6 +3,8 @@
 //! This enum provides static dispatch (no `dyn`) over the available
 //! `ReadAt` implementations.
 
+use std::path::Path;
+
 use bytes::Bytes;
 use tokio::io::AsyncRead;
 
@@ -21,6 +23,17 @@ pub enum Source {
 }
 
 impl Source {
+    /// Returns the local file path if this source is a local file, `None` for HTTP.
+    ///
+    /// Used by the RAR extraction pipeline to decide between the local shortcut
+    /// (pass the path directly to unrar) and the cloud synthetic-archive approach.
+    pub fn local_path(&self) -> Option<&Path> {
+        match self {
+            Source::Local(r) => Some(&r.path),
+            Source::Http(_) => None,
+        }
+    }
+
     /// Create a `Source` by auto-detecting from a string.
     ///
     /// - Strings starting with `http://` or `https://` become `Source::Http`.

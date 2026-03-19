@@ -12,7 +12,7 @@ use crate::io::ReadError;
 /// Each call to [`read_range`](ReadAt::read_range) or [`read_stream`](ReadAt::read_stream)
 /// opens the file fresh — no long-lived handle is held between calls.
 pub struct LocalReadAt {
-    path: PathBuf,
+    pub(crate) path: PathBuf,
 }
 
 impl LocalReadAt {

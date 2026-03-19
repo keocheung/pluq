@@ -396,6 +396,18 @@ fn build_end_of_archive_block() -> Bytes {
     Bytes::from(buf)
 }
 
+// ── Test helpers (available to sibling test modules in the same crate) ────────
+
+/// Exposed for use by `facade` tests that need a minimal RAR5 archive fixture.
+#[cfg(test)]
+pub(crate) fn build_minimal_rar5_for_test(
+    filename: &str,
+    data: &[u8],
+    solid: bool,
+) -> Vec<u8> {
+    tests::build_minimal_rar5(filename, data, solid)
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -456,7 +468,7 @@ mod tests {
     /// one Store file entry + end-of-archive block.
     ///
     /// Used to verify `RarArchive::open` without requiring a real `.rar` file.
-    fn build_minimal_rar5(
+    pub(crate) fn build_minimal_rar5(
         filename: &str,
         data: &[u8],
         solid: bool,
