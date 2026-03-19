@@ -5,6 +5,7 @@
 
 pub(crate) mod parse;
 
+use std::path::PathBuf;
 use std::time::SystemTime;
 
 use std::io::Read;
@@ -16,6 +17,7 @@ use tokio_util::io::SyncIoBridge;
 
 use crate::archive_reader::ArchiveReader;
 use crate::codec::CompressionMethod;
+use crate::io::LocalPath;
 use crate::progress::ProgressReporter;
 use crate::rar::parse::{
     QoCachedBlock, RAR4_SIGNATURE, RAR5_SIGNATURE, parse_block_header, parse_file_header,
@@ -31,12 +33,10 @@ use crate::{ArchiveEntry, CoreError, ReadAt};
 /// public `ArchiveEntry` API.
 pub(crate) struct RarEntryLocation {
     /// Absolute offset of the file header block in the archive.
-    /// Used in Step 6 (synthetic archive construction for cloud extraction).
-    #[allow(dead_code)]
+    /// Used in cloud extraction (synthetic archive construction).
     pub header_offset: u64,
     /// Byte length of the file header block (header fields only, not data area).
-    /// Used in Step 6 (synthetic archive construction for cloud extraction).
-    #[allow(dead_code)]
+    /// Used in cloud extraction (synthetic archive construction).
     pub header_size: u64,
     /// Absolute offset of the compressed data in the archive.
     pub data_offset: u64,
@@ -45,7 +45,7 @@ pub(crate) struct RarEntryLocation {
     /// RAR5 compression method: 0 = Store, 1–5 = proprietary compression.
     pub method: u8,
     /// Compression dictionary size in bytes.
-    /// Used in Step 6 (unrar extraction with dict size hint).
+    /// Informational — unrar handles dict size internally from the file header.
     #[allow(dead_code)]
     pub dict_size: u64,
     /// CRC32 of the uncompressed data, if present in the file header.
@@ -81,12 +81,17 @@ pub struct RarArchive<R: ReadAt> {
     pub(crate) reader: R,
     entries: Vec<ArchiveEntry>,
     pub(crate) locations: Vec<RarEntryLocation>,
-    /// RAR5 signature + main header bytes (for synthetic archive construction in Step 6).
-    #[allow(dead_code)]
+    /// RAR5 signature + main header bytes (for synthetic archive construction in cloud extraction).
     pub(crate) archive_preamble: Bytes,
-    /// Minimal end-of-archive block (for synthetic archive construction in Step 6).
-    #[allow(dead_code)]
+    /// Minimal end-of-archive block (for synthetic archive construction in cloud extraction).
     pub(crate) end_block: Bytes,
+    /// Local filesystem path of the archive, if the source is a local file.
+    ///
+    /// `Some` for [`LocalReadAt`](crate::io::LocalReadAt) sources; `None` for HTTP.
+    /// Captured at [`open`](RarArchive::open) time and used by [`extract_compressed`]
+    /// to choose between the direct-path (`unrar` shortcut) and synthetic-archive
+    /// (cloud) extraction paths.
+    local_path: Option<PathBuf>,
 }
 
 impl<R: ReadAt> std::fmt::Debug for RarArchive<R> {
@@ -105,7 +110,15 @@ impl<R: ReadAt> RarArchive<R> {
     ///
     /// Returns [`CoreError::InvalidFormat`] if the RAR5 signature is absent.
     /// Returns [`CoreError::UnsupportedFormat`] if a RAR4 signature is detected.
-    pub async fn open(reader: R) -> Result<Self, CoreError> {
+    // The `LocalPath` bound is `pub(crate)` while `open` is `pub`, but `RarArchive`
+    // is only constructed from within this crate (via `ArchiveCore`), so external
+    // callers cannot reach this method in practice.
+    #[allow(private_bounds)]
+    pub async fn open(reader: R) -> Result<Self, CoreError>
+    where
+        R: LocalPath,
+    {
+        let local_path = reader.local_path().map(|p| p.to_path_buf());
         let size = reader.size().await?;
 
         // 1. Verify RAR5 signature (8 bytes at offset 0).
@@ -159,6 +172,7 @@ impl<R: ReadAt> RarArchive<R> {
                     locations,
                     archive_preamble,
                     end_block,
+                    local_path,
                 });
             }
         }
@@ -247,7 +261,7 @@ impl<R: ReadAt> RarArchive<R> {
 
         let end_block = build_end_of_archive_block();
 
-        Ok(Self { reader, entries, locations, archive_preamble, end_block })
+        Ok(Self { reader, entries, locations, archive_preamble, end_block, local_path })
     }
 
     /// All entries in the archive (non-solid only; solid entries are omitted).
@@ -269,8 +283,8 @@ impl<R: ReadAt> RarArchive<R> {
     /// are verified — output is only written after both checks pass.
     ///
     /// Method 0 (Store) is handled directly via [`ReadAt::read_stream`].
-    /// Methods 1–5 (proprietary RAR compression) require `unrar` and are
-    /// implemented in Step 6.
+    /// Methods 1–5 (proprietary RAR compression) are handled by the `unrar` C++ library.
+    /// Encrypted entries route through `unrar` regardless of method.
     pub async fn extract<W: AsyncWrite + Send + Unpin>(
         &self,
         entry: &ArchiveEntry,
@@ -284,14 +298,8 @@ impl<R: ReadAt> RarArchive<R> {
 
         let loc = &self.locations[entry.index];
 
-        if loc.is_encrypted {
-            if password.is_none() {
-                return Err(CoreError::PasswordRequired);
-            }
-            // Encrypted entry with password supplied: needs unrar (Step 6).
-            return Err(CoreError::UnsupportedFeature {
-                detail: "RAR file encryption is not yet supported (coming in Step 6)".into(),
-            });
+        if loc.is_encrypted && password.is_none() {
+            return Err(CoreError::PasswordRequired);
         }
 
         if loc.is_solid {
@@ -300,11 +308,14 @@ impl<R: ReadAt> RarArchive<R> {
             });
         }
 
+        // Encrypted entries must go through unrar (it handles AES decryption).
+        if loc.is_encrypted {
+            return self.extract_compressed(entry, loc, sink, progress, password).await;
+        }
+
         match loc.method {
             0 => self.extract_store(entry, loc, sink, progress).await,
-            1..=5 => Err(CoreError::UnsupportedFeature {
-                detail: "compressed RAR extraction not yet implemented (coming in Step 6)".into(),
-            }),
+            1..=5 => self.extract_compressed(entry, loc, sink, progress, None).await,
             m => Err(CoreError::UnsupportedCompression {
                 algorithm: format!("RAR method {m}"),
             }),
@@ -450,6 +461,213 @@ impl<R: ReadAt> RarArchive<R> {
             })?;
 
         Ok(bytes_written)
+    }
+
+    /// Dispatch compressed extraction (methods 1–5, or any encrypted entry) to `unrar`.
+    ///
+    /// Chooses between the local shortcut (pass the archive path directly to `unrar`)
+    /// and the cloud synthetic-archive approach based on whether a local path was
+    /// captured at [`open`](RarArchive::open) time.
+    async fn extract_compressed<W: AsyncWrite + Send + Unpin>(
+        &self,
+        entry: &ArchiveEntry,
+        loc: &RarEntryLocation,
+        sink: &mut W,
+        progress: Arc<Mutex<dyn ProgressReporter>>,
+        password: Option<&[u8]>,
+    ) -> Result<u64, CoreError> {
+        if let Some(path) = &self.local_path {
+            return self
+                .extract_via_unrar_local(entry, loc, path, sink, progress, password)
+                .await;
+        }
+        self.extract_via_unrar_cloud(entry, loc, sink, progress, password)
+            .await
+    }
+
+    /// Extract a compressed (or encrypted) entry from a **local** archive via `unrar`.
+    ///
+    /// Opens the original file directly — no temp file needed.  Iterates headers
+    /// until the target entry is found, then reads all decompressed bytes into
+    /// memory via `unrar`.  CRC32 and BLAKE2sp are verified after decompression.
+    async fn extract_via_unrar_local<W: AsyncWrite + Send + Unpin>(
+        &self,
+        entry: &ArchiveEntry,
+        loc: &RarEntryLocation,
+        archive_path: &std::path::Path,
+        sink: &mut W,
+        progress: Arc<Mutex<dyn ProgressReporter>>,
+        password: Option<&[u8]>,
+    ) -> Result<u64, CoreError> {
+        let path = archive_path.to_path_buf();
+        let target_name = entry.name.clone();
+        let entry_name = entry.name.clone();
+        let uncompressed_size = entry.uncompressed_size;
+        let expected_crc = loc.crc32;
+        let expected_blake2 = loc.blake2_hash;
+        let password_bytes = password.map(|p| p.to_vec());
+
+        {
+            let mut p = progress.lock().unwrap();
+            p.on_entry_start(&entry_name, uncompressed_size);
+        }
+
+        let data =
+            tokio::task::spawn_blocking(move || -> Result<Vec<u8>, CoreError> {
+                let mut archive = match &password_bytes {
+                    Some(pw) => unrar::Archive::with_password(&path, pw.as_slice())
+                        .open_for_processing()
+                        .map_err(map_unrar_error)?,
+                    None => unrar::Archive::new(&path)
+                        .open_for_processing()
+                        .map_err(map_unrar_error)?,
+                };
+
+                loop {
+                    let header = archive.read_header().map_err(map_unrar_error)?;
+                    let header = match header {
+                        Some(h) => h,
+                        None => {
+                            return Err(CoreError::InvalidFormat {
+                                message: format!(
+                                    "entry '{target_name}' not found in archive"
+                                ),
+                            })
+                        }
+                    };
+
+                    let name =
+                        header.entry().filename.to_string_lossy().replace('\\', "/");
+                    if name == target_name {
+                        let (data, _) = header.read().map_err(map_unrar_error)?;
+                        return Ok(data);
+                    }
+                    archive = header.skip().map_err(map_unrar_error)?;
+                }
+            })
+            .await
+            .map_err(|e| CoreError::BitstreamError {
+                detail: format!("extraction task panicked: {e}"),
+            })??;
+
+        verify_and_write(
+            &data,
+            &entry_name,
+            expected_crc,
+            expected_blake2,
+            sink,
+            &progress,
+        )
+        .await
+    }
+
+    /// Extract a compressed (or encrypted) entry from a **cloud** archive via `unrar`.
+    ///
+    /// Downloads only the target entry's file header + compressed data, assembles
+    /// them into a minimal valid RAR5 archive in a temp file, and decompresses with
+    /// `unrar`.  The temp file is automatically deleted when the function returns.
+    async fn extract_via_unrar_cloud<W: AsyncWrite + Send + Unpin>(
+        &self,
+        entry: &ArchiveEntry,
+        loc: &RarEntryLocation,
+        sink: &mut W,
+        progress: Arc<Mutex<dyn ProgressReporter>>,
+        password: Option<&[u8]>,
+    ) -> Result<u64, CoreError> {
+        let entry_name = entry.name.clone();
+        let uncompressed_size = entry.uncompressed_size;
+        let expected_crc = loc.crc32;
+        let expected_blake2 = loc.blake2_hash;
+        let password_bytes = password.map(|p| p.to_vec());
+
+        {
+            let mut p = progress.lock().unwrap();
+            p.on_entry_start(&entry_name, uncompressed_size);
+        }
+
+        // 1. Download the file header bytes (they contain the entry metadata unrar needs).
+        let file_header_bytes = self
+            .reader
+            .read_range(loc.header_offset, loc.header_size)
+            .await
+            .map_err(CoreError::Io)?;
+
+        // 2. Download the compressed data.
+        let compressed_data = self
+            .reader
+            .read_range(loc.data_offset, loc.data_size)
+            .await
+            .map_err(CoreError::Io)?;
+
+        // Snapshot preamble and end block for the blocking closure.
+        let archive_preamble = self.archive_preamble.clone();
+        let end_block = self.end_block.clone();
+
+        // 3. Assemble synthetic archive, extract with unrar — all in spawn_blocking.
+        let data =
+            tokio::task::spawn_blocking(move || -> Result<Vec<u8>, CoreError> {
+                // Create temp file and write the synthetic RAR5 archive.
+                let temp_file = tempfile::NamedTempFile::new().map_err(|e| {
+                    CoreError::BitstreamError {
+                        detail: format!("failed to create temp file: {e}"),
+                    }
+                })?;
+
+                {
+                    use std::io::Write;
+                    let mut writer =
+                        std::io::BufWriter::new(temp_file.as_file());
+                    for chunk in [
+                        archive_preamble.as_ref(),
+                        file_header_bytes.as_ref(),
+                        compressed_data.as_ref(),
+                        end_block.as_ref(),
+                    ] {
+                        writer.write_all(chunk).map_err(|e| {
+                            CoreError::BitstreamError {
+                                detail: format!("temp file write failed: {e}"),
+                            }
+                        })?;
+                    }
+                    writer.flush().map_err(|e| CoreError::BitstreamError {
+                        detail: format!("temp file flush failed: {e}"),
+                    })?;
+                }
+
+                // Extract from the synthetic archive.
+                let temp_path = temp_file.path().to_path_buf();
+                let archive = match &password_bytes {
+                    Some(pw) => unrar::Archive::with_password(&temp_path, pw.as_slice())
+                        .open_for_processing()
+                        .map_err(map_unrar_error)?,
+                    None => unrar::Archive::new(&temp_path)
+                        .open_for_processing()
+                        .map_err(map_unrar_error)?,
+                };
+
+                let header = archive.read_header().map_err(map_unrar_error)?;
+                let header = header.ok_or_else(|| CoreError::BitstreamError {
+                    detail: "synthetic archive produced no entries".into(),
+                })?;
+                let (data, _) = header.read().map_err(map_unrar_error)?;
+
+                // temp_file is dropped here → temp file deleted automatically.
+                Ok(data)
+            })
+            .await
+            .map_err(|e| CoreError::BitstreamError {
+                detail: format!("extraction task panicked: {e}"),
+            })??;
+
+        verify_and_write(
+            &data,
+            &entry_name,
+            expected_crc,
+            expected_blake2,
+            sink,
+            &progress,
+        )
+        .await
     }
 
     /// Attempt to build the entry list from the Quick Open (QO) service block.
@@ -624,6 +842,88 @@ fn build_end_of_archive_block() -> Bytes {
     buf.extend_from_slice(&crc.to_le_bytes());
     buf.extend_from_slice(&crc_region);
     Bytes::from(buf)
+}
+
+/// Map a `unrar` error to the appropriate [`CoreError`] variant.
+///
+/// `unrar` reports errors via `code` + `when` pairs.  We translate the
+/// most actionable codes to specific variants; everything else becomes a
+/// `BitstreamError`.
+fn map_unrar_error(e: unrar::error::UnrarError) -> CoreError {
+    use unrar::error::Code;
+    match e.code {
+        Code::MissingPassword => CoreError::PasswordRequired,
+        Code::BadPassword => CoreError::WrongPassword {
+            method: crate::PasswordDetectionMethod::CrcMismatch,
+        },
+        Code::BadData | Code::BadArchive => CoreError::BitstreamError {
+            detail: format!("corrupt RAR data: {e}"),
+        },
+        _ => CoreError::BitstreamError {
+            detail: format!("unrar error: {e}"),
+        },
+    }
+}
+
+/// Verify CRC32 and BLAKE2sp of `data`, write to `sink`, and fire progress callbacks.
+///
+/// Used by both local and cloud extraction paths after `unrar` decompresses bytes
+/// into a `Vec<u8>`.  Writes to `sink` only after hash verification succeeds.
+async fn verify_and_write<W: AsyncWrite + Send + Unpin>(
+    data: &[u8],
+    entry_name: &str,
+    expected_crc: Option<u32>,
+    expected_blake2: Option<[u8; 32]>,
+    sink: &mut W,
+    progress: &Arc<Mutex<dyn ProgressReporter>>,
+) -> Result<u64, CoreError> {
+    // CRC32 verification.
+    if let Some(expected) = expected_crc {
+        let actual = crc32fast::hash(data);
+        if actual != expected {
+            progress
+                .lock()
+                .unwrap()
+                .on_entry_complete(entry_name, false);
+            return Err(CoreError::CrcMismatch {
+                entry: entry_name.to_owned(),
+                expected,
+                actual,
+            });
+        }
+    }
+
+    // BLAKE2sp verification (present only when extra area record 0x02 exists).
+    if let Some(expected_hash) = expected_blake2 {
+        let mut state = blake2s_simd::blake2sp::State::new();
+        state.update(data);
+        let actual = state.finalize();
+        if actual.as_array() != &expected_hash {
+            progress
+                .lock()
+                .unwrap()
+                .on_entry_complete(entry_name, false);
+            return Err(CoreError::BitstreamError {
+                detail: format!("BLAKE2sp hash mismatch for '{entry_name}'"),
+            });
+        }
+    }
+
+    let bytes_written = data.len() as u64;
+    {
+        let mut p = progress.lock().unwrap();
+        p.on_bytes_progress(bytes_written);
+    }
+    sink.write_all(data)
+        .await
+        .map_err(|e| CoreError::BitstreamError {
+            detail: format!("write to sink failed: {e}"),
+        })?;
+    progress
+        .lock()
+        .unwrap()
+        .on_entry_complete(entry_name, true);
+    Ok(bytes_written)
 }
 
 // ── Test helpers (available to sibling test modules in the same crate) ────────

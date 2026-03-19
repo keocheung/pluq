@@ -3,8 +3,8 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 2 — Core engine: RAR read support + state layer.
-* **Current Active Task:** RAR5 Step 5 complete. Next: Step 6 — Compressed Extraction via unrar (Methods 1–5).
-* **Baseline:** 134 tests pass (archive-core: 108 unit + 7 integration, archive: 25), clippy clean.
+* **Current Active Task:** RAR5 Step 6 complete. Next: Step 7 — Integration Tests (test fixtures + CRC corruption test).
+* **Baseline:** 147 tests pass (archive-core: 108 unit + 14 integration [7 ZIP + 7 RAR], archive: 25), clippy clean.
 * **Note:** `CoreError` replaces old `ArchiveError` (core error type). `ArchiveError` replaces old `StateError` (product-facing error type from the `archive` crate). `archive` crate replaces old `archive-state`.
 * **SESSION_PLAN progress:**
   - RAR Step 1 ✅ — `rar/parse.rs`: `read_vint`, `parse_block_header` (CRC verified), `parse_file_header`, extra area (encrypt/hash/time), `parse_main_header` + `RarLocator`; 20 new tests
@@ -12,6 +12,7 @@
   - RAR Step 3 ✅ — QO optimisation: `parse_quick_open_data` + `QoCachedBlock` in `parse.rs`; `try_quick_open` async method on `RarArchive` (reads QO service block, parses cached headers, falls back to sequential scan on any error); `RarLocator.quick_open_offset` doc clarified (offset from main header start); bug fix: zero-size structure guard prevents infinite loop; 7 parse tests + 3 mod tests; all 3 acceptance criteria covered
   - RAR Step 4 ✅ — Format detection + ArchiveCore integration: magic byte sniff in `ArchiveCore::open()` (RAR5 → `RarArchive`, RAR4 → clear `UnsupportedFormat`, else ZIP fallback); `ArchiveInner::Rar` variant; `Source::local_path()` accessor; `LocalReadAt.path` made `pub(crate)`; stubs for `extract`/`test` (Step 5-6); 6 new facade tests; 100 unit tests + 7 integration tests; clippy clean
   - RAR Step 5 ✅ — Store Extraction (Method 0): `ArchiveReader` impl for `RarArchive<R>`; `extract_store` using `read_stream` + `SyncIoBridge` + `spawn_blocking` (matches ZIP pattern); CRC32 + BLAKE2sp (blake2s_simd) verification; `on_entry_start/on_bytes_progress/on_entry_complete` progress callbacks; cancellation via `should_cancel()`; encrypted → `PasswordRequired`; solid → `UnsupportedFeature`; methods 1–5 → `UnsupportedFeature` (Step 6); facade dispatch wired; 8 new unit tests; 108 unit + 7 integration tests; clippy clean
+  - RAR Step 6 ✅ — Compressed Extraction via unrar (Methods 1–5): `unrar = "0.5"` + `tempfile = "3"` added to production deps; `LocalPath` pub(crate) trait in `io/mod.rs` captures local-vs-cloud at `open()` time; `local_path: Option<PathBuf>` stored in `RarArchive`; `extract_compressed` dispatches to `extract_via_unrar_local` (direct path) or `extract_via_unrar_cloud` (synthetic archive); `map_unrar_error` maps `Code::MissingPassword` → `PasswordRequired`, `Code::BadPassword` → `WrongPassword`; `verify_and_write` shared post-decompression CRC32/BLAKE2sp check; encrypted entries now route through unrar; test fixture `rar5_unicode_entry.rar` (from unrar crate's data); 7 new integration tests covering format detection, listing, extraction, cost, progress, integrity; 108 unit + 14 integration tests; clippy clean
 
 ---
 
