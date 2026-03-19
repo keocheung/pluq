@@ -471,9 +471,11 @@ fn parse_one_timestamp(data: &[u8], pos: &mut usize, unix_mode: bool) -> Option<
 
 /// Quick Open (QO) locator from the main header extra area (record type 0x01).
 pub(crate) struct RarLocator {
-    /// Offset of the QO service block from the end of the main header (if present).
+    /// Offset of the QO service block measured from the **start** of the main header block
+    /// (i.e. from its CRC32 field). Add this to `main_header.raw.archive_offset` to get the
+    /// absolute archive offset of the QO block.
     pub quick_open_offset: Option<u64>,
-    /// Offset of the recovery record from the end of the main header (if present).
+    /// Offset of the recovery record from the start of the main header block.
     pub recovery_offset: Option<u64>,
 }
 
@@ -570,6 +572,112 @@ fn parse_main_extra_area(data: &[u8]) -> Option<RarLocator> {
         }
     }
     None
+}
+
+// ── Quick Open (QO) data parsing ─────────────────────────────────────────────
+
+/// One cached block entry from the QO service block data area.
+///
+/// The `data` field contains the raw bytes of a cached file/service header block,
+/// exactly as it appears at `original_archive_offset` in the archive. Callers should
+/// parse `data` with [`parse_block_header`] followed by [`parse_file_header`] using
+/// `original_archive_offset` as the `archive_offset` argument.
+pub(crate) struct QoCachedBlock {
+    /// Absolute archive offset where the original header block lives.
+    pub original_archive_offset: u64,
+    /// Raw bytes of the cached header block (header fields only, no data area).
+    pub data: Vec<u8>,
+}
+
+/// Parse the data area of a QO service block.
+///
+/// `qo_data` is the raw byte slice of the QO block's data area (the bytes after
+/// the QO service header). `qo_block_offset` is the absolute archive offset of the
+/// QO service block header (used to resolve the relative `offset` vints stored in
+/// each cache entry).
+///
+/// Each cache entry has the layout:
+/// - `structure_crc32` (4 bytes LE) — CRC32 of the remaining structure fields
+/// - `structure_size`  vint — byte count of the fields that follow the CRC
+/// - `flags`           vint — currently always 0; reserved for future use
+/// - `offset`          vint — distance from the QO block start to original header
+/// - `data_size`       vint — byte count of the cached header bytes that follow
+/// - `data`            bytes — the cached header block bytes
+///
+/// Unknown or corrupt entries are skipped gracefully.
+pub(crate) fn parse_quick_open_data(
+    qo_data: &[u8],
+    qo_block_offset: u64,
+) -> Vec<QoCachedBlock> {
+    let mut blocks = Vec::new();
+    let mut pos = 0usize;
+
+    while pos < qo_data.len() {
+        // ── CRC32 of the structure (4 bytes LE) ──────────────────────────────
+        if pos + 4 > qo_data.len() {
+            break;
+        }
+        let structure_crc =
+            u32::from_le_bytes(qo_data[pos..pos + 4].try_into().unwrap());
+        pos += 4;
+
+        // ── structure_size vint ───────────────────────────────────────────────
+        let Ok(structure_size) = read_vint(qo_data, &mut pos) else {
+            break;
+        };
+        let structure_start = pos; // CRC covers from here through structure_size bytes
+        let structure_end = pos + structure_size as usize;
+        if structure_end > qo_data.len() {
+            break;
+        }
+        // A zero-size structure can never contain a valid entry.  More critically,
+        // `structure_end == pos` means the loop would not advance — infinite loop.
+        if structure_size == 0 {
+            break;
+        }
+
+        // Verify CRC of the structure bytes.
+        let computed_crc = crc32fast::hash(&qo_data[structure_start..structure_end]);
+        if computed_crc != structure_crc {
+            // Corrupt or misaligned — stop trying to parse further.
+            break;
+        }
+
+        let structure_data = &qo_data[structure_start..structure_end];
+        let mut spos = 0usize;
+
+        // ── flags vint ───────────────────────────────────────────────────────
+        let Ok(_flags) = read_vint(structure_data, &mut spos) else {
+            pos = structure_end;
+            continue;
+        };
+
+        // ── offset vint — distance from QO block start to original header ────
+        let Ok(relative_offset) = read_vint(structure_data, &mut spos) else {
+            pos = structure_end;
+            continue;
+        };
+        let original_archive_offset = qo_block_offset + relative_offset;
+
+        // ── data_size vint ────────────────────────────────────────────────────
+        let Ok(data_size) = read_vint(structure_data, &mut spos) else {
+            pos = structure_end;
+            continue;
+        };
+        let data_size = data_size as usize;
+
+        // ── cached header bytes ───────────────────────────────────────────────
+        if spos + data_size > structure_data.len() {
+            pos = structure_end;
+            continue;
+        }
+        let data = structure_data[spos..spos + data_size].to_vec();
+
+        blocks.push(QoCachedBlock { original_archive_offset, data });
+        pos = structure_end;
+    }
+
+    blocks
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
@@ -861,5 +969,162 @@ mod tests {
             RAR4_SIGNATURE,
             [0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x00]
         );
+    }
+
+    // ── parse_quick_open_data ─────────────────────────────────────────────────
+
+    /// Helper: build a single QO cache entry.
+    ///
+    /// Structure layout:
+    ///   structure_crc32 (4 bytes LE) — CRC of structure bytes
+    ///   structure_size  (vint)
+    ///   [structure start] flags (vint=0) + offset (vint) + data_size (vint) + data bytes
+    fn build_qo_entry(relative_offset: u64, header_data: &[u8]) -> Vec<u8> {
+        // Build the structure body (everything after structure_size vint)
+        let mut structure = Vec::new();
+        // flags vint = 0
+        structure.push(0x00u8);
+        // offset vint (we assume it fits in 1-2 bytes for tests)
+        encode_vint(relative_offset, &mut structure);
+        // data_size vint
+        encode_vint(header_data.len() as u64, &mut structure);
+        // data
+        structure.extend_from_slice(header_data);
+
+        let structure_crc = crc32fast::hash(&structure);
+        let structure_size = structure.len() as u64;
+
+        let mut entry = Vec::new();
+        entry.extend_from_slice(&structure_crc.to_le_bytes());
+        encode_vint(structure_size, &mut entry);
+        entry.extend_from_slice(&structure);
+        entry
+    }
+
+    fn encode_vint(mut value: u64, buf: &mut Vec<u8>) {
+        loop {
+            let byte = (value & 0x7F) as u8;
+            value >>= 7;
+            if value == 0 {
+                buf.push(byte);
+                break;
+            } else {
+                buf.push(byte | 0x80);
+            }
+        }
+    }
+
+    #[test]
+    fn qo_empty_input_yields_no_blocks() {
+        let blocks = parse_quick_open_data(&[], 0);
+        assert!(blocks.is_empty());
+    }
+
+    #[test]
+    fn qo_single_valid_entry_parsed() {
+        let fake_header = b"FAKEHEADER";
+        let relative_offset = 100u64;
+        let qo_block_offset = 500u64;
+
+        let entry = build_qo_entry(relative_offset, fake_header);
+        let blocks = parse_quick_open_data(&entry, qo_block_offset);
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(
+            blocks[0].original_archive_offset,
+            qo_block_offset + relative_offset
+        );
+        assert_eq!(blocks[0].data, fake_header);
+    }
+
+    #[test]
+    fn qo_two_entries_both_parsed() {
+        let data1 = b"HEADER_ONE";
+        let data2 = b"HEADER_TWO_LONGER";
+        let qo_block_offset = 1000u64;
+
+        let mut buf = Vec::new();
+        buf.extend(build_qo_entry(50, data1));
+        buf.extend(build_qo_entry(200, data2));
+
+        let blocks = parse_quick_open_data(&buf, qo_block_offset);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].original_archive_offset, qo_block_offset + 50);
+        assert_eq!(blocks[0].data, data1);
+        assert_eq!(blocks[1].original_archive_offset, qo_block_offset + 200);
+        assert_eq!(blocks[1].data, data2);
+    }
+
+    #[test]
+    fn qo_corrupt_crc_stops_parsing() {
+        let data1 = b"GOOD_HEADER";
+        let data2 = b"BAD_HEADER";
+        let qo_block_offset = 0u64;
+
+        let mut buf = Vec::new();
+        buf.extend(build_qo_entry(10, data1));
+        let mut bad_entry = build_qo_entry(20, data2);
+        // Corrupt the CRC of the second entry.
+        bad_entry[0] ^= 0xFF;
+        buf.extend(bad_entry);
+
+        let blocks = parse_quick_open_data(&buf, qo_block_offset);
+        // Only the first valid entry should be returned.
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].data, data1);
+    }
+
+    #[test]
+    fn qo_zero_size_structure_stops_parsing() {
+        // CRC32 of empty input = 0x00000000. A structure_size of 0 with a matching
+        // stored CRC would cause an infinite loop without the zero-size guard.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0u32.to_le_bytes()); // CRC = hash([]) = 0
+        buf.push(0x00u8); // structure_size vint = 0 — no structure bytes follow
+
+        // A valid second entry that would be reached if we skipped instead of stopped.
+        buf.extend(build_qo_entry(50, b"WOULD_SEE_IF_SKIPPED"));
+
+        // Must not hang; must return 0 blocks (zero-size triggers break).
+        let blocks = parse_quick_open_data(&buf, 0);
+        assert_eq!(blocks.len(), 0);
+    }
+
+    #[test]
+    fn qo_inner_data_overflow_skips_entry_and_continues() {
+        // Build an entry whose structure has a valid CRC but whose data_size vint
+        // claims more bytes than are available inside the structure.
+        // Expected: that entry is skipped (not a hard stop), and the next valid
+        // entry is still parsed.
+        let structure = [0x00u8, 0x0A, 0x20]; // flags=0, offset=10, data_size=32 (> 0 remaining)
+        let structure_crc = crc32fast::hash(&structure);
+
+        let mut entry1 = Vec::new();
+        entry1.extend_from_slice(&structure_crc.to_le_bytes());
+        encode_vint(structure.len() as u64, &mut entry1);
+        entry1.extend_from_slice(&structure);
+
+        let fake_header = b"SECOND_ENTRY";
+        let entry2 = build_qo_entry(200, fake_header);
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&entry1);
+        buf.extend_from_slice(&entry2);
+
+        let blocks = parse_quick_open_data(&buf, 0);
+        assert_eq!(blocks.len(), 1, "overflowed first entry must be skipped, not abort");
+        assert_eq!(blocks[0].original_archive_offset, 200);
+        assert_eq!(blocks[0].data, fake_header);
+    }
+
+    #[test]
+    fn qo_truncated_input_does_not_panic() {
+        let data = b"TRUNCATED";
+        let entry = build_qo_entry(42, data);
+        // Feed only the first half of the entry.
+        let half = &entry[..entry.len() / 2];
+        let blocks = parse_quick_open_data(half, 0);
+        // May return 0 or partial results — must not panic.
+        let _ = blocks;
     }
 }

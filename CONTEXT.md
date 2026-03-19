@@ -3,12 +3,13 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 2 — Core engine: RAR read support + state layer.
-* **Current Active Task:** RAR5 Step 2 complete. Next: Step 3 — Quick Open (QO) optimisation.
-* **Baseline:** 116 tests pass (archive-core: 91, archive: 25), clippy clean.
+* **Current Active Task:** RAR5 Step 3 complete. Next: Step 4 — Format Detection + ArchiveCore Integration.
+* **Baseline:** 119 tests pass (archive-core: 94, archive: 25), clippy clean.
 * **Note:** `CoreError` replaces old `ArchiveError` (core error type). `ArchiveError` replaces old `StateError` (product-facing error type from the `archive` crate). `archive` crate replaces old `archive-state`.
 * **SESSION_PLAN progress:**
   - RAR Step 1 ✅ — `rar/parse.rs`: `read_vint`, `parse_block_header` (CRC verified), `parse_file_header`, extra area (encrypt/hash/time), `parse_main_header` + `RarLocator`; 20 new tests
   - RAR Step 2 ✅ — `rar/mod.rs`: `RarArchive<R>` + `RarEntryLocation`; sequential 64 KiB chunked scan; signature verification (RAR4 rejected gracefully); solid entry skipping; preamble + end-block capture for synthetic archive; 12 new tests
+  - RAR Step 3 ✅ — QO optimisation: `parse_quick_open_data` + `QoCachedBlock` in `parse.rs`; `try_quick_open` async method on `RarArchive` (reads QO service block, parses cached headers, falls back to sequential scan on any error); `RarLocator.quick_open_offset` doc clarified (offset from main header start); bug fix: zero-size structure guard prevents infinite loop; 7 parse tests + 3 mod tests; all 3 acceptance criteria covered
 
 ---
 

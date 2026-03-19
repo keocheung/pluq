@@ -11,7 +11,8 @@ use bytes::Bytes;
 
 use crate::codec::CompressionMethod;
 use crate::rar::parse::{
-    RAR4_SIGNATURE, RAR5_SIGNATURE, parse_block_header, parse_file_header, parse_main_header,
+    QoCachedBlock, RAR4_SIGNATURE, RAR5_SIGNATURE, parse_block_header, parse_file_header,
+    parse_main_header, parse_quick_open_data,
 };
 use crate::{ArchiveEntry, CoreError, ReadAt};
 
@@ -135,7 +136,25 @@ impl<R: ReadAt> RarArchive<R> {
         }
         let archive_preamble = chunk.slice(0..preamble_end);
 
-        // 4. TODO (Step 3): try Quick Open optimisation before sequential scan.
+        // 4. Try Quick Open optimisation (avoids full sequential scan for QO-enabled archives).
+        //    On failure we fall back to the sequential scan below.
+        if let Some(locator) = &main_header.locator
+            && let Some(qo_offset) = locator.quick_open_offset
+        {
+            let qo_abs = main_header.raw.archive_offset + qo_offset;
+            if let Ok(Some((entries, locations))) =
+                Self::try_quick_open(&reader, qo_abs, size).await
+            {
+                let end_block = build_end_of_archive_block();
+                return Ok(Self {
+                    reader,
+                    entries,
+                    locations,
+                    archive_preamble,
+                    end_block,
+                });
+            }
+        }
 
         // 5. Sequential header scan — iterate blocks from end of main header.
         let mut entries: Vec<ArchiveEntry> = Vec::new();
@@ -228,7 +247,120 @@ impl<R: ReadAt> RarArchive<R> {
     pub fn entries(&self) -> &[ArchiveEntry] {
         &self.entries
     }
-}
+
+    /// Attempt to build the entry list from the Quick Open (QO) service block.
+    ///
+    /// Returns `Ok(Some((entries, locations)))` on success, `Ok(None)` if the QO block is
+    /// absent or the data is unusable, and `Err` only for genuine I/O errors.
+    async fn try_quick_open(
+        reader: &R,
+        qo_abs: u64,
+        archive_size: u64,
+    ) -> Result<Option<(Vec<ArchiveEntry>, Vec<RarEntryLocation>)>, CoreError> {
+        // Guard: QO offset must be within the archive.
+        if qo_abs >= archive_size {
+            return Ok(None);
+        }
+
+        // Read enough bytes to parse the QO service block header (64 KiB is sufficient).
+        let fetch_size = (64 * 1024_u64).min(archive_size - qo_abs);
+        let qo_buf = reader.read_range(qo_abs, fetch_size).await?;
+
+        // Parse QO block common header.
+        let qo_block = match parse_block_header(&qo_buf, qo_abs) {
+            Ok(b) => b,
+            Err(_) => return Ok(None),
+        };
+
+        // Must be a service header (block_type 3).
+        if qo_block.block_type != 3 {
+            return Ok(None);
+        }
+
+        // Locate the QO data area within our buffer.
+        // The data area immediately follows the header bytes.
+        let header_byte_count = (qo_block.total_size - qo_block.data_size) as usize;
+        if header_byte_count + qo_block.data_size as usize > qo_buf.len() {
+            // Data area extends past our fetch — would need another read.
+            // For now fall back to sequential scan (uncommon for typical archives).
+            return Ok(None);
+        }
+        let qo_data = &qo_buf[header_byte_count..header_byte_count + qo_block.data_size as usize];
+
+        // Parse the QO service name to confirm this is indeed a QO block.
+        // The service header body starts at qo_block.body_offset within qo_buf.
+        // The name_len vint and name bytes follow file_flags + unpacked_size + attributes + ...
+        // Quick check: the data area length being > 0 is sufficient to attempt parsing.
+        if qo_data.is_empty() {
+            return Ok(None);
+        }
+
+        // Parse cached header entries from QO data area.
+        let cached = parse_quick_open_data(qo_data, qo_abs);
+        if cached.is_empty() {
+            return Ok(None);
+        }
+
+        let mut entries: Vec<ArchiveEntry> = Vec::with_capacity(cached.len());
+        let mut locations: Vec<RarEntryLocation> = Vec::with_capacity(cached.len());
+
+        for QoCachedBlock { original_archive_offset, data } in cached {
+            // Parse common block header from cached bytes.
+            let raw_block = match parse_block_header(&data, original_archive_offset) {
+                Ok(b) => b,
+                Err(_) => continue, // skip unparseable cached entry
+            };
+
+            // Only process file headers (type 2).
+            if raw_block.block_type != 2 {
+                continue;
+            }
+
+            // Note: cached headers in QO blocks do NOT include the data area bytes.
+            // The data_size field from the common block header reflects the compressed
+            // data size in the original archive; we use it for location offsets.
+            let file_hdr = match parse_file_header(&data, raw_block) {
+                Ok(h) => h,
+                Err(_) => continue,
+            };
+
+            if file_hdr.compression.solid {
+                continue; // skip solid entries
+            }
+
+            let hdr_size = file_hdr.raw.total_size - file_hdr.raw.data_size;
+            let entry = ArchiveEntry {
+                name: file_hdr.name.clone(),
+                compressed_size: file_hdr.raw.data_size,
+                uncompressed_size: file_hdr.unpacked_size,
+                is_directory: file_hdr.is_directory,
+                is_encrypted: file_hdr.encryption.is_some(),
+                modified_at: file_hdr.mtime.map(unix_to_system_time),
+                compression_method: rar_method_to_codec(file_hdr.compression.method),
+                index: entries.len(),
+            };
+            let location = RarEntryLocation {
+                header_offset: original_archive_offset,
+                header_size: hdr_size,
+                data_offset: original_archive_offset + hdr_size,
+                data_size: file_hdr.raw.data_size,
+                method: file_hdr.compression.method,
+                dict_size: file_hdr.compression.dict_size,
+                crc32: file_hdr.data_crc32,
+                blake2_hash: file_hdr.blake2_hash,
+                is_solid: false,
+                is_encrypted: file_hdr.encryption.is_some(),
+            };
+            entries.push(entry);
+            locations.push(location);
+        }
+
+        if entries.is_empty() {
+            return Ok(None); // QO had no usable file entries — fall back
+        }
+        Ok(Some((entries, locations)))
+    }
+} // impl RarArchive
 
 // ── Helper functions ──────────────────────────────────────────────────────────
 
@@ -548,4 +680,158 @@ mod tests {
         assert_eq!(loc.blake2_hash, None); // no extra area in minimal fixture
         assert_eq!(loc.dict_size, 128 * 1024); // dict_exponent=0 → 128 KiB
     }
+
+
+    // ── Quick Open helpers ────────────────────────────────────────────────────
+
+    fn encode_vint_test(mut value: u64, buf: &mut Vec<u8>) {
+        loop {
+            let byte = (value & 0x7F) as u8;
+            value >>= 7;
+            if value == 0 { buf.push(byte); break; } else { buf.push(byte | 0x80); }
+        }
+    }
+
+    /// Build a minimal valid RAR5 file-header block (type 2, Store, no extras).
+    /// Returns only the header bytes — the `data_size` bytes of compressed data
+    /// are NOT appended, matching how QO caches headers.
+    fn build_file_header_bytes(name: &str, data_size: u64) -> Vec<u8> {
+        let name_bytes = name.as_bytes();
+        let mut body = Vec::new();
+        body.push(0x00u8);                          // file_flags = 0 (size known, no mtime, no crc)
+        encode_vint_test(data_size, &mut body);     // unpacked_size
+        body.push(0x00u8);                          // attributes
+        body.push(0x00u8);                          // compression_info = 0 (Store)
+        body.push(0x01u8);                          // host_os = Unix
+        encode_vint_test(name_bytes.len() as u64, &mut body);
+        body.extend_from_slice(name_bytes);
+
+        let mut data_size_vint = Vec::new();
+        encode_vint_test(data_size, &mut data_size_vint);
+
+        // header_size = block_type(1) + flags(1) + data_size_vint + body
+        let header_size = 1 + 1 + data_size_vint.len() + body.len();
+        let mut crc_region = Vec::new();
+        encode_vint_test(header_size as u64, &mut crc_region);
+        crc_region.push(0x02u8);                    // block_type = 2
+        crc_region.push(0x02u8);                    // flags = 0x0002 (data area present)
+        crc_region.extend_from_slice(&data_size_vint);
+        crc_region.extend_from_slice(&body);
+
+        let crc = crc32fast::hash(&crc_region);
+        let mut out = Vec::new();
+        out.extend_from_slice(&crc.to_le_bytes());
+        out.extend_from_slice(&crc_region);
+        out
+    }
+
+    /// Wrap raw QO cache data in a RAR5 service block (type 3) header.
+    fn build_service_block(data_area: &[u8]) -> Vec<u8> {
+        let mut data_size_vint = Vec::new();
+        encode_vint_test(data_area.len() as u64, &mut data_size_vint);
+        // header_size = block_type(1) + flags(1) + data_size_vint
+        let header_size = 1 + 1 + data_size_vint.len();
+        let mut crc_region = Vec::new();
+        encode_vint_test(header_size as u64, &mut crc_region);
+        crc_region.push(0x03u8);                    // block_type = 3 (service)
+        crc_region.push(0x02u8);                    // flags = 0x0002 (data area present)
+        crc_region.extend_from_slice(&data_size_vint);
+        let crc = crc32fast::hash(&crc_region);
+        let mut out = Vec::new();
+        out.extend_from_slice(&crc.to_le_bytes());
+        out.extend_from_slice(&crc_region);
+        out.extend_from_slice(data_area);
+        out
+    }
+
+    /// Build a single QO cache entry (same layout as parse.rs test helper).
+    fn build_qo_entry_mod(relative_offset: u64, data: &[u8]) -> Vec<u8> {
+        let mut structure = Vec::new();
+        structure.push(0x00u8);                     // flags = 0
+        encode_vint_test(relative_offset, &mut structure);
+        encode_vint_test(data.len() as u64, &mut structure);
+        structure.extend_from_slice(data);
+        let crc = crc32fast::hash(&structure);
+        let mut entry = Vec::new();
+        entry.extend_from_slice(&crc.to_le_bytes());
+        encode_vint_test(structure.len() as u64, &mut entry);
+        entry.extend_from_slice(&structure);
+        entry
+    }
+
+    // ── Quick Open integration tests ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn open_without_qo_locator_uses_sequential_scan() {
+        use crate::io::LocalReadAt;
+
+        // The minimal RAR5 fixture (no locator) exercises the sequential-scan path.
+        let data = b"quick open fallback";
+        let archive_bytes = build_minimal_rar5("qo_fallback.txt", data, false);
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &archive_bytes).unwrap();
+
+        let reader = LocalReadAt::new(tmp.path().to_str().unwrap());
+        let rar = RarArchive::open(reader).await.unwrap();
+
+        assert_eq!(rar.entries().len(), 1);
+        assert_eq!(rar.entries()[0].name, "qo_fallback.txt");
+    }
+
+    /// Exercises the `try_quick_open` happy path end-to-end:
+    /// a valid service block (type 3) whose data area contains a QO cache entry
+    /// wrapping a well-formed file header.  Must return the entry metadata without
+    /// performing a sequential scan.
+    #[tokio::test]
+    async fn try_quick_open_with_valid_service_block_returns_entries() {
+        use crate::io::LocalReadAt;
+
+        // File header for "qo_file.txt" with Store compression and data_size = 10.
+        let file_header_bytes = build_file_header_bytes("qo_file.txt", 10);
+
+        // QO cache entry: relative_offset = 0 (original block lives at QO block start).
+        let qo_entry = build_qo_entry_mod(0, &file_header_bytes);
+
+        // Wrap the QO entry in a service block (type 3).
+        let service_block = build_service_block(&qo_entry);
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &service_block).unwrap();
+        let size = service_block.len() as u64;
+
+        let reader = LocalReadAt::new(tmp.path().to_str().unwrap());
+        let result = RarArchive::try_quick_open(&reader, 0, size).await;
+
+        assert!(result.is_ok());
+        let opt = result.unwrap();
+        assert!(opt.is_some(), "try_quick_open must return Some for a valid QO block");
+
+        let (entries, locations) = opt.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "qo_file.txt");
+        assert_eq!(entries[0].compression_method, Some(CompressionMethod::Store));
+        assert_eq!(locations[0].data_size, 10);
+        assert_eq!(locations[0].method, 0); // Store
+        assert!(!locations[0].is_solid);
+        assert!(!locations[0].is_encrypted);
+    }
+
+    #[tokio::test]
+    async fn try_quick_open_out_of_bounds_offset_returns_none() {
+        use crate::io::LocalReadAt;
+
+        let data = b"some data";
+        let archive_bytes = build_minimal_rar5("oob.txt", data, false);
+        let size = archive_bytes.len() as u64;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &archive_bytes).unwrap();
+
+        let reader = LocalReadAt::new(tmp.path().to_str().unwrap());
+        // An offset beyond the archive size must return Ok(None) without panicking.
+        let result = RarArchive::try_quick_open(&reader, size + 1000, size).await;
+        assert!(matches!(result, Ok(None)));
+    }
 }
+
