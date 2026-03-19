@@ -7,12 +7,6 @@
 * **Baseline:** 116 tests pass (archive-core: 91, archive: 25), clippy clean.
 * **Note:** `CoreError` replaces old `ArchiveError` (core error type). `ArchiveError` replaces old `StateError` (product-facing error type from the `archive` crate). `archive` crate replaces old `archive-state`.
 * **SESSION_PLAN progress:**
-  - Step 1 ✅ — chunked 64 KB extraction loop, incremental CRC via `crc32fast::Hasher`
-  - Step 2 ✅ — `ProgressReporter::on_bytes_progress` added; `Arc<Mutex<dyn ProgressReporter>>` threaded through `ZipArchive::extract` → `ArchiveReader` → `ArchiveCore` → `archive::Archive`; cancellation via `should_cancel()`; 3 new tests
-  - Step 3 ✅ — ZipCrypto (PKWARE traditional encryption): `zip/crypto.rs`, `password: Option<&[u8]>` on `extract` all the way to the state layer; 3 new tests
-  - Step 4 ✅ — WinZip AES encryption (AE-1/AE-2): `zip/aes.rs`, PBKDF2-HMAC-SHA1 key derivation, AES-CTR decryption, HMAC-SHA1 integrity; AES extra field (0x9901) parsed in CD; 4 new tests
-  - Step 5 ✅ — DoS protection (ratio check + entry count limit)
-  - Step 6 ✅ — Integration test (`crates/archive-core/tests/zip_integration.rs`): 7 tests via `ArchiveCore::open()`; CONTEXT.md updated
   - RAR Step 1 ✅ — `rar/parse.rs`: `read_vint`, `parse_block_header` (CRC verified), `parse_file_header`, extra area (encrypt/hash/time), `parse_main_header` + `RarLocator`; 20 new tests
   - RAR Step 2 ✅ — `rar/mod.rs`: `RarArchive<R>` + `RarEntryLocation`; sequential 64 KiB chunked scan; signature verification (RAR4 rejected gracefully); solid entry skipping; preamble + end-block capture for synthetic archive; 12 new tests
 
