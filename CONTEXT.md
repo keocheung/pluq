@@ -6,25 +6,22 @@
 * **Current Active Task:** HTTP redirect pre-resolution complete. SESSION_PLAN fully done. Next: State layer (`archive` crate) — Phase 2 continuation.
 * **Baseline:** 156 tests pass + 11 ignored cloud E2E tests (archive-core: 108 unit + 23 integration [7 ZIP + 16 RAR] + 11 ignored cloud_e2e, archive: 25), clippy clean.
 * **Note:** `CoreError` replaces old `ArchiveError` (core error type). `ArchiveError` replaces old `StateError` (product-facing error type from the `archive` crate). `archive` crate replaces old `archive-state`.
-* **SESSION_PLAN progress:**
-  - RAR Step 1 ✅ — `rar/parse.rs`: `read_vint`, `parse_block_header` (CRC verified), `parse_file_header`, extra area (encrypt/hash/time), `parse_main_header` + `RarLocator`; 20 new tests
-  - RAR Step 2 ✅ — `rar/mod.rs`: `RarArchive<R>` + `RarEntryLocation`; sequential 64 KiB chunked scan; signature verification (RAR4 rejected gracefully); solid entry skipping; preamble + end-block capture for synthetic archive; 12 new tests
-  - RAR Step 3 ✅ — QO optimisation: `parse_quick_open_data` + `QoCachedBlock` in `parse.rs`; `try_quick_open` async method on `RarArchive` (reads QO service block, parses cached headers, falls back to sequential scan on any error); `RarLocator.quick_open_offset` doc clarified (offset from main header start); bug fix: zero-size structure guard prevents infinite loop; 7 parse tests + 3 mod tests; all 3 acceptance criteria covered
-  - RAR Step 4 ✅ — Format detection + ArchiveCore integration: magic byte sniff in `ArchiveCore::open()` (RAR5 → `RarArchive`, RAR4 → clear `UnsupportedFormat`, else ZIP fallback); `ArchiveInner::Rar` variant; `Source::local_path()` accessor; `LocalReadAt.path` made `pub(crate)`; stubs for `extract`/`test` (Step 5-6); 6 new facade tests; 100 unit tests + 7 integration tests; clippy clean
-  - RAR Step 5 ✅ — Store Extraction (Method 0): `ArchiveReader` impl for `RarArchive<R>`; `extract_store` using `read_stream` + `SyncIoBridge` + `spawn_blocking` (matches ZIP pattern); CRC32 + BLAKE2sp (blake2s_simd) verification; `on_entry_start/on_bytes_progress/on_entry_complete` progress callbacks; cancellation via `should_cancel()`; encrypted → `PasswordRequired`; solid → `UnsupportedFeature`; methods 1–5 → `UnsupportedFeature` (Step 6); facade dispatch wired; 8 new unit tests; 108 unit + 7 integration tests; clippy clean
-  - RAR Step 6 ✅ — Compressed Extraction via unrar (Methods 1–5): `unrar = "0.5"` + `tempfile = "3"` added to production deps; `LocalPath` pub(crate) trait in `io/mod.rs` captures local-vs-cloud at `open()` time; `local_path: Option<PathBuf>` stored in `RarArchive`; `extract_compressed` dispatches to `extract_via_unrar_local` (direct path) or `extract_via_unrar_cloud` (synthetic archive); `map_unrar_error` maps `Code::MissingPassword` → `PasswordRequired`, `Code::BadPassword` → `WrongPassword`; `verify_and_write` shared post-decompression CRC32/BLAKE2sp check; encrypted entries now route through unrar; test fixture `rar5_unicode_entry.rar` (from unrar crate's data); 7 new integration tests covering format detection, listing, extraction, cost, progress, integrity; 108 unit + 14 integration tests; clippy clean
-  - RAR Step 7 ✅ — Integration Tests: `crc32fast = "1"` added to dev-deps; `build_rar5_store_archive` helper in `rar_integration.rs` builds multi-file RAR5 Store archives in memory; real fixtures `rar5_store.rar` + `rar5_compressed.rar` created with RAR 7.20 (`rar a -m0/-m3 -ma5`), content: file1.txt="Hello from file one\n", file2.txt="Second file content\n"; 9 new integration tests: utf8 listing+extraction, in-memory store listing+extraction, real store listing+extraction, real compressed listing+extraction, CRC corruption → CrcMismatch; 108 unit + 23 integration tests; clippy clean
-  - RAR Step 8 ✅ — Cloud Sniping E2E: new `tests/cloud_e2e.rs` with 11 `#[ignore]` tests; Tier 1a (ssokolow/rar-test-files): plain/CBR/rr/solid/RAR3; Tier 1b (muja/unrar.rs): comment (CMT block), locked, Unicode `te…―st✌`, encrypted-headers graceful; Tier 2: Dropbox ZIP + GDrive RAR listing; ground truth discovered: per-file solid flag = 0 on first entry → first entry of solid archive IS accessible; archive-dev updated with menu + GDrive RAR scenario; 156 pass + 11 ignored; clippy clean
 
 ---
 
 ## [Static Context] - DO NOT MODIFY WITHOUT PERMISSION
 
+### The Knowledge Tiers
+
+*   **Tier 1 (Switchboard):** `CONTEXT.md` (You are here). Always read this first for orientation and current state.
+*   **Tier 2 (Canonical Pillars):** `docs/ARCHITECTURE.md` and `docs/ERRORS.md`. Read on-demand when planning new features, resolving ambiguity, or ensuring your code aligns with the project's core philosophy.
+*   **Tier 3 (Sandbox):** `docs/sandbox/`. Transient and on-demand documents for human needs (experiments, learning logs). **IGNORE BY DEFAULT**. Only read if explicitly instructed to do so for a specific task.
+
 ### Agent Developer Guidelines
 
 1. **Commit Messages:** All agents MUST use **Conventional Commits** (e.g., `feat:`, `fix:`, `docs:`, `chore:`, `test:`). Scope the commit to the crate if applicable (e.g., `feat(archive-core): ...`). Do not use capitalized imperative mood strings without a conventional prefix.
 2. **Commit Message Bodies:** When adding a commit message body, use a **strict list-based format** with a hyphen and space (`-`) bullet points. Do not write paragraphs. This makes commits easier to scan.
-3. **Architecture:** `ARCHITECTURE.md` is the canonical specification for system architecture (layers, traits, formats, codecs). `ERRORS.md` is the canonical specification for error types and error flow across layers (the layered translation model, Transport tunnel, decorator pattern). Both are final — not RFCs. **If any value in `CONTEXT.md` conflicts with `ARCHITECTURE.md` or `ERRORS.md`, the spec file wins.** Agents must note any conflict they find and ask Stefan, but must assume the spec files are correct until told otherwise. `CONTEXT.md` tracks state; the spec files define truth.
+3. **Architecture:** `docs/ARCHITECTURE.md` is the canonical specification for system architecture (layers, traits, formats, codecs). `docs/ERRORS.md` is the canonical specification for error types and error flow across layers. Both are final — not RFCs. **If any value in `CONTEXT.md` conflicts with `docs/ARCHITECTURE.md` or `docs/ERRORS.md`, the spec file wins.** Agents must note any conflict they find and ask Stefan, but must assume the spec files are correct until told otherwise. `CONTEXT.md` tracks state; the spec files define truth.
 
 ### The Product
 
