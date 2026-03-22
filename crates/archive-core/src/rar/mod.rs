@@ -92,6 +92,10 @@ pub struct RarArchive<R: ReadAt> {
     /// to choose between the direct-path (`unrar` shortcut) and synthetic-archive
     /// (cloud) extraction paths.
     local_path: Option<PathBuf>,
+    /// Total archive size in bytes (for scan_info estimated_bytes).
+    archive_size: u64,
+    /// Whether the entry list has been populated (via QO, local scan, or scan_metadata).
+    scan_complete: bool,
 }
 
 impl<R: ReadAt> std::fmt::Debug for RarArchive<R> {
@@ -107,6 +111,11 @@ impl<R: ReadAt> RarArchive<R> {
     ///
     /// Reads in 64 KiB chunks to minimise HTTP round trips for cloud sources.
     /// Solid entries are skipped — only non-solid entries appear in the listing.
+    ///
+    /// For local sources, always performs the sequential scan (or Quick Open).
+    /// For HTTP sources without Quick Open, defers the scan — returns with
+    /// `scan_complete = false`. Call [`scan_metadata`](ArchiveReader::scan_metadata)
+    /// before accessing entries.
     ///
     /// Returns [`CoreError::InvalidFormat`] if the RAR5 signature is absent.
     /// Returns [`CoreError::UnsupportedFormat`] if a RAR4 signature is detected.
@@ -155,9 +164,10 @@ impl<R: ReadAt> RarArchive<R> {
             });
         }
         let archive_preamble = chunk.slice(0..preamble_end);
+        let end_block = build_end_of_archive_block();
 
         // 4. Try Quick Open optimisation (avoids full sequential scan for QO-enabled archives).
-        //    On failure we fall back to the sequential scan below.
+        //    On failure we fall back depending on source type.
         if let Some(locator) = &main_header.locator
             && let Some(qo_offset) = locator.quick_open_offset
         {
@@ -165,7 +175,6 @@ impl<R: ReadAt> RarArchive<R> {
             if let Ok(Some((entries, locations))) =
                 Self::try_quick_open(&reader, qo_abs, size).await
             {
-                let end_block = build_end_of_archive_block();
                 return Ok(Self {
                     reader,
                     entries,
@@ -173,18 +182,74 @@ impl<R: ReadAt> RarArchive<R> {
                     archive_preamble,
                     end_block,
                     local_path,
+                    archive_size: size,
+                    scan_complete: true,
                 });
             }
         }
 
-        // 5. Sequential header scan — iterate blocks from end of main header.
+        // 5. QO not available or failed.
+        //    - Local source: run sequential scan immediately (same as before).
+        //    - HTTP source: defer the scan — caller must invoke scan_metadata().
+        if local_path.is_some() {
+            let (entries, locations) =
+                Self::run_sequential_scan(&reader, chunk, 0, preamble_end as u64, size)
+                    .await?;
+            return Ok(Self {
+                reader,
+                entries,
+                locations,
+                archive_preamble,
+                end_block,
+                local_path,
+                archive_size: size,
+                scan_complete: true,
+            });
+        }
+
+        // HTTP source without QO — defer scan.
+        Ok(Self {
+            reader,
+            entries: vec![],
+            locations: vec![],
+            archive_preamble,
+            end_block,
+            local_path,
+            archive_size: size,
+            scan_complete: false,
+        })
+    }
+
+    /// All entries in the archive (non-solid only; solid entries are omitted).
+    ///
+    /// Returns an empty slice if the archive has not yet been scanned.
+    /// The [`Archive`] facade ensures via the type system that `entries()` is
+    /// only called after a successful scan, so this is a safety net only.
+    pub fn entries(&self) -> &[ArchiveEntry] {
+        if self.scan_complete { &self.entries } else { &[] }
+    }
+
+    /// Sequential metadata scan — iterates all blocks from `start_offset`.
+    ///
+    /// Shared by [`open`](Self::open) (local source fallback) and
+    /// [`scan_metadata`](ArchiveReader::scan_metadata) (HTTP deferred scan).
+    ///
+    /// `initial_buffer` / `initial_buffer_start` allow reusing a chunk already
+    /// fetched by the caller; pass `(Bytes::new(), start_offset)` to force a
+    /// fresh fetch at the start of the scan.
+    async fn run_sequential_scan(
+        reader: &R,
+        initial_buffer: Bytes,
+        initial_buffer_start: u64,
+        start_offset: u64,
+        size: u64,
+    ) -> Result<(Vec<ArchiveEntry>, Vec<RarEntryLocation>), CoreError> {
         let mut entries: Vec<ArchiveEntry> = Vec::new();
         let mut locations: Vec<RarEntryLocation> = Vec::new();
 
-        let mut offset = preamble_end as u64;
-        // We reuse the initial chunk as the first buffer (buffer_start = 0).
-        let mut buffer: Bytes = chunk;
-        let mut buffer_start: u64 = 0;
+        let mut offset = start_offset;
+        let mut buffer: Bytes = initial_buffer;
+        let mut buffer_start: u64 = initial_buffer_start;
 
         loop {
             if offset >= size {
@@ -217,8 +282,7 @@ impl<R: ReadAt> RarArchive<R> {
                         buffer_start = offset;
                     }
                     let local_offset = (offset - buffer_start) as usize;
-                    let file_hdr =
-                        parse_file_header(&buffer[local_offset..], block)?;
+                    let file_hdr = parse_file_header(&buffer[local_offset..], block)?;
 
                     if !file_hdr.compression.solid {
                         let hdr_size = file_hdr.raw.total_size - file_hdr.raw.data_size;
@@ -259,14 +323,7 @@ impl<R: ReadAt> RarArchive<R> {
             offset += total_size;
         }
 
-        let end_block = build_end_of_archive_block();
-
-        Ok(Self { reader, entries, locations, archive_preamble, end_block, local_path })
-    }
-
-    /// All entries in the archive (non-solid only; solid entries are omitted).
-    pub fn entries(&self) -> &[ArchiveEntry] {
-        &self.entries
+        Ok((entries, locations))
     }
 
     /// Bytes that must be transferred to produce this entry.
@@ -788,7 +845,7 @@ impl<R: ReadAt> RarArchive<R> {
 
 impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for RarArchive<R> {
     fn entries(&self) -> &[ArchiveEntry] {
-        &self.entries
+        RarArchive::entries(self)
     }
 
     fn extraction_cost(&self, entry: &ArchiveEntry) -> u64 {
@@ -807,6 +864,50 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for RarArchive<R> {
 
     async fn test(&self, entry: &ArchiveEntry) -> Result<(), CoreError> {
         RarArchive::test(self, entry).await
+    }
+
+    fn scan_info(&self) -> crate::scan::ScanInfo {
+        if self.scan_complete {
+            crate::scan::ScanInfo::Ready
+        } else {
+            crate::scan::ScanInfo::Required {
+                estimated_bytes: self.archive_size,
+                reason: "This archive has no metadata index and requires a one-time scan. Extraction will be instant afterward.",
+            }
+        }
+    }
+
+    async fn scan_metadata(
+        &mut self,
+        progress: Arc<Mutex<dyn ProgressReporter>>,
+    ) -> Result<(), CoreError> {
+        let preamble_end = self.archive_preamble.len() as u64;
+        let size = self.archive_size;
+
+        {
+            let mut p = progress.lock().unwrap();
+            p.on_scan_start(size);
+        }
+
+        // Re-read the initial chunk so run_sequential_scan can reuse it.
+        let initial_chunk_size = (64 * 1024_u64).min(size);
+        let initial_chunk = self.reader.read_range(0, initial_chunk_size).await?;
+
+        let (entries, locations) =
+            Self::run_sequential_scan(&self.reader, initial_chunk, 0, preamble_end, size)
+                .await?;
+
+        let entry_count = entries.len();
+        self.entries = entries;
+        self.locations = locations;
+        self.scan_complete = true;
+
+        {
+            let mut p = progress.lock().unwrap();
+            p.on_scan_complete(entry_count);
+        }
+
+        Ok(())
     }
 }
 

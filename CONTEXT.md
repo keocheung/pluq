@@ -3,7 +3,7 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 2 — Core Engine (Refining).
-* **Current Active Task:** [HANDOVER] Phase 2 stable. Waiting for next SESSION_PLAN.
+* **Current Active Task:** SESSION_PLAN Step 4 complete — RarArchive scan split (run_sequential_scan extracted, scan_complete/archive_size fields, scan_info/scan_metadata overrides). Step 5 next.
 * **Baseline:** 166 tests pass. (archive-core: 108 unit + 23 integration + 10 cloud_e2e; archive: 25). Clippy clean.
 
 ---
