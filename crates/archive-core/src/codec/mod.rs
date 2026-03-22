@@ -13,11 +13,13 @@
 
 mod bzip2;
 mod deflate;
+mod lzma;
 mod store;
 mod zstd;
 
 pub use bzip2::BZip2Decoder;
 pub use deflate::DeflateDecoder;
+pub use lzma::LzmaDecoder;
 pub use store::StoreDecoder;
 pub use zstd::ZstdDecoder;
 
@@ -63,7 +65,7 @@ impl CompressionMethod {
             Self::Store => true,
             Self::Deflate => true, // flate2 always present
             Self::BZip2 => true,
-            Self::Lzma => false,   // TODO: add lzma-rust2 crate
+            Self::Lzma => true,
             Self::Lzma2 => false,  // TODO: add lzma-rust2 crate
             Self::Zstd => true,
             Self::Ppmd => false,   // TODO: add ppmd-rust crate
@@ -126,12 +128,13 @@ pub trait Encoder: Write + Send {
 pub fn build_decoder<'a>(
     method: CompressionMethod,
     input: impl Read + Send + 'a,
-    _properties: &[u8],
+    properties: &[u8],
 ) -> Result<Box<dyn Decoder + 'a>, CoreError> {
     match method {
         CompressionMethod::Store => Ok(Box::new(StoreDecoder::new(input))),
         CompressionMethod::Deflate => Ok(Box::new(DeflateDecoder::new(input))),
         CompressionMethod::BZip2 => Ok(Box::new(BZip2Decoder::new(input))),
+        CompressionMethod::Lzma => Ok(Box::new(LzmaDecoder::new(input, properties)?)),
         CompressionMethod::Zstd => Ok(Box::new(
             ZstdDecoder::new(input).map_err(|e| CoreError::BitstreamError {
                 detail: format!("Zstd frame header: {e}"),
@@ -152,16 +155,16 @@ mod tests {
     // ── is_available() ────────────────────────────────────────────────────────
 
     #[test]
-    fn store_deflate_bzip2_zstd_are_available() {
+    fn store_deflate_bzip2_lzma_zstd_are_available() {
         assert!(CompressionMethod::Store.is_available());
         assert!(CompressionMethod::Deflate.is_available());
         assert!(CompressionMethod::BZip2.is_available());
+        assert!(CompressionMethod::Lzma.is_available());
         assert!(CompressionMethod::Zstd.is_available());
     }
 
     #[test]
     fn unimplemented_codecs_are_not_available() {
-        assert!(!CompressionMethod::Lzma.is_available());
         assert!(!CompressionMethod::Lzma2.is_available());
         assert!(!CompressionMethod::Ppmd.is_available());
     }
@@ -231,10 +234,25 @@ mod tests {
     }
 
     #[test]
+    fn build_decoder_lzma_decompresses() {
+        let input = b"Archive Sniper codec test - LZMA round-trip";
+        let mut compressed = Vec::new();
+        lzma_rs::lzma_compress(&mut &input[..], &mut compressed).unwrap();
+
+        // Standard LZMA: [5-byte props] [8-byte size] [compressed data]
+        let properties = compressed[..5].to_vec();
+        let data = &compressed[13..]; // skip 5 props + 8 size
+
+        let mut decoder = build_decoder(CompressionMethod::Lzma, data, &properties).unwrap();
+        let mut out = Vec::new();
+        decoder.read_to_end(&mut out).unwrap();
+        assert_eq!(out, input);
+    }
+
+    #[test]
     fn build_decoder_returns_unsupported_for_missing_codecs() {
         let dummy: &[u8] = &[];
         for method in [
-            CompressionMethod::Lzma,
             CompressionMethod::Lzma2,
             CompressionMethod::Ppmd,
         ] {

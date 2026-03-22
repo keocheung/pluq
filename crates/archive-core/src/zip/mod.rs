@@ -28,7 +28,7 @@ use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio_util::io::SyncIoBridge;
 
 use crate::archive_reader::ArchiveReader;
-use crate::codec::build_decoder;
+use crate::codec::{build_decoder, CompressionMethod};
 use crate::junk;
 use crate::progress::ProgressReporter;
 use crate::{ArchiveEntry, CoreError, PasswordDetectionMethod, ReadAt};
@@ -180,7 +180,13 @@ impl<R: ReadAt> ZipArchive<R> {
                         ),
                     }
                 })?;
-                build_decoder(method, std::io::Cursor::new(decrypted), &[])?
+                let mut aes_stream = std::io::Cursor::new(decrypted);
+                let properties = if method == CompressionMethod::Lzma {
+                    read_zip_lzma_header(&mut aes_stream)?
+                } else {
+                    vec![]
+                };
+                build_decoder(method, aes_stream, &properties)?
             } else if is_encrypted {
                 // ── ZipCrypto (PKWARE traditional) path ────────────────────
                 let pwd = password_bytes.as_deref().unwrap(); // safe: checked above
@@ -214,8 +220,13 @@ impl<R: ReadAt> ZipArchive<R> {
                             algorithm: format!("ZIP method id {location_method_id}"),
                         }
                     })?;
-                let crypto_reader = ZipCryptoReader::new(sync_reader, decryptor);
-                build_decoder(method, crypto_reader, &[])?
+                let mut crypto_reader = ZipCryptoReader::new(sync_reader, decryptor);
+                let properties = if method == CompressionMethod::Lzma {
+                    read_zip_lzma_header(&mut crypto_reader)?
+                } else {
+                    vec![]
+                };
+                build_decoder(method, crypto_reader, &properties)?
             } else {
                 // ── Plain (unencrypted) path ───────────────────────────────
                 let method =
@@ -224,7 +235,12 @@ impl<R: ReadAt> ZipArchive<R> {
                             algorithm: format!("ZIP method id {location_method_id}"),
                         }
                     })?;
-                build_decoder(method, sync_reader, &[])?
+                let properties = if method == CompressionMethod::Lzma {
+                    read_zip_lzma_header(&mut sync_reader)?
+                } else {
+                    vec![]
+                };
+                build_decoder(method, sync_reader, &properties)?
             };
 
             const CHUNK_SIZE: usize = 64 * 1024; // 64 KB
@@ -359,6 +375,30 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for ZipArchive<R> {
     async fn test(&self, entry: &ArchiveEntry) -> Result<(), CoreError> {
         ZipArchive::test(self, entry).await
     }
+}
+
+/// Read and strip the ZIP LZMA header, returning the raw LZMA properties.
+///
+/// ZIP method 14 (LZMA) prepends a 4-byte header before the properties and bitstream:
+/// `[2 bytes: LZMA SDK version] [2 bytes: properties size] [props_size bytes: properties]`
+///
+/// After this call, `reader` is positioned at the start of the raw LZMA bitstream.
+pub(crate) fn read_zip_lzma_header(reader: &mut impl Read) -> Result<Vec<u8>, CoreError> {
+    let mut header = [0u8; 4];
+    reader.read_exact(&mut header).map_err(|e| CoreError::InvalidFormat {
+        message: format!("truncated LZMA header: {e}"),
+    })?;
+    let props_size = u16::from_le_bytes([header[2], header[3]]) as usize;
+    if props_size < 5 || props_size > 255 {
+        return Err(CoreError::InvalidFormat {
+            message: format!("invalid LZMA properties size: {props_size}"),
+        });
+    }
+    let mut props = vec![0u8; props_size];
+    reader.read_exact(&mut props).map_err(|e| CoreError::InvalidFormat {
+        message: format!("truncated LZMA properties: {e}"),
+    })?;
+    Ok(props)
 }
 
 #[cfg(test)]
@@ -601,7 +641,7 @@ mod tests {
     async fn unsupported_method_parses_but_errors_on_extract() {
         // Write a valid stored ZIP, then patch the method ID in both the
         // Central Directory (offset +10) and the Local File Header (offset +8)
-        // to 14 (LZMA), which we don't have compiled in yet.
+        // to 98 (PPMd), which is recognised in metadata but not compiled in.
         let content = b"some data";
         let (_tmp, _reader) = create_test_zip(&[("file.txt", content, ZipCrateMethod::Stored)]);
 
@@ -611,14 +651,14 @@ mod tests {
         // Patch Local File Header method (sig [50 4b 03 04], method at +8).
         let lfh_sig = [0x50u8, 0x4b, 0x03, 0x04];
         if let Some(pos) = raw.windows(4).position(|w| w == lfh_sig) {
-            raw[pos + 8] = 14; // low byte of method ID (LZMA)
+            raw[pos + 8] = 98; // low byte of method ID (PPMd)
             raw[pos + 9] = 0;
         }
 
         // Patch Central Directory method (sig [50 4b 01 02], method at +10).
         let cd_sig = [0x50u8, 0x4b, 0x01, 0x02];
         if let Some(pos) = raw.windows(4).position(|w| w == cd_sig) {
-            raw[pos + 10] = 14;
+            raw[pos + 10] = 98;
             raw[pos + 11] = 0;
         }
 
@@ -631,7 +671,7 @@ mod tests {
         assert_eq!(zip.entries()[0].name, "file.txt");
         assert_eq!(
             zip.entries()[0].compression_method,
-            Some(CompressionMethod::Lzma),
+            Some(CompressionMethod::Ppmd),
             "method should be recognised in the entry metadata"
         );
 

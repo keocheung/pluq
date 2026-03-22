@@ -403,6 +403,7 @@ pub(crate) fn zip_method_to_codec(id: u16) -> Option<CompressionMethod> {
         12 => Some(CompressionMethod::BZip2),
         14 => Some(CompressionMethod::Lzma),
         93 => Some(CompressionMethod::Zstd),
+        98 => Some(CompressionMethod::Ppmd),
         _ => None,
     }
 }
