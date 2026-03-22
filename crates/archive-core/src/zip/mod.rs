@@ -601,7 +601,7 @@ mod tests {
     async fn unsupported_method_parses_but_errors_on_extract() {
         // Write a valid stored ZIP, then patch the method ID in both the
         // Central Directory (offset +10) and the Local File Header (offset +8)
-        // to 93 (Zstd), which we don't have compiled in yet.
+        // to 14 (LZMA), which we don't have compiled in yet.
         let content = b"some data";
         let (_tmp, _reader) = create_test_zip(&[("file.txt", content, ZipCrateMethod::Stored)]);
 
@@ -611,14 +611,14 @@ mod tests {
         // Patch Local File Header method (sig [50 4b 03 04], method at +8).
         let lfh_sig = [0x50u8, 0x4b, 0x03, 0x04];
         if let Some(pos) = raw.windows(4).position(|w| w == lfh_sig) {
-            raw[pos + 8] = 93; // low byte of method ID
+            raw[pos + 8] = 14; // low byte of method ID (LZMA)
             raw[pos + 9] = 0;
         }
 
         // Patch Central Directory method (sig [50 4b 01 02], method at +10).
         let cd_sig = [0x50u8, 0x4b, 0x01, 0x02];
         if let Some(pos) = raw.windows(4).position(|w| w == cd_sig) {
-            raw[pos + 10] = 93;
+            raw[pos + 10] = 14;
             raw[pos + 11] = 0;
         }
 
@@ -631,7 +631,7 @@ mod tests {
         assert_eq!(zip.entries()[0].name, "file.txt");
         assert_eq!(
             zip.entries()[0].compression_method,
-            Some(CompressionMethod::Zstd),
+            Some(CompressionMethod::Lzma),
             "method should be recognised in the entry metadata"
         );
 

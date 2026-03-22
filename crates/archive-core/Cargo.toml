@@ -12,6 +12,7 @@ crc32fast = "1"
 ctr = "0.9"
 encoding_rs = "0.8"
 bzip2 = "0.5"
+zstd = "0.13"
 flate2 = "1"
 futures-util = "0.3"
 hmac = "0.12"
@@ -30,4 +31,4 @@ unrar = "0.5"
 crc32fast = "1"
 tempfile = "3"
 wiremock = "0.6"
-zip = { version = "2", default-features = false, features = ["deflate", "bzip2", "aes-crypto"] }
+zip = { version = "2", default-features = false, features = ["deflate", "bzip2", "zstd", "aes-crypto"] }

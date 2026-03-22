@@ -3,8 +3,9 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 2.5 — Engine Expansion (In Progress).
-* **Current Active Task:** [SESSION_PLAN.md] Step 2 — Add Zstd codec.
-* **Baseline:** 167 tests pass. (archive-core: 105 unit + 23 integration; archive: 32 unit + 11 cloud_e2e ignored — require live network). Clippy clean.
+* **Current Active Task:** [SESSION_PLAN.md] Step 3 — Add LZMA codec.
+* **Baseline:** 161 tests pass. (archive-core: 106 unit + 23 integration; archive: 32 unit + 11 cloud_e2e ignored — require live network). Clippy clean.
+
 
 ---
 

@@ -14,10 +14,12 @@
 mod bzip2;
 mod deflate;
 mod store;
+mod zstd;
 
 pub use bzip2::BZip2Decoder;
 pub use deflate::DeflateDecoder;
 pub use store::StoreDecoder;
+pub use zstd::ZstdDecoder;
 
 use std::io::{self, Read, Write};
 
@@ -63,7 +65,7 @@ impl CompressionMethod {
             Self::BZip2 => true,
             Self::Lzma => false,   // TODO: add lzma-rust2 crate
             Self::Lzma2 => false,  // TODO: add lzma-rust2 crate
-            Self::Zstd => false,   // TODO: add zstd crate
+            Self::Zstd => true,
             Self::Ppmd => false,   // TODO: add ppmd-rust crate
         }
     }
@@ -130,6 +132,11 @@ pub fn build_decoder<'a>(
         CompressionMethod::Store => Ok(Box::new(StoreDecoder::new(input))),
         CompressionMethod::Deflate => Ok(Box::new(DeflateDecoder::new(input))),
         CompressionMethod::BZip2 => Ok(Box::new(BZip2Decoder::new(input))),
+        CompressionMethod::Zstd => Ok(Box::new(
+            ZstdDecoder::new(input).map_err(|e| CoreError::BitstreamError {
+                detail: format!("Zstd frame header: {e}"),
+            })?,
+        )),
         other => Err(CoreError::UnsupportedCompression {
             algorithm: other.to_string(),
         }),
@@ -145,17 +152,17 @@ mod tests {
     // ── is_available() ────────────────────────────────────────────────────────
 
     #[test]
-    fn store_deflate_bzip2_are_available() {
+    fn store_deflate_bzip2_zstd_are_available() {
         assert!(CompressionMethod::Store.is_available());
         assert!(CompressionMethod::Deflate.is_available());
         assert!(CompressionMethod::BZip2.is_available());
+        assert!(CompressionMethod::Zstd.is_available());
     }
 
     #[test]
     fn unimplemented_codecs_are_not_available() {
         assert!(!CompressionMethod::Lzma.is_available());
         assert!(!CompressionMethod::Lzma2.is_available());
-        assert!(!CompressionMethod::Zstd.is_available());
         assert!(!CompressionMethod::Ppmd.is_available());
     }
 
@@ -206,12 +213,29 @@ mod tests {
     }
 
     #[test]
+    fn build_decoder_zstd_decompresses() {
+        use std::io::Write;
+
+        let input = b"Archive Sniper codec test - Zstd round-trip";
+        let mut compressed = Vec::new();
+        {
+            let mut enc = ::zstd::stream::write::Encoder::new(&mut compressed, 0).unwrap();
+            enc.write_all(input).unwrap();
+            enc.finish().unwrap();
+        }
+
+        let mut decoder = build_decoder(CompressionMethod::Zstd, &compressed[..], &[]).unwrap();
+        let mut out = Vec::new();
+        decoder.read_to_end(&mut out).unwrap();
+        assert_eq!(out, input);
+    }
+
+    #[test]
     fn build_decoder_returns_unsupported_for_missing_codecs() {
         let dummy: &[u8] = &[];
         for method in [
             CompressionMethod::Lzma,
             CompressionMethod::Lzma2,
-            CompressionMethod::Zstd,
             CompressionMethod::Ppmd,
         ] {
             let result = build_decoder(method, dummy, &[]);
