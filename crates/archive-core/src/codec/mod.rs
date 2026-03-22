@@ -11,9 +11,11 @@
 //! - Algorithms not yet implemented return [`CoreError::UnsupportedCompression`] rather
 //!   than panicking or linking dead code.
 
+mod bzip2;
 mod deflate;
 mod store;
 
+pub use bzip2::BZip2Decoder;
 pub use deflate::DeflateDecoder;
 pub use store::StoreDecoder;
 
@@ -58,7 +60,7 @@ impl CompressionMethod {
         match self {
             Self::Store => true,
             Self::Deflate => true, // flate2 always present
-            Self::BZip2 => false,  // TODO: add bzip2 crate
+            Self::BZip2 => true,
             Self::Lzma => false,   // TODO: add lzma-rust2 crate
             Self::Lzma2 => false,  // TODO: add lzma-rust2 crate
             Self::Zstd => false,   // TODO: add zstd crate
@@ -127,6 +129,7 @@ pub fn build_decoder<'a>(
     match method {
         CompressionMethod::Store => Ok(Box::new(StoreDecoder::new(input))),
         CompressionMethod::Deflate => Ok(Box::new(DeflateDecoder::new(input))),
+        CompressionMethod::BZip2 => Ok(Box::new(BZip2Decoder::new(input))),
         other => Err(CoreError::UnsupportedCompression {
             algorithm: other.to_string(),
         }),
@@ -142,14 +145,14 @@ mod tests {
     // ── is_available() ────────────────────────────────────────────────────────
 
     #[test]
-    fn store_and_deflate_are_available() {
+    fn store_deflate_bzip2_are_available() {
         assert!(CompressionMethod::Store.is_available());
         assert!(CompressionMethod::Deflate.is_available());
+        assert!(CompressionMethod::BZip2.is_available());
     }
 
     #[test]
     fn unimplemented_codecs_are_not_available() {
-        assert!(!CompressionMethod::BZip2.is_available());
         assert!(!CompressionMethod::Lzma.is_available());
         assert!(!CompressionMethod::Lzma2.is_available());
         assert!(!CompressionMethod::Zstd.is_available());
@@ -186,10 +189,26 @@ mod tests {
     }
 
     #[test]
+    fn build_decoder_bzip2_decompresses() {
+        use ::bzip2::Compression;
+        use ::bzip2::write::BzEncoder;
+        use std::io::Write;
+
+        let input = b"Archive Sniper codec test - BZip2 round-trip";
+        let mut enc = BzEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(input).unwrap();
+        let compressed = enc.finish().unwrap();
+
+        let mut decoder = build_decoder(CompressionMethod::BZip2, &compressed[..], &[]).unwrap();
+        let mut out = Vec::new();
+        decoder.read_to_end(&mut out).unwrap();
+        assert_eq!(out, input);
+    }
+
+    #[test]
     fn build_decoder_returns_unsupported_for_missing_codecs() {
         let dummy: &[u8] = &[];
         for method in [
-            CompressionMethod::BZip2,
             CompressionMethod::Lzma,
             CompressionMethod::Lzma2,
             CompressionMethod::Zstd,
