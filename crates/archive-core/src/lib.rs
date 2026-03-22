@@ -7,6 +7,7 @@ pub mod io;
 pub mod junk;
 mod progress;
 pub mod rar;
+mod scan;
 pub mod zip;
 
 // Primary public API — use this (via archive crate in production code).
@@ -24,6 +25,9 @@ pub use entry::ArchiveEntry;
 
 // Progress reporting + cancellation.
 pub use progress::ProgressReporter;
+
+// Scan state.
+pub use scan::ScanInfo;
 
 // I/O building blocks (for power users / tests).
 pub use io::{HttpReadAt, LocalReadAt, ReadAt, ReadError, Source};

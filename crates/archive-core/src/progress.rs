@@ -9,6 +9,15 @@ pub trait ProgressReporter: Send {
     fn should_cancel(&self) -> bool {
         false
     }
+
+    /// Called when a metadata scan begins. `total_bytes` is the archive size to stream through.
+    fn on_scan_start(&mut self, _total_bytes: u64) {}
+
+    /// Called periodically during scan. `bytes_scanned` = bytes consumed so far.
+    fn on_scan_progress(&mut self, _bytes_scanned: u64, _entries_found: usize) {}
+
+    /// Called when scan finishes.
+    fn on_scan_complete(&mut self, _entries_found: usize) {}
 }
 
 /// No-op implementation — use when progress reporting is not needed.

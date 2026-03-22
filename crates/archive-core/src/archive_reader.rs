@@ -10,6 +10,7 @@ use tokio::io::AsyncWrite;
 
 use crate::junk;
 use crate::progress::ProgressReporter;
+use crate::scan::ScanInfo;
 use crate::{ArchiveEntry, CoreError};
 
 /// Unified read interface implemented by every format parser.
@@ -64,4 +65,20 @@ pub trait ArchiveReader {
         &self,
         entry: &ArchiveEntry,
     ) -> impl std::future::Future<Output = Result<(), CoreError>> + Send;
+
+    /// Whether this archive's entry list is ready or requires a scan first.
+    /// Default: Ready (entry list was built during open).
+    fn scan_info(&self) -> ScanInfo {
+        ScanInfo::Ready
+    }
+
+    /// Run the metadata scan, populating the entry list.
+    /// Default: no-op (entry list was already built during open).
+    /// Implementors that override this should call progress callbacks.
+    fn scan_metadata(
+        &mut self,
+        _progress: Arc<Mutex<dyn ProgressReporter>>,
+    ) -> impl std::future::Future<Output = Result<(), CoreError>> + Send {
+        async { Ok(()) }
+    }
 }
