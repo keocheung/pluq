@@ -3,7 +3,7 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 2.5 — Engine Expansion (In Progress).
-* **Current Active Task:** [SESSION_PLAN.md] Step 5 — Shared helpers + RAR4 parser.
+* **Current Active Task:** [SESSION_PLAN.md] Step 6 — `Rar4Archive` with full cloud support.
 * **Baseline:** 168 tests pass. (archive-core: 107 unit + 29 integration; archive: 32 unit + 11 cloud_e2e ignored — require live network). Clippy clean.
 
 

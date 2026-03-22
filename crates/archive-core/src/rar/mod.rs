@@ -951,7 +951,7 @@ fn build_end_of_archive_block() -> Bytes {
 /// `unrar` reports errors via `code` + `when` pairs.  We translate the
 /// most actionable codes to specific variants; everything else becomes a
 /// `BitstreamError`.
-fn map_unrar_error(e: unrar::error::UnrarError) -> CoreError {
+pub(crate) fn map_unrar_error(e: unrar::error::UnrarError) -> CoreError {
     use unrar::error::Code;
     match e.code {
         Code::MissingPassword => CoreError::PasswordRequired,
@@ -971,7 +971,7 @@ fn map_unrar_error(e: unrar::error::UnrarError) -> CoreError {
 ///
 /// Used by both local and cloud extraction paths after `unrar` decompresses bytes
 /// into a `Vec<u8>`.  Writes to `sink` only after hash verification succeeds.
-async fn verify_and_write<W: AsyncWrite + Send + Unpin>(
+pub(crate) async fn verify_and_write<W: AsyncWrite + Send + Unpin>(
     data: &[u8],
     entry_name: &str,
     expected_crc: Option<u32>,

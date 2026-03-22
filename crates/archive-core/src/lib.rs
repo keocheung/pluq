@@ -6,7 +6,9 @@ pub mod io;
 pub mod junk;
 mod progress;
 pub mod rar;
+pub mod rar4;
 mod scan;
+mod time;
 pub mod zip;
 
 // Trait for format-agnostic archive operations.
