@@ -31,12 +31,13 @@ These commands define the CLI's public API. The TUI is the default entry point.
 - [x] Extraction via `unrar` crate for compressed methods.
 - [x] Format detection facade (`ArchiveCore::open`).
 
-### Phase 2.5: Facade Refactor + RAR4 (Up Next)
+### Phase 2.5: Engine Expansion (RAR4 + Modern ZIP)
 - [x] Flatten double facade (`ArchiveCore` removed, `Archive` holds format enum directly).
 - [x] Type-safe scan API (`Opened`/`PendingArchive`) for expensive metadata operations.
+- [ ] Add missing ZIP codecs: **BZip2**, **LZMA**, and **Zstandard**.
 - [ ] RAR4 format support (header parser + extraction via `unrar`).
 
-### Phase 3: Interactive TUI
+### Phase 3: Interactive TUI (The Cockpit)
 - [ ] `ratatui` integration in `archive-cli`.
 - [ ] Tree-based navigation (using `archive` state layer).
 - [ ] Multi-select, fuzzy search, and extraction progress UI.

@@ -2,9 +2,9 @@
 
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
-* **Current Phase:** Phase 2.5 — Facade Refactor (Complete).
-* **Current Active Task:** [HANDOVER] SESSION_PLAN steps 1–8 complete. `ArchiveCore` removed, `Archive` holds `ArchiveInner` directly, `Archive::open()` returns `Result<Opened, ArchiveError>`. Next: RAR4 support or Phase 3.
-* **Baseline:** 159 tests pass. (archive-core: 104 unit + 23 integration; archive: 32 unit + 11 cloud_e2e ignored — require live network). Clippy clean.
+* **Current Phase:** Phase 2.5 — Engine Expansion (In Progress).
+* **Current Active Task:** Adding missing ZIP codecs (BZip2, LZMA, Zstd) and RAR4 support.
+* **Baseline:** 166 tests pass. (archive-core: 104 unit + 23 integration; archive: 32 unit + 11 cloud_e2e ignored — require live network). Clippy clean.
 
 ---
 
