@@ -1125,12 +1125,13 @@ mod tests {
         let header_content_len = 1 + 1 + 1 + body.len(); // block_type + flags + data_size_vint + body
         let header_size = header_content_len;
 
-        let mut crc_region = Vec::new();
         // Encode header_size as vint (1 byte, assuming < 128).
-        crc_region.push(header_size as u8);
-        crc_region.push(0x02u8); // block_type = 2
-        crc_region.push(0x02u8); // flags = 0x0002 (data area flag)
-        crc_region.push(data_len); // data_area_size vint
+        let mut crc_region = vec![
+            header_size as u8,
+            0x02u8,   // block_type = 2
+            0x02u8,   // flags = 0x0002 (data area flag)
+            data_len, // data_area_size vint
+        ];
         crc_region.extend_from_slice(&body);
 
         let file_hdr_crc = crc32fast::hash(&crc_region);
@@ -1142,16 +1143,16 @@ mod tests {
         // ── Main archive header (type 1) ──────────────────────────────────────
         // file_flags = 0 (no volume, no comment, no solid)
         let archive_flags: u8 = 0;
-        let mut main_body = Vec::new();
-        main_body.push(archive_flags); // archive_flags vint
+        let main_body = vec![archive_flags]; // archive_flags vint
 
         let main_header_content = 1 + 1 + main_body.len(); // block_type + flags + body
         let main_header_size = main_header_content;
 
-        let mut main_crc_region = Vec::new();
-        main_crc_region.push(main_header_size as u8); // header_size vint
-        main_crc_region.push(0x01u8);                 // block_type = 1 (main header)
-        main_crc_region.push(0x00u8);                 // flags = 0 (no extra, no data)
+        let mut main_crc_region = vec![
+            main_header_size as u8, // header_size vint
+            0x01u8,                 // block_type = 1 (main header)
+            0x00u8,                 // flags = 0 (no extra, no data)
+        ];
         main_crc_region.extend_from_slice(&main_body);
 
         let main_crc = crc32fast::hash(&main_crc_region);
@@ -1218,7 +1219,7 @@ mod tests {
 
         let bytes = [0u8; 32];
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(tmp.path(), &bytes).unwrap();
+        std::fs::write(tmp.path(), bytes).unwrap();
 
         let reader = LocalReadAt::new(tmp.path().to_str().unwrap());
         let result = RarArchive::open(reader).await;

@@ -4,10 +4,10 @@
 ///
 /// Scenarios:
 ///   1) Dropbox ZIP  — list all files (saved to output/zip_listing.txt),
-///                     then prompt for interactive extraction.
+///      then prompt for interactive extraction.
 ///   2) Google Drive RAR — list entries only (saved to output/rar_listing.txt).
-///                         Extraction is available but the archive is very large;
-///                         test with a specific known entry name.
+///      Extraction is available but the archive is very large;
+///      test with a specific known entry name.
 ///
 /// The output/ folder is gitignored — dump whatever you like there.
 use std::fs;

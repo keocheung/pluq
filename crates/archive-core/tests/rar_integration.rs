@@ -220,11 +220,12 @@ fn build_rar5_store_archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
         assert!(header_content_len < 128);
 
         // CRC region = [header_size_vint, block_type, flags, data_size, body...]
-        let mut crc_region = Vec::new();
-        crc_region.push(header_content_len as u8); // header_size vint
-        crc_region.push(0x02u8);                   // block_type = 2 (file)
-        crc_region.push(0x02u8);                   // flags = 0x02 (data area present)
-        crc_region.push(data.len() as u8);         // data_size vint
+        let mut crc_region = vec![
+            header_content_len as u8, // header_size vint
+            0x02u8,                   // block_type = 2 (file)
+            0x02u8,                   // flags = 0x02 (data area present)
+            data.len() as u8,         // data_size vint
+        ];
         crc_region.extend_from_slice(&body);
 
         let file_crc = crc32fast::hash(&crc_region);

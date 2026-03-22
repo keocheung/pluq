@@ -876,11 +876,12 @@ mod tests {
         let header_size = 1 + 1 + 1 + body.len();
 
         // Build the CRC region: header_size_vint + block_type + flags + data_area_size + body
-        let mut crc_region = Vec::new();
-        crc_region.push(header_size as u8); // header_size vint (fits in 1 byte here)
-        crc_region.push(0x02);              // block_type = 2
-        crc_region.push(0x02);              // flags = 0x0002 (data area flag)
-        crc_region.push(data_size as u8);   // data_area_size vint = 4
+        let mut crc_region = vec![
+            header_size as u8, // header_size vint (fits in 1 byte here)
+            0x02,              // block_type = 2
+            0x02,              // flags = 0x0002 (data area flag)
+            data_size as u8,   // data_area_size vint = 4
+        ];
         crc_region.extend_from_slice(&body);
 
         let header_crc = crc32fast::hash(&crc_region);
