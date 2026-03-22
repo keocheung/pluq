@@ -3,8 +3,8 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 2.5 — Engine Expansion (In Progress).
-* **Current Active Task:** [SESSION_PLAN.md] Step 4 — ZIP integration tests for new codecs.
-* **Baseline:** 162 tests pass. (archive-core: 107 unit + 23 integration; archive: 32 unit + 11 cloud_e2e ignored — require live network). Clippy clean.
+* **Current Active Task:** [SESSION_PLAN.md] Step 5 — Shared helpers + RAR4 parser.
+* **Baseline:** 168 tests pass. (archive-core: 107 unit + 29 integration; archive: 32 unit + 11 cloud_e2e ignored — require live network). Clippy clean.
 
 
 ---

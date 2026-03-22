@@ -6,6 +6,7 @@
 //! and cancellation.
 
 use std::io::{Cursor, Write};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use archive_core::{ArchiveEntry, CompressionMethod, CoreError, ProgressReporter, Source, ZipArchive};
@@ -410,6 +411,138 @@ async fn progress_callbacks_recorded_correctly() {
         "on_entry_complete must be called with success=true"
     );
 }
+
+// ── New-codec integration tests ────────────────────────────────────────────
+
+/// Build a minimal ZIP in memory with one entry using the given compression method.
+fn build_codec_zip(method: ZipMethod, name: &str, content: &[u8]) -> (tempfile::NamedTempFile, String) {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    writer
+        .start_file(name, SimpleFileOptions::default().compression_method(method))
+        .unwrap();
+    writer.write_all(content).unwrap();
+    let buf = writer.finish().unwrap().into_inner();
+    std::fs::write(tmp.path(), &buf).unwrap();
+    let path = tmp.path().to_string_lossy().into_owned();
+    (tmp, path)
+}
+
+/// BZip2: small entry round-trip (listing + extraction).
+#[tokio::test]
+async fn zip_bzip2_small_entry_round_trip() {
+    let (_tmp, path) = build_codec_zip(ZipMethod::Bzip2, "bzip2_small.bin", SMALL_CONTENT);
+    let archive = open_zip(&path).await;
+    let entries = archive.entries();
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].name, "bzip2_small.bin");
+    assert_eq!(entries[0].uncompressed_size, SMALL_CONTENT.len() as u64);
+    assert_eq!(entries[0].compression_method, Some(CompressionMethod::BZip2));
+    assert!(!entries[0].is_encrypted);
+
+    let bytes = extract_bytes(&archive, &entries[0], None).await.unwrap();
+    assert_eq!(bytes.as_ref(), SMALL_CONTENT);
+}
+
+/// BZip2: large entry round-trip (~300 KB).
+#[tokio::test]
+async fn zip_bzip2_large_entry_round_trip() {
+    let content = large_content();
+    let (_tmp, path) = build_codec_zip(ZipMethod::Bzip2, "bzip2_large.bin", &content);
+    let archive = open_zip(&path).await;
+    let entries = archive.entries();
+
+    assert_eq!(entries[0].uncompressed_size, content.len() as u64);
+    assert_eq!(entries[0].compression_method, Some(CompressionMethod::BZip2));
+
+    let bytes = extract_bytes(&archive, &entries[0], None).await.unwrap();
+    assert_eq!(bytes.as_ref(), content.as_slice());
+}
+
+/// Zstd: small entry round-trip.
+#[tokio::test]
+async fn zip_zstd_small_entry_round_trip() {
+    let (_tmp, path) = build_codec_zip(ZipMethod::Zstd, "zstd_small.bin", SMALL_CONTENT);
+    let archive = open_zip(&path).await;
+    let entries = archive.entries();
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].name, "zstd_small.bin");
+    assert_eq!(entries[0].uncompressed_size, SMALL_CONTENT.len() as u64);
+    assert_eq!(entries[0].compression_method, Some(CompressionMethod::Zstd));
+    assert!(!entries[0].is_encrypted);
+
+    let bytes = extract_bytes(&archive, &entries[0], None).await.unwrap();
+    assert_eq!(bytes.as_ref(), SMALL_CONTENT);
+}
+
+/// Zstd: large entry round-trip (~300 KB).
+#[tokio::test]
+async fn zip_zstd_large_entry_round_trip() {
+    let content = large_content();
+    let (_tmp, path) = build_codec_zip(ZipMethod::Zstd, "zstd_large.bin", &content);
+    let archive = open_zip(&path).await;
+    let entries = archive.entries();
+
+    assert_eq!(entries[0].uncompressed_size, content.len() as u64);
+    assert_eq!(entries[0].compression_method, Some(CompressionMethod::Zstd));
+
+    let bytes = extract_bytes(&archive, &entries[0], None).await.unwrap();
+    assert_eq!(bytes.as_ref(), content.as_slice());
+}
+
+// The `zip` crate (v2) does not support writing LZMA-compressed entries, so we
+// use static fixture files created with Python's `zipfile` module (ZIP_LZMA).
+// Fixture generation (run once, output committed):
+//   python3 -c "import zipfile, struct, pathlib
+//   fixtures = pathlib.Path('crates/archive-core/tests/fixtures')
+//   with zipfile.ZipFile(fixtures/'lzma_small.zip', 'w', zipfile.ZIP_LZMA) as z:
+//       z.writestr('lzma_small.bin', bytes(range(10)))
+//   large = b''.join(i.to_bytes(4,'little') for i in range(300*1024//4))
+//   with zipfile.ZipFile(fixtures/'lzma_large.zip', 'w', zipfile.ZIP_LZMA) as z:
+//       z.writestr('lzma_large.bin', large)"
+
+fn fixture(name: &str) -> String {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join(name)
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// LZMA: small entry round-trip (static fixture).
+#[tokio::test]
+async fn zip_lzma_small_entry_round_trip() {
+    let archive = open_zip(&fixture("lzma_small.zip")).await;
+    let entries = archive.entries();
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].name, "lzma_small.bin");
+    assert_eq!(entries[0].uncompressed_size, SMALL_CONTENT.len() as u64);
+    assert_eq!(entries[0].compression_method, Some(CompressionMethod::Lzma));
+    assert!(!entries[0].is_encrypted);
+
+    let bytes = extract_bytes(&archive, &entries[0], None).await.unwrap();
+    assert_eq!(bytes.as_ref(), SMALL_CONTENT);
+}
+
+/// LZMA: large entry round-trip (~300 KB, static fixture).
+#[tokio::test]
+async fn zip_lzma_large_entry_round_trip() {
+    let content = large_content();
+    let archive = open_zip(&fixture("lzma_large.zip")).await;
+    let entries = archive.entries();
+
+    assert_eq!(entries[0].uncompressed_size, content.len() as u64);
+    assert_eq!(entries[0].compression_method, Some(CompressionMethod::Lzma));
+
+    let bytes = extract_bytes(&archive, &entries[0], None).await.unwrap();
+    assert_eq!(bytes.as_ref(), content.as_slice());
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 
 /// Cancellation after 50% of the entry yields `CoreError::Cancelled`.
 #[tokio::test]

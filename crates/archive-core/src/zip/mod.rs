@@ -389,7 +389,7 @@ pub(crate) fn read_zip_lzma_header(reader: &mut impl Read) -> Result<Vec<u8>, Co
         message: format!("truncated LZMA header: {e}"),
     })?;
     let props_size = u16::from_le_bytes([header[2], header[3]]) as usize;
-    if props_size < 5 || props_size > 255 {
+    if !(5..=255).contains(&props_size) {
         return Err(CoreError::InvalidFormat {
             message: format!("invalid LZMA properties size: {props_size}"),
         });
