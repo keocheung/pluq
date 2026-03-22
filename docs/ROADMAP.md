@@ -32,8 +32,8 @@ These commands define the CLI's public API. The TUI is the default entry point.
 - [x] Format detection facade (`ArchiveCore::open`).
 
 ### Phase 2.5: Facade Refactor + RAR4 (Up Next)
-- [ ] Flatten double facade (`ArchiveCore` removed, `Archive` holds format enum directly).
-- [ ] Type-safe scan API (`Opened`/`PendingArchive`) for expensive metadata operations.
+- [x] Flatten double facade (`ArchiveCore` removed, `Archive` holds format enum directly).
+- [x] Type-safe scan API (`Opened`/`PendingArchive`) for expensive metadata operations.
 - [ ] RAR4 format support (header parser + extraction via `unrar`).
 
 ### Phase 3: Interactive TUI

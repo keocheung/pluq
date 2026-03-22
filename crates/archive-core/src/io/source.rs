@@ -13,8 +13,7 @@ use crate::io::ReadError;
 
 /// An I/O source that can be either a local file or an HTTP URL.
 ///
-/// Created automatically by [`ArchiveCore::open`](crate::ArchiveCore::open) based
-/// on the source string, or manually for fine-grained control.
+/// Created via [`Source::detect`] from a path or HTTP URL string.
 pub enum Source {
     /// A file on the local filesystem.
     Local(LocalReadAt),
@@ -75,5 +74,24 @@ impl ReadAt for Source {
             Source::Local(r) => r.size().await,
             Source::Http(r) => r.size().await,
         }
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_local_path_returns_path_for_local() {
+        let source = Source::detect("/tmp/test.rar");
+        assert!(source.local_path().is_some());
+    }
+
+    #[test]
+    fn source_local_path_returns_none_for_http() {
+        let source = Source::detect("https://example.com/test.rar");
+        assert!(source.local_path().is_none());
     }
 }

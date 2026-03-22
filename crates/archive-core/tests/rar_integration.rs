@@ -8,7 +8,22 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use archive_core::{ArchiveCore, CoreError, ProgressReporter};
+use archive_core::{ArchiveEntry, CoreError, ProgressReporter, RarArchive, Source};
+
+async fn open_rar(path: &str) -> RarArchive<Source> {
+    RarArchive::open(Source::detect(path)).await.expect("open RAR")
+}
+
+async fn extract_bytes(
+    archive: &RarArchive<Source>,
+    entry: &ArchiveEntry,
+    password: Option<&[u8]>,
+) -> Result<Bytes, CoreError> {
+    let mut buf = Vec::new();
+    let progress = Arc::new(Mutex::new(()));
+    archive.extract(entry, &mut buf, progress, password).await?;
+    Ok(Bytes::from(buf))
+}
 
 fn fixture(name: &str) -> String {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -24,16 +39,14 @@ fn fixture(name: &str) -> String {
 
 #[tokio::test]
 async fn rar5_format_detection() {
-    let archive = ArchiveCore::open(&fixture("rar5_unicode_entry.rar"))
-        .await
-        .expect("should open RAR5 archive");
+    let archive = open_rar(&fixture("rar5_unicode_entry.rar")).await;
     assert!(!archive.entries().is_empty(), "archive should have entries");
 }
 
 #[tokio::test]
 async fn rar4_gives_unsupported_format_error() {
     // rar4_sample.rar carries the 7-byte RAR4 magic — must return UnsupportedFormat.
-    let result = ArchiveCore::open(&fixture("rar4_sample.rar")).await;
+    let result = RarArchive::open(Source::detect(&fixture("rar4_sample.rar"))).await;
     assert!(
         matches!(result, Err(CoreError::UnsupportedFormat { .. })),
         "expected UnsupportedFormat for RAR4 archive, got an unexpected result"
@@ -45,9 +58,7 @@ async fn rar4_gives_unsupported_format_error() {
 #[tokio::test]
 async fn rar5_listing_unicode_entry_archive() {
     // unicode-entry.rar contains exactly one file: "unicodefilename❤️.txt"
-    let archive = ArchiveCore::open(&fixture("rar5_unicode_entry.rar"))
-        .await
-        .expect("open");
+    let archive = open_rar(&fixture("rar5_unicode_entry.rar")).await;
     let entries = archive.entries();
     assert_eq!(entries.len(), 1, "should have exactly 1 entry");
     assert_eq!(entries[0].name, "unicodefilename❤️.txt");
@@ -60,14 +71,11 @@ async fn rar5_listing_unicode_entry_archive() {
 #[tokio::test]
 async fn rar5_extract_unicode_entry_content() {
     // unicodefilename❤️.txt contains "foobar\n" (verified against unrar test suite).
-    let archive = ArchiveCore::open(&fixture("rar5_unicode_entry.rar"))
-        .await
-        .expect("open");
+    let archive = open_rar(&fixture("rar5_unicode_entry.rar")).await;
     let entry = &archive.entries()[0];
-    let data: Bytes = archive
-        .extract_to_bytes(entry, None)
-        .await
-        .expect("extract");
+    let data: Bytes = extract_bytes(&archive, entry, None)
+    .await
+    .expect("extract");
     assert_eq!(data.as_ref(), b"foobar\n");
 }
 
@@ -75,9 +83,7 @@ async fn rar5_extract_unicode_entry_content() {
 
 #[tokio::test]
 async fn rar5_extraction_cost_positive() {
-    let archive = ArchiveCore::open(&fixture("rar5_unicode_entry.rar"))
-        .await
-        .expect("open");
+    let archive = open_rar(&fixture("rar5_unicode_entry.rar")).await;
     let entry = &archive.entries()[0];
     let cost = archive.extraction_cost(entry);
     assert!(cost > 0, "extraction cost must be positive for a non-empty entry");
@@ -113,9 +119,7 @@ impl ProgressReporter for RecordingReporter {
 
 #[tokio::test]
 async fn rar5_progress_reporting_on_extraction() {
-    let archive = ArchiveCore::open(&fixture("rar5_unicode_entry.rar"))
-        .await
-        .expect("open");
+    let archive = open_rar(&fixture("rar5_unicode_entry.rar")).await;
     let entry = &archive.entries()[0];
     let reporter = Arc::new(Mutex::new(RecordingReporter::new()));
 
@@ -137,9 +141,7 @@ async fn rar5_progress_reporting_on_extraction() {
 
 #[tokio::test]
 async fn rar5_test_integrity_passes() {
-    let archive = ArchiveCore::open(&fixture("rar5_unicode_entry.rar"))
-        .await
-        .expect("open");
+    let archive = open_rar(&fixture("rar5_unicode_entry.rar")).await;
     let entry = &archive.entries()[0];
     archive
         .test(entry)
@@ -152,9 +154,7 @@ async fn rar5_test_integrity_passes() {
 /// `rar5_utf8.rar` holds one empty Store entry whose name contains an em-dash.
 #[tokio::test]
 async fn rar5_utf8_filename_listing() {
-    let archive = ArchiveCore::open(&fixture("rar5_utf8.rar"))
-        .await
-        .expect("open");
+    let archive = open_rar(&fixture("rar5_utf8.rar")).await;
     let entries = archive.entries();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].name, "foo\u{2014}bar"); // U+2014 EM DASH
@@ -165,14 +165,11 @@ async fn rar5_utf8_filename_listing() {
 
 #[tokio::test]
 async fn rar5_utf8_store_extraction_empty_file() {
-    let archive = ArchiveCore::open(&fixture("rar5_utf8.rar"))
-        .await
-        .expect("open");
+    let archive = open_rar(&fixture("rar5_utf8.rar")).await;
     let entry = &archive.entries()[0];
-    let data = archive
-        .extract_to_bytes(entry, None)
-        .await
-        .expect("extract");
+    let data = extract_bytes(&archive, entry, None)
+    .await
+    .expect("extract");
     assert_eq!(data.as_ref(), b"");
 }
 
@@ -264,7 +261,7 @@ async fn rar5_store_two_file_listing() {
     let bytes = build_rar5_store_archive(&[("file1.txt", file1_data), ("file2.txt", file2_data)]);
     let (_guard, path) = write_tempfile(&bytes);
 
-    let archive = ArchiveCore::open(&path).await.expect("open");
+    let archive = open_rar(&path).await;
     let entries = archive.entries();
 
     assert_eq!(entries.len(), 2);
@@ -286,18 +283,16 @@ async fn rar5_store_extraction_exact_content() {
     let bytes = build_rar5_store_archive(&[("file1.txt", file1_data), ("file2.txt", file2_data)]);
     let (_guard, path) = write_tempfile(&bytes);
 
-    let archive = ArchiveCore::open(&path).await.expect("open");
+    let archive = open_rar(&path).await;
 
-    let data1 = archive
-        .extract_to_bytes(&archive.entries()[0], None)
-        .await
-        .expect("extract file1");
+    let data1 = extract_bytes(&archive, &archive.entries()[0], None)
+    .await
+    .expect("extract file1");
     assert_eq!(data1.as_ref(), file1_data as &[u8]);
 
-    let data2 = archive
-        .extract_to_bytes(&archive.entries()[1], None)
-        .await
-        .expect("extract file2");
+    let data2 = extract_bytes(&archive, &archive.entries()[1], None)
+    .await
+    .expect("extract file2");
     assert_eq!(data2.as_ref(), file2_data as &[u8]);
 }
 
@@ -310,9 +305,7 @@ async fn rar5_store_extraction_exact_content() {
 
 #[tokio::test]
 async fn rar5_real_store_listing() {
-    let archive = ArchiveCore::open(&fixture("rar5_store.rar"))
-        .await
-        .expect("open");
+    let archive = open_rar(&fixture("rar5_store.rar")).await;
     let entries = archive.entries();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].name, "file1.txt");
@@ -324,28 +317,22 @@ async fn rar5_real_store_listing() {
 
 #[tokio::test]
 async fn rar5_real_store_extraction() {
-    let archive = ArchiveCore::open(&fixture("rar5_store.rar"))
-        .await
-        .expect("open");
+    let archive = open_rar(&fixture("rar5_store.rar")).await;
 
-    let data1 = archive
-        .extract_to_bytes(&archive.entries()[0], None)
-        .await
-        .expect("extract file1");
+    let data1 = extract_bytes(&archive, &archive.entries()[0], None)
+    .await
+    .expect("extract file1");
     assert_eq!(data1.as_ref(), b"Hello from file one\n");
 
-    let data2 = archive
-        .extract_to_bytes(&archive.entries()[1], None)
-        .await
-        .expect("extract file2");
+    let data2 = extract_bytes(&archive, &archive.entries()[1], None)
+    .await
+    .expect("extract file2");
     assert_eq!(data2.as_ref(), b"Second file content\n");
 }
 
 #[tokio::test]
 async fn rar5_real_compressed_listing() {
-    let archive = ArchiveCore::open(&fixture("rar5_compressed.rar"))
-        .await
-        .expect("open");
+    let archive = open_rar(&fixture("rar5_compressed.rar")).await;
     let entries = archive.entries();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].name, "file1.txt");
@@ -355,20 +342,16 @@ async fn rar5_real_compressed_listing() {
 
 #[tokio::test]
 async fn rar5_real_compressed_extraction() {
-    let archive = ArchiveCore::open(&fixture("rar5_compressed.rar"))
-        .await
-        .expect("open");
+    let archive = open_rar(&fixture("rar5_compressed.rar")).await;
 
-    let data1 = archive
-        .extract_to_bytes(&archive.entries()[0], None)
-        .await
-        .expect("extract file1");
+    let data1 = extract_bytes(&archive, &archive.entries()[0], None)
+    .await
+    .expect("extract file1");
     assert_eq!(data1.as_ref(), b"Hello from file one\n");
 
-    let data2 = archive
-        .extract_to_bytes(&archive.entries()[1], None)
-        .await
-        .expect("extract file2");
+    let data2 = extract_bytes(&archive, &archive.entries()[1], None)
+    .await
+    .expect("extract file2");
     assert_eq!(data2.as_ref(), b"Second file content\n");
 }
 
@@ -386,10 +369,10 @@ async fn rar5_crc_corruption_detected() {
     bytes[corrupt_idx] ^= 0xFF;
 
     let (_guard, path) = write_tempfile(&bytes);
-    let archive = ArchiveCore::open(&path).await.expect("open (header still valid)");
+    let archive = open_rar(&path).await;
     let entry = &archive.entries()[0];
 
-    let result = archive.extract_to_bytes(entry, None).await;
+    let result = extract_bytes(&archive, entry, None).await;
     assert!(
         matches!(result, Err(CoreError::CrcMismatch { .. })),
         "expected CrcMismatch, got: {result:?}"

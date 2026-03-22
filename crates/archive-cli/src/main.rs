@@ -51,7 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Command::List { source, all } => {
-            let archive = Archive::open(&source).await?;
+            let archive = Archive::open(&source).await?.ready().await?;
 
             let entries: Vec<_> = if all {
                 archive.entries().iter().collect()
@@ -91,7 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             entry,
             output,
         } => {
-            let archive = Archive::open(&source).await?;
+            let archive = Archive::open(&source).await?.ready().await?;
 
             let found = archive
                 .entries()
@@ -117,7 +117,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         Command::Test { source, all } => {
-            let archive = Archive::open(&source).await?;
+            let archive = Archive::open(&source).await?.ready().await?;
 
             let entries: Vec<_> = if all {
                 archive.entries().iter().collect()

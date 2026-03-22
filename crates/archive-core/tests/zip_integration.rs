@@ -1,4 +1,4 @@
-//! End-to-end ZIP integration tests via `ArchiveCore::open()`.
+//! End-to-end ZIP integration tests via `ZipArchive::open()`.
 //!
 //! Exercises the full extraction pipeline through the public facade — not
 //! `ZipArchive` directly — covering: listing, unencrypted extraction,
@@ -8,7 +8,22 @@
 use std::io::{Cursor, Write};
 use std::sync::{Arc, Mutex};
 
-use archive_core::{ArchiveCore, CompressionMethod, CoreError, ProgressReporter};
+use archive_core::{ArchiveEntry, CompressionMethod, CoreError, ProgressReporter, Source, ZipArchive};
+
+async fn open_zip(path: &str) -> ZipArchive<Source> {
+    ZipArchive::open(Source::detect(path)).await.expect("open ZIP")
+}
+
+async fn extract_bytes(
+    archive: &ZipArchive<Source>,
+    entry: &ArchiveEntry,
+    password: Option<&[u8]>,
+) -> Result<bytes::Bytes, CoreError> {
+    let mut buf = Vec::new();
+    let progress = std::sync::Arc::new(std::sync::Mutex::new(()));
+    archive.extract(entry, &mut buf, progress, password).await?;
+    Ok(bytes::Bytes::from(buf))
+}
 use zip::unstable::write::FileOptionsExt as _;
 use zip::write::SimpleFileOptions;
 use zip::CompressionMethod as ZipMethod;
@@ -111,7 +126,7 @@ fn build_integration_zip() -> (tempfile::NamedTempFile, String) {
 #[tokio::test]
 async fn list_entries_count_names_flags_methods() {
     let (_tmp, path) = build_integration_zip();
-    let archive = ArchiveCore::open(&path).await.unwrap();
+    let archive = open_zip(&path).await;
     let entries = archive.entries();
 
     assert_eq!(entries.len(), 5, "expected 5 entries total");
@@ -171,14 +186,14 @@ async fn list_entries_count_names_flags_methods() {
 #[tokio::test]
 async fn extract_unencrypted_entries() {
     let (_tmp, path) = build_integration_zip();
-    let archive = ArchiveCore::open(&path).await.unwrap();
+    let archive = open_zip(&path).await;
 
     let entry = archive
         .entries()
         .iter()
         .find(|e| e.name == "plain_large.txt")
         .unwrap();
-    let bytes = archive.extract_to_bytes(entry, None).await.unwrap();
+    let bytes = extract_bytes(&archive, entry, None).await.unwrap();
     assert_eq!(
         bytes.as_ref(),
         large_content().as_slice(),
@@ -190,7 +205,7 @@ async fn extract_unencrypted_entries() {
         .iter()
         .find(|e| e.name == "plain_small.bin")
         .unwrap();
-    let bytes = archive.extract_to_bytes(entry, None).await.unwrap();
+    let bytes = extract_bytes(&archive, entry, None).await.unwrap();
     assert_eq!(bytes.as_ref(), SMALL_CONTENT, "small Stored entry content mismatch");
 }
 
@@ -198,7 +213,7 @@ async fn extract_unencrypted_entries() {
 #[tokio::test]
 async fn extract_encrypted_entries_correct_passwords() {
     let (_tmp, path) = build_integration_zip();
-    let archive = ArchiveCore::open(&path).await.unwrap();
+    let archive = open_zip(&path).await;
 
     // ZipCrypto
     let entry = archive
@@ -206,8 +221,7 @@ async fn extract_encrypted_entries_correct_passwords() {
         .iter()
         .find(|e| e.name == "zipcrypto_deflated.txt")
         .unwrap();
-    let bytes = archive
-        .extract_to_bytes(entry, Some(ZIP_CRYPTO_PASSWORD))
+    let bytes = extract_bytes(&archive, entry, Some(ZIP_CRYPTO_PASSWORD))
         .await
         .unwrap();
     assert_eq!(
@@ -222,8 +236,7 @@ async fn extract_encrypted_entries_correct_passwords() {
         .iter()
         .find(|e| e.name == "aes256_stored.bin")
         .unwrap();
-    let bytes = archive
-        .extract_to_bytes(entry, Some(AES_PASSWORD.as_bytes()))
+    let bytes = extract_bytes(&archive, entry, Some(AES_PASSWORD.as_bytes()))
         .await
         .unwrap();
     assert_eq!(bytes.as_ref(), AES_CONTENT, "AES-256 content mismatch");
@@ -233,7 +246,7 @@ async fn extract_encrypted_entries_correct_passwords() {
 #[tokio::test]
 async fn extract_encrypted_entries_wrong_passwords() {
     let (_tmp, path) = build_integration_zip();
-    let archive = ArchiveCore::open(&path).await.unwrap();
+    let archive = open_zip(&path).await;
 
     // ZipCrypto with wrong password
     let entry = archive
@@ -241,7 +254,7 @@ async fn extract_encrypted_entries_wrong_passwords() {
         .iter()
         .find(|e| e.name == "zipcrypto_deflated.txt")
         .unwrap();
-    let result = archive.extract_to_bytes(entry, Some(b"wrong-pw")).await;
+    let result = extract_bytes(&archive, entry, Some(b"wrong-pw")).await;
     assert!(
         matches!(
             result,
@@ -258,7 +271,7 @@ async fn extract_encrypted_entries_wrong_passwords() {
         .iter()
         .find(|e| e.name == "aes256_stored.bin")
         .unwrap();
-    let result = archive.extract_to_bytes(entry, Some(b"wrong-pw")).await;
+    let result = extract_bytes(&archive, entry, Some(b"wrong-pw")).await;
     assert!(
         matches!(result, Err(CoreError::WrongPassword { .. })),
         "expected WrongPassword for AES-256 wrong password, got: {result:?}"
@@ -269,7 +282,7 @@ async fn extract_encrypted_entries_wrong_passwords() {
 #[tokio::test]
 async fn test_integrity_unencrypted_ok_encrypted_requires_password() {
     let (_tmp, path) = build_integration_zip();
-    let archive = ArchiveCore::open(&path).await.unwrap();
+    let archive = open_zip(&path).await;
 
     // Unencrypted entries pass
     let plain_large = archive
@@ -340,7 +353,7 @@ async fn progress_callbacks_recorded_correctly() {
     }
 
     let (_tmp, path) = build_integration_zip();
-    let archive = ArchiveCore::open(&path).await.unwrap();
+    let archive = open_zip(&path).await;
 
     let entry = archive
         .entries()
@@ -419,7 +432,7 @@ async fn cancel_after_50_percent_returns_cancelled() {
     }
 
     let (_tmp, path) = build_integration_zip();
-    let archive = ArchiveCore::open(&path).await.unwrap();
+    let archive = open_zip(&path).await;
 
     let entry = archive
         .entries()

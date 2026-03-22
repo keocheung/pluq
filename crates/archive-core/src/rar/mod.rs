@@ -5,6 +5,8 @@
 
 pub(crate) mod parse;
 
+pub use parse::{RAR4_SIGNATURE, RAR5_SIGNATURE};
+
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -20,8 +22,7 @@ use crate::codec::CompressionMethod;
 use crate::io::LocalPath;
 use crate::progress::ProgressReporter;
 use crate::rar::parse::{
-    QoCachedBlock, RAR4_SIGNATURE, RAR5_SIGNATURE, parse_block_header, parse_file_header,
-    parse_main_header, parse_quick_open_data,
+    QoCachedBlock, parse_block_header, parse_file_header, parse_main_header, parse_quick_open_data,
 };
 use crate::{ArchiveEntry, CoreError, ReadAt};
 
@@ -120,7 +121,7 @@ impl<R: ReadAt> RarArchive<R> {
     /// Returns [`CoreError::InvalidFormat`] if the RAR5 signature is absent.
     /// Returns [`CoreError::UnsupportedFormat`] if a RAR4 signature is detected.
     // The `LocalPath` bound is `pub(crate)` while `open` is `pub`, but `RarArchive`
-    // is only constructed from within this crate (via `ArchiveCore`), so external
+    // is only constructed from within this crate (via `Source`), so external
     // callers cannot reach this method in practice.
     #[allow(private_bounds)]
     pub async fn open(reader: R) -> Result<Self, CoreError>
@@ -1025,18 +1026,6 @@ async fn verify_and_write<W: AsyncWrite + Send + Unpin>(
         .unwrap()
         .on_entry_complete(entry_name, true);
     Ok(bytes_written)
-}
-
-// ── Test helpers (available to sibling test modules in the same crate) ────────
-
-/// Exposed for use by `facade` tests that need a minimal RAR5 archive fixture.
-#[cfg(test)]
-pub(crate) fn build_minimal_rar5_for_test(
-    filename: &str,
-    data: &[u8],
-    solid: bool,
-) -> Vec<u8> {
-    tests::build_minimal_rar5(filename, data, solid)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

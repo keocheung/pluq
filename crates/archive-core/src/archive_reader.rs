@@ -16,9 +16,7 @@ use crate::{ArchiveEntry, CoreError};
 /// Unified read interface implemented by every format parser.
 ///
 /// Consumers (CLI, UI, server) use only this trait. Format-specific types
-/// (`ZipArchive`, `SevenZArchive`, …) are hidden behind [`ArchiveCore`].
-///
-/// [`ArchiveCore`]: crate::facade::ArchiveCore
+/// (`ZipArchive`, `RarArchive`, …) are hidden behind [`Archive`](archive::Archive).
 pub trait ArchiveReader {
     /// All entries in the archive, including OS-generated junk.
     fn entries(&self) -> &[ArchiveEntry];

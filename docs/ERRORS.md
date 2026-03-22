@@ -27,14 +27,14 @@
 ║    - Opens ArchiveError::Transport for decorator errors               ║
 ║    - Defines own error type (ServerError, AppError, etc.)           ║
 ╠════════════════════════════════════════════════════════════════════╣
-║  Layer 3.5 (State Layer)                                            ║
-║    - Receives CoreError from core                                ║
+║  Layer 3 (Archive — Facade + State)                                ║
+║    - Receives CoreError from format parsers                      ║
 ║    - Handles/translates core errors it understands                  ║
 ║    - Finds ReadError::Transport inside CoreError::Io             ║
 ║      and tunnels it blindly as ArchiveError::Transport                ║
 ║    - Creates its own errors (cache, session state)                  ║
 ╠════════════════════════════════════════════════════════════════════╣
-║  Layers 2–3 (Format Parsers + Facade) produce: CoreError         ║
+║  Layer 2 (Format Parsers) produces: CoreError                    ║
 ║    - Every variant is a format/archive concept                      ║
 ║    - Io(ReadError) wraps I/O errors from ReadAt calls               ║
 ║    - No Transport variant — tunnel lives inside ReadError            ║
@@ -652,7 +652,7 @@ fn handle_state_result<T>(&self, result: Result<T, ArchiveError>) -> Result<T, S
 ## Error Flow Summary
 
 ```
-Layer 0 (I/O)           Layer 2 (Parser)          Layer 3.5 (State)        Layer 4 (Product)
+Layer 0 (I/O)           Layer 2 (Parser)          Layer 3 (Archive)        Layer 4 (Product)
 ReadError               CoreError              ArchiveError               Product error / UI
 -----------             ------------              ----------               ------------------
 

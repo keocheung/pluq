@@ -2,16 +2,12 @@ mod core_error;
 pub mod archive_reader;
 pub mod codec;
 mod entry;
-mod facade;
 pub mod io;
 pub mod junk;
 mod progress;
 pub mod rar;
 mod scan;
 pub mod zip;
-
-// Primary public API — use this (via archive crate in production code).
-pub use facade::ArchiveCore;
 
 // Trait for format-agnostic archive operations.
 pub use archive_reader::ArchiveReader;
@@ -31,5 +27,6 @@ pub use scan::ScanInfo;
 
 // I/O building blocks (for power users / tests).
 pub use io::{HttpReadAt, LocalReadAt, ReadAt, ReadError, Source};
+pub use rar::{RarArchive, RAR4_SIGNATURE, RAR5_SIGNATURE};
 pub use zip::ZipArchive;
 pub use zip::ZipIndex;

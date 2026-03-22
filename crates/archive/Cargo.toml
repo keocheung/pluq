@@ -12,4 +12,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [dev-dependencies]
+bytes = "1"
 tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+zip = { version = "2", features = ["aes-crypto"] }

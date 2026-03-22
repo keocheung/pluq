@@ -29,19 +29,14 @@ Six layers. Each has one job. Nothing leaks between them.
 └──────────────────────┬───────────────────────────────────────────┘
                        │  decorated ReadAt passed down
 ┌──────────────────────▼───────────────────────────────────────────┐
-│  Layer 3.5: State Layer (universal cache)                         │
-│  Archive, ArchiveCache, EntryTree                                 │
-│  Translates CoreError → ArchiveError (core errors only)          │
+│  Layer 3: Archive (Facade + State + Format Detection)             │
+│  Archive::open(source) → Result<Opened, ArchiveError>            │
+│  Opened::Ready(Archive) | Opened::NeedsScan(PendingArchive)      │
+│  Holds ArchiveInner enum directly (Zip | Rar)                    │
+│  Translates CoreError → ArchiveError                              │
 │  Tunnels ReadError::Transport blindly (re-wraps for product)      │
+│  ArchiveCache, EntryTree, ScanInfo live here too                 │
 │  See ERRORS.md for error flow                                     │
-└──────────────────────┬───────────────────────────────────────────┘
-                       │
-┌──────────────────────▼───────────────────────────────────────────┐
-│  Layer 3: Archive Facade (stateless)                              │
-│  ArchiveCore::open(reader) → auto-detects format                  │
-│  Unified API: entries(), extract(sink), test()                    │
-│  Dispatches to correct format parser                              │
-│  Receives decorated ReadAt, unaware of decorators                 │
 └──────────────────────┬───────────────────────────────────────────┘
                        │
 ┌──────────────────────▼───────────────────────────────────────────┐
@@ -68,11 +63,11 @@ Layer 0: Raw bytes (disk, network, memory)
 ```
 
 **The five rules:**
-1. Nothing leaks through boundaries — products never see `ArchiveCore`, `ZipArchive`, flate2, LocalReadAt, or CoreError. Products see `Archive` (state layer handle) + `ArchiveError` + their own product-level error types.
+1. Nothing leaks through boundaries — products never see `ZipArchive`, `RarArchive`, flate2, LocalReadAt, or CoreError. Products see `Archive` / `Opened` / `PendingArchive` + `ArchiveError` + their own product-level error types.
 2. Codec layer is shared — Deflate lives once, all format parsers use the same instance
 3. ArchiveEntry has zero format-specific fields — format parsers hold location details privately
 4. **Right tool for the job** — `ReadAt` has two read methods: `read_range()` returns `Bytes` (for bounded header/metadata reads), `read_stream()` returns `AsyncRead` (for large entry data extraction). Parsers use `read_range` for small reads. Extraction uses `read_stream` so a 4 GB entry never lives in RAM. `ArchiveReader::extract()` writes to a sink, not returns a buffer. Convenience methods (`extract_to_bytes()`) exist for small entries and tests.
-5. **Core is stateless** — Layers 0–3 hold no session state, no caches, no auth tokens. Universal state (cache, session, entry tree) lives in the state layer (Layer 3.5). Product-specific state (auth tokens, quota counters, billing) lives in horizontal crates composed at the product level (Layer 4). See `ERRORS.md` for how errors flow across layers.
+5. **Core is stateless** — Layers 0–2 hold no session state, no caches, no auth tokens. Universal state (cache, entry tree) lives in Layer 3 (`Archive`). Product-specific state (auth tokens, quota counters, billing) lives in horizontal crates composed at the product level (Layer 4). See `ERRORS.md` for how errors flow across layers.
 6. **I/O has its own error language** — `ReadAt` returns `ReadError` (not `CoreError`). `ReadError` is a standalone type covering both local filesystem and HTTP failures, with structured context for decorator routing and user-facing messages. Format parsers convert `ReadError → CoreError` at the boundary. See `ERRORS.md` § ReadError.
 
 ---
@@ -385,7 +380,7 @@ pub trait ArchiveReader {
 
 **Sink-based extraction.** `extract()` writes decompressed bytes to any `AsyncWrite` — a file, an HTTP response body, a `Vec<u8>`, `/dev/null` (for test mode). The caller decides the destination, core never buffers the full output.
 
-**Convenience for in-memory use** (CLI, small entries, tests) — available on both `ArchiveCore` (for tests and internal use) and `Archive` (for products):
+**Convenience for in-memory use** (CLI, small entries, tests) — available on `Archive`:
 ```rust
 impl Archive {  // state layer Archive
     pub async fn extract_to_bytes(&self, entry: &ArchiveEntry) -> Result<Bytes, ArchiveError> {
@@ -526,26 +521,28 @@ fn decode_zip_filename(bytes: &[u8], general_purpose_flags: u16) -> String {
 
 ---
 
-## Layer 3.5 — State Layer (Universal Cache)
+## Layer 3 — Archive (Facade + State + Format Detection)
 
-The universal cache and session layer. Sits between products (Layer 4) and the stateless core (Layers 0–3). Holds **only** state that every product benefits from: cached metadata, session handles, virtual folder trees. Products interact with the state layer, never with core directly.
+Single entry point for products. `Archive::open(source)` auto-detects source type (local vs HTTP) and format (ZIP, RAR5), returning `Opened::Ready(Archive)` or `Opened::NeedsScan(PendingArchive)`. Holds the format-specific parser directly via an internal `ArchiveInner` enum. Translates `CoreError` → `ArchiveError`. Tunnels `ReadError::Transport` blindly as `ArchiveError::Transport`.
 
-**What the state layer IS:** a universal cache that saves every product from duplicating work. Parsed entry lists, folder trees, fingerprint-based invalidation — all products (CLI, server, KMP apps) get this for free.
+**What Layer 3 IS:** format detection, error translation, universal state (cache, entry tree, scan lifecycle). All products (CLI, server, KMP apps) get this for free.
 
-**What the state layer is NOT:** it is not the place for auth, billing, quotas, OAuth, or retry policies. Those are product-specific concerns that live in horizontal crates, assembled at the product level (Layer 4).
+**What Layer 3 is NOT:** it is not the place for auth, billing, quotas, OAuth, or retry policies. Those are product-specific concerns that live in horizontal crates, assembled at the product level (Layer 4).
 
 **Responsibilities:**
-- Receives a `ReadAt` from the product above (possibly decorated — state layer doesn't know or care)
-- Passes the `ReadAt` to `ArchiveCore::open()` in core
-- Manages `Archive` (the product-facing handle wrapping a live `ArchiveCore`)
+- Receives a source string (local path or URL) from the product above
+- Auto-detects format via magic bytes and opens the correct parser
+- Returns `Opened::Ready` (metadata available) or `Opened::NeedsScan` (deferred scan required, e.g. RAR over HTTP without QO)
 - Manages `ArchiveCache` (on-disk cross-session metadata cache with invalidation)
 - Builds `EntryTree` (virtual folder structure derived from flat entry names)
 - Translates `CoreError` → `ArchiveError` for core errors it understands
 - Tunnels `ReadError::Transport` (inside `CoreError::Io`) blindly as `ArchiveError::Transport` — does not inspect or downcast
-- Handles password prompts (encrypted archives are a universal concern)
 
-**Key types** (all owned by state layer):
-- `Archive` — product-facing handle to an open archive (wraps `ArchiveCore` + cache + entry tree)
+**Key types:**
+- `Archive` — product-facing handle to an open archive (holds `ArchiveInner` enum: `Zip(ZipArchive<Source>)` | `Rar(RarArchive<Source>)`)
+- `Opened` — result of `Archive::open()`: `Ready(Archive)` or `NeedsScan(PendingArchive)`
+- `PendingArchive` — archive needing a metadata scan; call `scan_info()` for cost, then `scan()` to produce an `Archive`
+- `ScanInfo` — `Ready` or `Required { estimated_bytes, reason }` — tells callers whether and how expensive the scan is
 - `ArchiveError` — error type for product consumption (see `ERRORS.md`)
 - `EntryTree` / `TreeNode` — virtual folder structure
 - `ArchiveCache` / `ArchiveFingerprint` — cross-session metadata + location cache
@@ -614,29 +611,6 @@ Each product is an actual binary (or library consumed via FFI). It assembles the
 **Web site** — not a Rust product. Consumes the server's HTTP API. Metered/freemium.
 
 ---
-
-## Layer 3 — Archive Facade (Stateless)
-
-### ArchiveCore Struct (exists, needs expansion)
-
-```rust
-// Internal to archive-core. Products never see this type directly —
-// they interact with Archive (the state layer handle) instead.
-pub struct ArchiveCore {
-    inner: ArchiveInner,
-}
-
-enum ArchiveInner {
-    Zip(ZipArchive<Source>),
-    SevenZ(SevenZArchive<Source>),  // future
-    Rar(RarArchive<Source>),        // future
-    Tar(TarArchive<Source>),        // future
-}
-```
-
-`ArchiveCore::open(reader)` auto-detects format from the provided `ReadAt` and dispatches to the correct format parser. The `ReadAt` it receives may be decorated, but `ArchiveCore` is unaware — it only sees the `ReadAt` trait.
-
-**Stateless:** `ArchiveCore` holds no session state, no caches, no auth tokens. It is constructed, used, and dropped. The state layer (`Archive`) owns it and decides when to create it, what `ReadAt` to give it, and what to do with the results.
 
 ---
 

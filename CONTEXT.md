@@ -2,9 +2,9 @@
 
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
-* **Current Phase:** Phase 2 — Core Engine (Refining).
-* **Current Active Task:** SESSION_PLAN Step 4 complete — RarArchive scan split (run_sequential_scan extracted, scan_complete/archive_size fields, scan_info/scan_metadata overrides). Step 5 next.
-* **Baseline:** 166 tests pass. (archive-core: 108 unit + 23 integration + 10 cloud_e2e; archive: 25). Clippy clean.
+* **Current Phase:** Phase 2.5 — Facade Refactor (Complete).
+* **Current Active Task:** [HANDOVER] SESSION_PLAN steps 1–8 complete. `ArchiveCore` removed, `Archive` holds `ArchiveInner` directly, `Archive::open()` returns `Result<Opened, ArchiveError>`. Next: RAR4 support or Phase 3.
+* **Baseline:** 159 tests pass. (archive-core: 104 unit + 23 integration; archive: 32 unit + 11 cloud_e2e ignored — require live network). Clippy clean.
 
 ---
 
@@ -41,20 +41,19 @@
 
 ### Technical Pillars (The Gist)
 
-#### Mental Model: 6 Layers
+#### Mental Model: 5 Layers
 ```
 Layer 4: Products (CLI, Apps, Server)
-  |--- Layer 3.5: State Layer (Universal Cache, EntryTree)
-    |--- Layer 3: Archive Facade (Format Detection)
-      |--- Layer 2: Format Parsers (ZIP, RAR)
-        |--- Layer 1: Codecs (Deflate, Unrar) & I/O Traits
-          |--- Layer 0: Raw bytes (Local, HTTP)
+  |--- Layer 3: Archive (Facade + State + Format Detection)
+    |--- Layer 2: Format Parsers (ZIP, RAR)
+      |--- Layer 1: Codecs (Deflate, Unrar) & I/O Traits
+        |--- Layer 0: Raw bytes (Local, HTTP)
 ```
 
 #### The Golden Rules
-1. **Nothing Leaks:** Products see `Archive`/`ArchiveError`, never core internals.
+1. **Nothing Leaks:** Products see `Archive`/`Opened`/`PendingArchive`/`ArchiveError`, never core internals.
 2. **Shared Codecs:** One implementation for all formats.
 3. **Clean Entries:** `ArchiveEntry` has no format-specific offsets or CRCs.
 4. **Right Tool:** `ReadAt` uses `read_range` (metadata) and `read_stream` (extraction).
-5. **Stateless Core:** Layers 0–3 hold no state. State lives in Layer 3.5.
+5. **Stateless Core:** Layers 0–2 hold no state. State lives in Layer 3 (`Archive`).
 6. **Vocabulary:** `ReadError` (I/O) → `CoreError` (Parsers) → `ArchiveError` (Products).

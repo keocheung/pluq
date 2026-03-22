@@ -5,14 +5,14 @@
 //!
 //! ```text
 //! # All cloud E2E tests:
-//! cargo test -p archive-core --test cloud_e2e -- --ignored --nocapture
+//! cargo test -p archive --test cloud_e2e -- --ignored --nocapture
 //!
 //! # GitHub RAR5 suite only (small files, fast, content-verified):
-//! cargo test -p archive-core --test cloud_e2e cloud_rar5_github -- --ignored --nocapture
+//! cargo test -p archive --test cloud_e2e cloud_rar5_github -- --ignored --nocapture
 //!
 //! # Stefan's large personal archives (listing only):
-//! cargo test -p archive-core --test cloud_e2e cloud_zip_dropbox -- --ignored --nocapture
-//! cargo test -p archive-core --test cloud_e2e cloud_rar_google_drive -- --ignored --nocapture
+//! cargo test -p archive --test cloud_e2e cloud_zip_dropbox -- --ignored --nocapture
+//! cargo test -p archive --test cloud_e2e cloud_rar_google_drive -- --ignored --nocapture
 //! ```
 //!
 //! ## Test tiers
@@ -45,7 +45,7 @@
 //! it would download too much data for a casual run. Use `cargo run -p archive-dev`
 //! for interactive listing + targeted extraction sessions on these.
 
-use archive_core::{ArchiveCore, CoreError};
+use archive::{Archive, ArchiveError};
 
 // ── Tier 1 URLs — ssokolow/rar-test-files ────────────────────────────────────
 //
@@ -101,10 +101,10 @@ const GOOGLE_DRIVE_RAR: &str =
 ///   builds a synthetic archive, and decompresses via unrar
 /// - Extracted content matches the known source: `"Testing 123\n"`
 #[tokio::test]
-#[ignore = "requires network; run: cargo test -p archive-core --test cloud_e2e cloud_rar5_github_plain -- --ignored --nocapture"]
+#[ignore = "requires network; run: cargo test -p archive --test cloud_e2e cloud_rar5_github_plain -- --ignored --nocapture"]
 async fn cloud_rar5_github_plain_listing_and_extraction() {
     let url = gh("testfile.rar5.rar");
-    let archive = ArchiveCore::open(&url).await.expect("open");
+    let archive = Archive::open(&url).await.unwrap().ready().await.unwrap();
 
     let entries = archive.entries();
     assert_eq!(entries.len(), 1, "should have exactly 1 entry");
@@ -130,10 +130,10 @@ async fn cloud_rar5_github_plain_listing_and_extraction() {
 /// detection must kick in regardless of the URL's extension. The archive
 /// contains two image files compressed at level 5.
 #[tokio::test]
-#[ignore = "requires network; run: cargo test -p archive-core --test cloud_e2e cloud_rar5_github_cbr -- --ignored --nocapture"]
+#[ignore = "requires network; run: cargo test -p archive --test cloud_e2e cloud_rar5_github_cbr -- --ignored --nocapture"]
 async fn cloud_rar5_github_cbr_listing_and_extraction() {
     let url = gh("testfile.rar5.cbr");
-    let archive = ArchiveCore::open(&url).await.expect("open");
+    let archive = Archive::open(&url).await.unwrap().ready().await.unwrap();
 
     let entries = archive.entries();
     assert_eq!(entries.len(), 2, "CBR should have 2 image entries");
@@ -161,10 +161,10 @@ async fn cloud_rar5_github_cbr_listing_and_extraction() {
 /// headers during the sequential scan, so the entry list should still contain
 /// exactly one file entry.
 #[tokio::test]
-#[ignore = "requires network; run: cargo test -p archive-core --test cloud_e2e cloud_rar5_github_rr -- --ignored --nocapture"]
+#[ignore = "requires network; run: cargo test -p archive --test cloud_e2e cloud_rar5_github_rr -- --ignored --nocapture"]
 async fn cloud_rar5_github_recovery_record_listing_and_extraction() {
     let url = gh("testfile.rar5.rr.rar");
-    let archive = ArchiveCore::open(&url).await.expect("open");
+    let archive = Archive::open(&url).await.unwrap().ready().await.unwrap();
 
     let entries = archive.entries();
     assert_eq!(entries.len(), 1, "should have 1 file entry (RR service block skipped)");
@@ -190,10 +190,10 @@ async fn cloud_rar5_github_recovery_record_listing_and_extraction() {
 /// `testfile.rar5.solid.rar` has exactly one file (`testfile.txt`), so the
 /// per-file solid flag is 0 → 1 entry in the listing → extraction works.
 #[tokio::test]
-#[ignore = "requires network; run: cargo test -p archive-core --test cloud_e2e cloud_rar5_github_solid -- --ignored --nocapture"]
+#[ignore = "requires network; run: cargo test -p archive --test cloud_e2e cloud_rar5_github_solid -- --ignored --nocapture"]
 async fn cloud_rar5_github_solid_first_entry_accessible() {
     let url = gh("testfile.rar5.solid.rar");
-    let archive = ArchiveCore::open(&url).await.expect("open");
+    let archive = Archive::open(&url).await.unwrap().ready().await.unwrap();
 
     let entries = archive.entries();
     assert_eq!(entries.len(), 1, "first entry of a solid archive is accessible (per-file solid = 0)");
@@ -212,16 +212,16 @@ async fn cloud_rar5_github_solid_first_entry_accessible() {
 ///
 /// RAR3 uses a different header format (7-byte signature, fixed-size fields).
 /// We detect it by magic bytes and reject it with a clear error rather than
-/// silently misparting it.
+/// silently misparsing it.
 #[tokio::test]
-#[ignore = "requires network; run: cargo test -p archive-core --test cloud_e2e cloud_rar3_github -- --ignored --nocapture"]
+#[ignore = "requires network; run: cargo test -p archive --test cloud_e2e cloud_rar3_github -- --ignored --nocapture"]
 async fn cloud_rar3_github_unsupported_format() {
     let url = gh("testfile.rar3.rar");
-    let result = ArchiveCore::open(&url).await;
+    let result = Archive::open(&url).await;
 
     assert!(
-        matches!(result, Err(CoreError::UnsupportedFormat { .. })),
-        "RAR3 must return UnsupportedFormat"
+        matches!(result, Err(ArchiveError::UnsupportedFormat { .. })),
+        "RAR3 must return UnsupportedFormat, got: {result:?}"
     );
 
     println!("✅  RAR3 correctly rejected with UnsupportedFormat");
@@ -235,10 +235,10 @@ async fn cloud_rar3_github_unsupported_format() {
 /// Our parser skips all service blocks, so the real file entry must still
 /// appear in the listing. The comment content (`"abcdef12345"`) is ignored.
 #[tokio::test]
-#[ignore = "requires network; run: cargo test -p archive-core --test cloud_e2e cloud_rar5_unrar_comment -- --ignored --nocapture"]
+#[ignore = "requires network; run: cargo test -p archive --test cloud_e2e cloud_rar5_unrar_comment -- --ignored --nocapture"]
 async fn cloud_rar5_unrar_comment_listing_and_extraction() {
     let url = unrar("comment.rar");
-    let archive = ArchiveCore::open(&url).await.expect("open");
+    let archive = Archive::open(&url).await.unwrap().ready().await.unwrap();
 
     let entries = archive.entries();
     assert_eq!(entries.len(), 1, "CMT service block must be skipped; 1 file entry expected");
@@ -262,10 +262,10 @@ async fn cloud_rar5_unrar_comment_listing_and_extraction() {
 /// modification tools but has no effect on reading/extraction. Our parser
 /// should list and extract normally.
 #[tokio::test]
-#[ignore = "requires network; run: cargo test -p archive-core --test cloud_e2e cloud_rar5_unrar_locked -- --ignored --nocapture"]
+#[ignore = "requires network; run: cargo test -p archive --test cloud_e2e cloud_rar5_unrar_locked -- --ignored --nocapture"]
 async fn cloud_rar5_unrar_locked_listing_and_extraction() {
     let url = unrar("locked.rar");
-    let archive = ArchiveCore::open(&url).await.expect("open");
+    let archive = Archive::open(&url).await.unwrap().ready().await.unwrap();
 
     let entries = archive.entries();
     assert_eq!(entries.len(), 1, "locked archive should list normally");
@@ -289,10 +289,10 @@ async fn cloud_rar5_unrar_locked_listing_and_extraction() {
 /// U+2015), `✌` (VICTORY HAND U+270C). Verifies that our UTF-8 filename
 /// parsing handles multi-byte sequences beyond the ASCII range.
 #[tokio::test]
-#[ignore = "requires network; run: cargo test -p archive-core --test cloud_e2e cloud_rar5_unrar_unicode -- --ignored --nocapture"]
+#[ignore = "requires network; run: cargo test -p archive --test cloud_e2e cloud_rar5_unrar_unicode -- --ignored --nocapture"]
 async fn cloud_rar5_unrar_unicode_filename() {
     let url = unrar("unicode.rar");
-    let archive = ArchiveCore::open(&url).await.expect("open");
+    let archive = Archive::open(&url).await.unwrap().ready().await.unwrap();
 
     let entries = archive.entries();
     assert_eq!(entries.len(), 1);
@@ -318,30 +318,38 @@ async fn cloud_rar5_unrar_unicode_filename() {
 /// either returning a meaningful error or an empty listing — but never
 /// panicking or hanging.
 ///
-/// Expected: `Err(CoreError::CorruptHeader { .. })` when the scanner tries
-/// to parse the AES-encrypted blocks after the encryption header.
+/// Expected: error during open (corrupt header or similar) when the scanner
+/// tries to parse the AES-encrypted blocks after the encryption header.
 #[tokio::test]
-#[ignore = "requires network; run: cargo test -p archive-core --test cloud_e2e cloud_rar5_unrar_enc_headers -- --ignored --nocapture"]
+#[ignore = "requires network; run: cargo test -p archive --test cloud_e2e cloud_rar5_unrar_enc_headers -- --ignored --nocapture"]
 async fn cloud_rar5_unrar_encrypted_headers_graceful() {
     let url = unrar("comment-hpw-password.rar");
-    let result = ArchiveCore::open(&url).await;
+    let result = Archive::open(&url).await;
 
     match &result {
         Err(e) => println!("✅  returned error (expected): {e:?}"),
-        Ok(a) => println!("✅  opened with {} entries (encrypted blocks skipped)", a.entries().len()),
+        Ok(opened) => {
+            let archive = opened;
+            println!("✅  opened (encrypted blocks skipped)");
+            // If it reaches Ready, check via ready()
+            let _ = archive;
+        }
     }
 
     // The important thing: no panic, no hang. Either outcome is acceptable.
-    // CorruptHeader is the most likely error (AES bytes fail CRC check).
     match result {
-        Err(CoreError::CorruptHeader { .. }) => { /* expected */ }
-        Ok(archive) => {
-            // If somehow it opened, encrypted-header archives should have 0 usable entries.
-            // (All headers after the encryption block are encrypted and unparseable.)
-            assert!(
-                archive.entries().is_empty(),
-                "encrypted-header archive must not produce usable entries without a password"
-            );
+        Err(ArchiveError::FileCorrupted { .. }) => { /* expected: CorruptHeader → FileCorrupted */ }
+        Ok(opened) => {
+            // If somehow it opened, scan and check.
+            match opened.ready().await {
+                Ok(archive) => {
+                    assert!(
+                        archive.entries().is_empty(),
+                        "encrypted-header archive must not produce usable entries without a password"
+                    );
+                }
+                Err(_) => { /* error during scan is also acceptable */ }
+            }
         }
         Err(other) => {
             // Any other error is also acceptable — just not a panic.
@@ -357,11 +365,14 @@ async fn cloud_rar5_unrar_encrypted_headers_graceful() {
 /// ZIP Central Directory is at the end of the archive — listing always requires
 /// ≤ 3 range requests regardless of archive size. No full download.
 #[tokio::test]
-#[ignore = "requires network; run: cargo test -p archive-core --test cloud_e2e cloud_zip_dropbox -- --ignored --nocapture"]
+#[ignore = "requires network; run: cargo test -p archive --test cloud_e2e cloud_zip_dropbox -- --ignored --nocapture"]
 async fn cloud_zip_dropbox_listing() {
-    let archive = ArchiveCore::open(DROPBOX_ZIP)
+    let archive = Archive::open(DROPBOX_ZIP)
         .await
-        .expect("should open Dropbox ZIP via HTTP range requests");
+        .expect("should open Dropbox ZIP via HTTP range requests")
+        .ready()
+        .await
+        .expect("Dropbox ZIP should be immediately ready");
 
     let entries = archive.entries();
     assert!(!entries.is_empty(), "Dropbox ZIP must have entries");
@@ -396,13 +407,14 @@ async fn cloud_zip_dropbox_listing() {
 /// This test soft-fails (prints the error, does NOT panic) so the suite stays
 /// green while documenting the gap.
 #[tokio::test]
-#[ignore = "requires network; run: cargo test -p archive-core --test cloud_e2e cloud_rar_google_drive -- --ignored --nocapture"]
+#[ignore = "requires network; run: cargo test -p archive --test cloud_e2e cloud_rar_google_drive -- --ignored --nocapture"]
 async fn cloud_rar_google_drive_listing() {
-    let result = ArchiveCore::open(GOOGLE_DRIVE_RAR).await;
+    let result = Archive::open(GOOGLE_DRIVE_RAR).await;
 
     match result {
-        Ok(archive) => {
+        Ok(opened) => {
             // If this ever passes, Phase 4 must have landed or the URL changed.
+            let archive = opened.ready().await.expect("scan should succeed");
             let entries = archive.entries();
             println!("✅  Google Drive RAR listing OK — {} entries", entries.len());
             for e in entries.iter().take(10) {
