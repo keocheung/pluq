@@ -28,16 +28,17 @@ Six layers. Each has one job. Nothing leaks between them.
 │    Errors are boxed into ReadError::Transport by decorators        │
 └──────────────────────┬───────────────────────────────────────────┘
                        │  decorated ReadAt passed down
-┌──────────────────────▼───────────────────────────────────────────┐
+┌──────────────────────────────────────────────────────────────────┐
 │  Layer 3: Archive (Facade + State + Format Detection)             │
 │  Archive::open(source) → Result<Opened, ArchiveError>            │
 │  Opened::Ready(Archive) | Opened::NeedsScan(PendingArchive)      │
-│  Holds ArchiveInner enum directly (Zip | Rar)                    │
+│  Holds ArchiveInner enum directly (Zip | Rar | Rar4)              │
 │  Translates CoreError → ArchiveError                              │
 │  Tunnels ReadError::Transport blindly (re-wraps for product)      │
 │  ArchiveCache, EntryTree, ScanInfo live here too                 │
 │  See ERRORS.md for error flow                                     │
 └──────────────────────┬───────────────────────────────────────────┘
+
                        │
 ┌──────────────────────▼───────────────────────────────────────────┐
 │  Layer 2: Format Parsers (ArchiveReader trait)                    │
@@ -189,7 +190,7 @@ Metering is a product-level concern — only the server/SaaS product needs it. S
 
 ---
 
-## Layer 1a — Codec Layer [TO BUILD]
+## Layer 1a — Codec Layer
 
 Shared compression/decompression infrastructure used by ALL format parsers.
 
@@ -335,7 +336,9 @@ The decompressor reads incrementally from the bridged stream. The sink receives 
 |-----------|-------------|------------|---------------------|
 | Deflate   | `flate2`    | ✅ Yes (zlib-rs backend) | Works everywhere |
 | BZip2     | `bzip2`     | ❌ Wraps C libbz2 | Needs C toolchain for mobile/WASM |
-| LZMA/LZMA2| `lzma-rust2`| ✅ Yes | Works everywhere |
+| LZMA       | `xz2`       | ❌ Wraps C liblzma | Needs C toolchain |
+| LZMA2      | `lzma-rust2`| ✅ Yes             | Works everywhere  |
+
 | ZSTD      | `zstd`      | ❌ Wraps C libzstd | Needs C toolchain for mobile/WASM |
 | PPMd      | `ppmd-rust` | ✅ Yes | Works everywhere |
 
@@ -539,7 +542,7 @@ Single entry point for products. `Archive::open(source)` auto-detects source typ
 - Tunnels `ReadError::Transport` (inside `CoreError::Io`) blindly as `ArchiveError::Transport` — does not inspect or downcast
 
 **Key types:**
-- `Archive` — product-facing handle to an open archive (holds `ArchiveInner` enum: `Zip(ZipArchive<Source>)` | `Rar(RarArchive<Source>)`)
+- `Archive` — product-facing handle to an open archive (holds `ArchiveInner` enum: `Zip(ZipArchive<Source>)` | `Rar(RarArchive<Source>)` | `Rar4(Rar4Archive<Source>)`)
 - `Opened` — result of `Archive::open()`: `Ready(Archive)` or `NeedsScan(PendingArchive)`
 - `PendingArchive` — archive needing a metadata scan; call `scan_info()` for cost, then `scan()` to produce an `Archive`
 - `ScanInfo` — `Ready` or `Required { estimated_bytes, reason }` — tells callers whether and how expensive the scan is
@@ -801,7 +804,7 @@ Each format stores timestamps differently:
 - ZIP: 32-bit DOS packed field (2-second precision, years since 1980)
 - 7z: Windows FILETIME (100-nanosecond precision, epoch 1601-01-01)
 - TAR: Unix timestamp (seconds since 1970)
-- RAR: Windows FILETIME
+- RAR: Windows FILETIME (RAR5) or 32-bit DOS FTIME (RAR4)
 
 ArchiveEntry stores: `pub modified_at: Option<SystemTime>`
 Conversion constant for 7z FILETIME → Unix: subtract `116444736000000000`, divide by `10_000_000`

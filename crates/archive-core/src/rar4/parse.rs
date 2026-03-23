@@ -3,24 +3,18 @@
 //! RAR4 headers use fixed-size fields and CRC-16 checksums.
 //! No variable-length integers — simpler than RAR5.
 
-// Items here are scaffolding consumed by Rar4Archive (Step 6).
-#![allow(dead_code)]
-
 use bytes::Bytes;
 
 use crate::CoreError;
 
 // ── Block type bytes ────────────────────────────────────────────────────────
 
-pub(crate) const BLOCK_MARKER: u8 = 0x72;
 pub(crate) const BLOCK_MAIN: u8 = 0x73;
 pub(crate) const BLOCK_FILE: u8 = 0x74;
 pub(crate) const BLOCK_END: u8 = 0x7B;
 
 // ── File header flag bits (HEAD_FLAGS for type 0x74) ───────────────────────
 
-const FLAG_CONTINUED_PREV: u16 = 0x0001;
-const FLAG_CONTINUED_NEXT: u16 = 0x0002;
 const FLAG_ENCRYPTED: u16 = 0x0004;
 const FLAG_LARGE: u16 = 0x0100; // HIGH_PACK_SIZE + HIGH_UNP_SIZE present
 const FLAG_UNICODE: u16 = 0x0200;
@@ -34,6 +28,7 @@ const MAIN_FLAG_SOLID: u16 = 0x0008;
 // ── Common block header ────────────────────────────────────────────────────
 
 /// Common 7-byte RAR4 block header (present in every block type).
+#[allow(dead_code)]
 pub(crate) struct Rar4BlockHeader {
     pub head_crc: u16,
     pub head_type: u8,
@@ -229,6 +224,7 @@ pub(crate) fn parse_file_header(
 pub(crate) struct Rar4MainHeader {
     pub raw: Rar4BlockHeader,
     pub is_solid: bool,
+    #[allow(dead_code)]
     pub is_volume: bool,
 }
 

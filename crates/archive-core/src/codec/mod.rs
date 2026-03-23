@@ -13,12 +13,14 @@
 
 mod bzip2;
 mod deflate;
+mod deflate64;
 mod lzma;
 mod store;
 mod zstd;
 
 pub use bzip2::BZip2Decoder;
 pub use deflate::DeflateDecoder;
+pub use deflate64::Deflate64Decoder;
 pub use lzma::LzmaDecoder;
 pub use store::StoreDecoder;
 pub use zstd::ZstdDecoder;
@@ -43,6 +45,8 @@ pub enum CompressionMethod {
     Store,
     /// DEFLATE — used by ZIP, TAR.GZ. Fastest/most compatible.
     Deflate,
+    /// Deflate64 (Enhanced Deflate) — ZIP method 9, used by WinZip and Windows for large files.
+    Deflate64,
     /// BZip2 — used by ZIP, 7z, TAR.BZ2.
     BZip2,
     /// LZMA — legacy variant, used by older 7z archives.
@@ -65,9 +69,10 @@ impl CompressionMethod {
             Self::Store => true,
             Self::Deflate => true, // flate2 always present
             Self::BZip2 => true,
+            Self::Deflate64 => true,
             Self::Lzma => true,
-            Self::Lzma2 => false,  // TODO: add lzma-rust2 crate
             Self::Zstd => true,
+            Self::Lzma2 => false,  // TODO: add lzma-rust2 crate
             Self::Ppmd => false,   // TODO: add ppmd-rust crate
         }
     }
@@ -77,6 +82,7 @@ impl CompressionMethod {
         match self {
             Self::Store => "Store",
             Self::Deflate => "Deflate",
+            Self::Deflate64 => "Deflate64",
             Self::BZip2 => "BZip2",
             Self::Lzma => "LZMA",
             Self::Lzma2 => "LZMA2",
@@ -133,6 +139,7 @@ pub fn build_decoder<'a>(
     match method {
         CompressionMethod::Store => Ok(Box::new(StoreDecoder::new(input))),
         CompressionMethod::Deflate => Ok(Box::new(DeflateDecoder::new(input))),
+        CompressionMethod::Deflate64 => Ok(Box::new(Deflate64Decoder::new(input))),
         CompressionMethod::BZip2 => Ok(Box::new(BZip2Decoder::new(input))),
         CompressionMethod::Lzma => Ok(Box::new(LzmaDecoder::new(input, properties)?)),
         CompressionMethod::Zstd => Ok(Box::new(
@@ -155,12 +162,13 @@ mod tests {
     // ── is_available() ────────────────────────────────────────────────────────
 
     #[test]
-    fn store_deflate_bzip2_lzma_zstd_are_available() {
+    fn store_deflate_bzip2_lzma_zstd_deflate64_are_available() {
         assert!(CompressionMethod::Store.is_available());
         assert!(CompressionMethod::Deflate.is_available());
         assert!(CompressionMethod::BZip2.is_available());
         assert!(CompressionMethod::Lzma.is_available());
         assert!(CompressionMethod::Zstd.is_available());
+        assert!(CompressionMethod::Deflate64.is_available());
     }
 
     #[test]
@@ -247,6 +255,26 @@ mod tests {
         let mut out = Vec::new();
         decoder.read_to_end(&mut out).unwrap();
         assert_eq!(out, input);
+    }
+
+    #[test]
+    fn build_decoder_deflate64_decompresses() {
+        // A Deflate64 "stored" (BTYPE=00) block containing the byte sequence [1, 2, 3, 4, 5].
+        //
+        // Deflate64 bit layout (LSB first):
+        //   byte 0: BFINAL=1 (bit 0), BTYPE=00 (bits 1-2) → 0x01
+        //   (pad to byte boundary — already aligned after 3 bits read as byte)
+        //   bytes 1-2: LEN = 5 (little-endian u16) → [0x05, 0x00]
+        //   bytes 3-4: NLEN = ~5 = 0xFFFA (little-endian u16) → [0xFA, 0xFF]
+        //   bytes 5-9: literal data [1, 2, 3, 4, 5]
+        let compressed: &[u8] = &[0x01, 0x05, 0x00, 0xFA, 0xFF, 1, 2, 3, 4, 5];
+        let expected: &[u8] = &[1, 2, 3, 4, 5];
+
+        let mut decoder =
+            build_decoder(CompressionMethod::Deflate64, compressed, &[]).unwrap();
+        let mut out = Vec::new();
+        decoder.read_to_end(&mut out).unwrap();
+        assert_eq!(out, expected);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # ArchiveSniper — Error Architecture
 
 > **Source of truth** for how errors flow across layers.
-> Last updated: 2026-03-10.
+> Last updated: 2026-03-23.
 > See also: `ARCHITECTURE.md` (system architecture), `CONTEXT.md` (project state).
 
 ---

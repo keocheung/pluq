@@ -399,6 +399,7 @@ pub(crate) fn zip_method_to_codec(id: u16) -> Option<CompressionMethod> {
     match id {
         METHOD_STORED => Some(CompressionMethod::Store),
         METHOD_DEFLATE => Some(CompressionMethod::Deflate),
+        9 => Some(CompressionMethod::Deflate64),
         12 => Some(CompressionMethod::BZip2),
         14 => Some(CompressionMethod::Lzma),
         93 => Some(CompressionMethod::Zstd),

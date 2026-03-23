@@ -2,9 +2,9 @@
 
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
-* **Current Phase:** Phase 2.5 — Engine Expansion (In Progress).
-* **Current Active Task:** [SESSION_PLAN.md] Step 8 — Documentation and CONTEXT.md updates.
-* **Baseline:** 175 tests pass. (archive-core: 107 unit + 35 integration; archive: 33 unit + 11 cloud_e2e ignored — require live network). Clippy clean.
+* **Current Phase:** Phase 2.5 — Engine Expansion (Complete).
+* **Current Active Task:** [HANDOVER] Codecs (BZip2, LZMA, Zstd) + RAR4 support (local + cloud) complete. Next: Phase 3 (Interactive TUI).
+* **Baseline:** 176 tests pass. (archive-core: 108 unit + 35 integration [6 rar + 16 zip + 13 rar4]; archive: 33 unit + 11 cloud_e2e ignored — require live network). Clippy clean.
 
 
 ---
@@ -28,7 +28,7 @@
 
 ### The Product
 
-**Archive Sniper** is a surgical cloud extraction tool (ZIP/RAR5). Focus: Google Drive, Dropbox, OneDrive.
+**Archive Sniper** is a surgical cloud extraction tool (ZIP/RAR5/RAR4). Focus: Google Drive, Dropbox, OneDrive.
 
 *   **UX Principle:** Simplicity and sanity. TUI-first (Browse, Search, Select, Extract).
 *   **Philosophy:** Stateless core, surgical metadata discovery.
