@@ -53,12 +53,13 @@ impl PendingArchive {
         progress: Arc<Mutex<dyn ProgressReporter>>,
     ) -> Result<Archive, ArchiveError> {
         match &mut self.inner {
-            ArchiveInner::Zip(_) => {} // no-op, should not happen
+            ArchiveInner::Zip(_) => {}  // no-op, should not happen
             ArchiveInner::Rar(r) => {
                 r.scan_metadata(progress)
                     .await
                     .map_err(translate_core_error)?;
             }
+            ArchiveInner::Rar4(_) => {} // always scans during open
         }
         Ok(Archive { inner: self.inner })
     }

@@ -3,8 +3,8 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 2.5 — Engine Expansion (In Progress).
-* **Current Active Task:** [SESSION_PLAN.md] Step 7 — RAR4 facade integration & tests.
-* **Baseline:** 168 tests pass. (archive-core: 107 unit + 29 integration; archive: 32 unit + 11 cloud_e2e ignored — require live network). Clippy clean.
+* **Current Active Task:** [SESSION_PLAN.md] Step 8 — Documentation and CONTEXT.md updates.
+* **Baseline:** 175 tests pass. (archive-core: 107 unit + 35 integration; archive: 33 unit + 11 cloud_e2e ignored — require live network). Clippy clean.
 
 
 ---

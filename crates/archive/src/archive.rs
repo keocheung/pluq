@@ -1,8 +1,8 @@
 use std::sync::{Arc, Mutex};
 
 use archive_core::{
-    ArchiveEntry, ArchiveReader, CoreError, ProgressReporter, RarArchive, ReadAt, ScanInfo, Source,
-    ZipArchive, RAR4_SIGNATURE, RAR5_SIGNATURE,
+    ArchiveEntry, ArchiveReader, CoreError, ProgressReporter, Rar4Archive, RarArchive, ReadAt,
+    ScanInfo, Source, ZipArchive, RAR4_SIGNATURE, RAR5_SIGNATURE,
 };
 use bytes::Bytes;
 use tokio::io::AsyncWrite;
@@ -16,6 +16,7 @@ use crate::opened::{Opened, PendingArchive};
 pub(crate) enum ArchiveInner {
     Zip(ZipArchive<Source>),
     Rar(RarArchive<Source>),
+    Rar4(Rar4Archive<Source>),
 }
 
 /// Product-facing handle to an open archive.
@@ -34,6 +35,7 @@ impl std::fmt::Debug for Archive {
         let format = match &self.inner {
             ArchiveInner::Zip(_) => "Zip",
             ArchiveInner::Rar(_) => "Rar",
+            ArchiveInner::Rar4(_) => "Rar4",
         };
         f.debug_struct("Archive")
             .field("format", &format)
@@ -67,11 +69,10 @@ impl Archive {
             };
         }
 
-        // RAR4? — detect and reject with a clear error.
+        // RAR4?
         if magic.len() >= 7 && magic[..7] == RAR4_SIGNATURE {
-            return Err(translate_core_error(CoreError::UnsupportedFormat {
-                format: "RAR4 archives are not yet supported (RAR5 only)".into(),
-            }));
+            let rar4 = Rar4Archive::open(reader).await.map_err(translate_core_error)?;
+            return Ok(Opened::Ready(Self { inner: ArchiveInner::Rar4(rar4) }));
         }
 
         // Fall back to ZIP (reads EOCD from the end of the file).
@@ -84,6 +85,7 @@ impl Archive {
         match &self.inner {
             ArchiveInner::Zip(z) => z.entries(),
             ArchiveInner::Rar(r) => r.entries(),
+            ArchiveInner::Rar4(r) => r.entries(),
         }
     }
 
@@ -92,6 +94,7 @@ impl Archive {
         match &self.inner {
             ArchiveInner::Zip(z) => z.entries_clean(),
             ArchiveInner::Rar(r) => r.entries_clean(),
+            ArchiveInner::Rar4(r) => r.entries_clean(),
         }
     }
 
@@ -113,6 +116,7 @@ impl Archive {
         match &self.inner {
             ArchiveInner::Zip(z) => z.extract(entry, sink, progress, password).await,
             ArchiveInner::Rar(r) => r.extract(entry, sink, progress, password).await,
+            ArchiveInner::Rar4(r) => r.extract(entry, sink, progress, password).await,
         }
         .map_err(translate_core_error)
     }
@@ -137,6 +141,7 @@ impl Archive {
         match &self.inner {
             ArchiveInner::Zip(z) => z.extraction_cost(entry),
             ArchiveInner::Rar(r) => r.extraction_cost(entry),
+            ArchiveInner::Rar4(r) => r.extraction_cost(entry),
         }
     }
 
@@ -145,6 +150,7 @@ impl Archive {
         match &self.inner {
             ArchiveInner::Zip(z) => z.test(entry).await,
             ArchiveInner::Rar(r) => r.test(entry).await,
+            ArchiveInner::Rar4(r) => r.test(entry).await,
         }
         .map_err(translate_core_error)
     }
@@ -157,10 +163,7 @@ mod tests {
     use std::io::Write as _;
     use std::path::PathBuf;
 
-    use archive_core::RAR4_SIGNATURE;
-
     use super::*;
-    use crate::error::ArchiveError;
 
     fn write_temp(bytes: &[u8]) -> (tempfile::NamedTempFile, String) {
         let f = tempfile::NamedTempFile::new().unwrap();
@@ -205,16 +208,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_rar4_returns_unsupported_format() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&RAR4_SIGNATURE);
-        bytes.extend_from_slice(&[0u8; 64]);
-        let (_f, path) = write_temp(&bytes);
-        let result = Archive::open(&path).await;
-        assert!(
-            matches!(result, Err(ArchiveError::UnsupportedFormat { .. })),
-            "expected UnsupportedFormat"
-        );
+    async fn open_rar4_detects_rar4_format() {
+        let archive = Archive::open(&rar_fixture("rar4_sample.rar"))
+            .await
+            .unwrap()
+            .ready()
+            .await
+            .unwrap();
+        assert!(!archive.entries().is_empty());
     }
 
     #[tokio::test]
@@ -261,5 +262,14 @@ mod tests {
             .await
             .unwrap();
         assert!(!archive.entries().is_empty());
+    }
+
+    // ── RAR4 facade tests ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn open_rar4_returns_ready() {
+        // RAR4 always scans during open — never NeedsScan.
+        let opened = Archive::open(&rar_fixture("rar4_sample.rar")).await.unwrap();
+        assert!(matches!(opened, Opened::Ready(_)));
     }
 }
