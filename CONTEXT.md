@@ -3,7 +3,7 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 3 — Interactive TUI.
-* **Current Active Task:** SESSION_PLAN.md → **Step 3** (Terminal Lifecycle, Event Loop & App State).
+* **Current Active Task:** SESSION_PLAN.md → **Step 4** (Scan Progress UI).
 * **Baseline:** 193 tests pass. (archive-core: 109 unit + 41 integration [19 rar + 13 zip + 9 rar4]; archive: 42 unit + 11 cloud_e2e ignored; archive-cli: 1 unit). Clippy clean.
 
 
