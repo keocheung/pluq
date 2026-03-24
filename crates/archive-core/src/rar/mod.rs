@@ -34,7 +34,7 @@ use crate::{ArchiveEntry, CoreError, ReadAt};
 ///
 /// Holds byte offsets and extraction metadata that are not part of the
 /// public `ArchiveEntry` API. `pub` for cache serialization in the `archive` crate.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RarEntryLocation {
     /// Absolute offset of the file header block in the archive.
     /// Used in cloud extraction (synthetic archive construction).

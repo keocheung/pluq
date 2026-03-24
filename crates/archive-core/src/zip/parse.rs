@@ -76,7 +76,7 @@ const GP_FLAG_ENCRYPTED: u16 = 1 << 0;
 /// `pub` for cache serialization in the `archive` crate. The format parser holds
 /// `entries: Vec<ArchiveEntry>` + `locations: Vec<ZipEntryLocation>` as
 /// parallel arrays — same index maps an entry to its location.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ZipEntryLocation {
     /// Byte offset of the Local File Header in the archive.
     pub offset: u64,

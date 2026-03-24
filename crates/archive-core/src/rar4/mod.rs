@@ -41,7 +41,7 @@ const FLAG_CONTINUED_NEXT: u16 = 0x0002;
 /// Per-entry location data, parallel to `Rar4Archive::entries`.
 ///
 /// `pub` for cache serialization in the `archive` crate.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rar4EntryLocation {
     /// Absolute offset of the file header block in the archive.
     pub header_offset: u64,

@@ -1,5 +1,8 @@
-use archive_core::ArchiveEntry;
+use std::path::PathBuf;
+
+use archive_core::{ArchiveEntry, Rar4EntryLocation, RarEntryLocation, ZipEntryLocation};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Fingerprint for detecting whether a cached entry list is still valid.
 ///
@@ -19,14 +22,43 @@ pub struct ArchiveFingerprint {
     pub mtime: Option<u64>,
 }
 
-/// Cached metadata for an archive — entry list + fingerprint.
+/// Format-specific state needed to reconstruct a parser from cache without any I/O.
 ///
-/// Format-agnostic: works for ZIP, RAR, 7z, etc. Supersedes [`ZipIndex`](archive_core::ZipIndex).
-/// Stored as pretty-printed JSON alongside the archive or in an app cache directory.
+/// Each variant carries the minimum data that extraction requires beyond the
+/// generic entry list.  RAR formats need preamble + end-block bytes for
+/// synthetic-archive construction during cloud extraction.
+#[derive(Debug, Serialize, Deserialize)]
+pub enum FormatCacheState {
+    Zip {
+        locations: Vec<ZipEntryLocation>,
+    },
+    Rar {
+        locations: Vec<RarEntryLocation>,
+        /// RAR5 signature + main header bytes (stored as Vec<u8> because Bytes is not Serialize).
+        archive_preamble: Vec<u8>,
+        /// End-of-archive marker block.
+        end_block: Vec<u8>,
+        /// Total archive size needed to reconstruct RarArchive.
+        archive_size: u64,
+    },
+    Rar4 {
+        locations: Vec<Rar4EntryLocation>,
+        archive_preamble: Vec<u8>,
+        end_block: Vec<u8>,
+        archive_size: u64,
+    },
+}
+
+/// Cached metadata for an archive — entry list + format state + fingerprint.
+///
+/// Format-agnostic at the fingerprint level. Format-specific extraction data
+/// lives in [`FormatCacheState`]. Stored as pretty-printed JSON in the platform
+/// cache directory.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ArchiveCache {
     pub fingerprint: ArchiveFingerprint,
     pub entries: Vec<ArchiveEntry>,
+    pub format_state: FormatCacheState,
     /// Creation time as Unix timestamp (seconds).
     pub created_at: u64,
 }
@@ -69,6 +101,26 @@ impl ArchiveCache {
     }
 }
 
+// ── Cache directory helpers ────────────────────────────────────────────────────
+
+/// Default cache directory (platform-aware):
+/// Linux: `~/.cache/archive-sniper/`
+/// macOS: `~/Library/Caches/archive-sniper/`
+/// Windows: `{LOCALAPPDATA}/archive-sniper/`
+pub fn cache_dir() -> Option<PathBuf> {
+    dirs::cache_dir().map(|d| d.join("archive-sniper"))
+}
+
+/// Deterministic cache file path for a source URL or local path.
+/// SHA-256 hash of the source string, truncated to 32 hex chars.
+pub fn cache_path_for(source: &str) -> Option<PathBuf> {
+    cache_dir().map(|dir| {
+        let digest = Sha256::digest(source.as_bytes());
+        let hash: String = digest.iter().take(16).map(|b| format!("{b:02x}")).collect();
+        dir.join(format!("{hash}.json"))
+    })
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -89,6 +141,7 @@ mod tests {
         ArchiveCache {
             fingerprint: fp,
             entries: vec![],
+            format_state: FormatCacheState::Zip { locations: vec![] },
             created_at: 0,
         }
     }
@@ -149,5 +202,72 @@ mod tests {
         let cache = make_cache(fingerprint("f.zip", 512));
         assert!(cache.is_valid(&fingerprint("f.zip", 512)));
         assert!(!cache.is_valid(&fingerprint("f.zip", 513)));
+    }
+
+    #[test]
+    fn round_trip_rar_format_state() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let cache = ArchiveCache {
+            fingerprint: fingerprint("test.rar", 2048),
+            entries: vec![],
+            format_state: FormatCacheState::Rar {
+                locations: vec![],
+                archive_preamble: vec![0x52, 0x61, 0x72, 0x21],
+                end_block: vec![0xFF],
+                archive_size: 2048,
+            },
+            created_at: 1234567890,
+        };
+        cache.save(tmp.path()).unwrap();
+        let loaded = ArchiveCache::load(tmp.path()).unwrap();
+        assert_eq!(loaded.fingerprint, cache.fingerprint);
+        assert_eq!(loaded.created_at, 1234567890);
+        if let FormatCacheState::Rar { archive_preamble, archive_size, .. } = loaded.format_state {
+            assert_eq!(archive_preamble, vec![0x52, 0x61, 0x72, 0x21]);
+            assert_eq!(archive_size, 2048);
+        } else {
+            panic!("expected Rar format state");
+        }
+    }
+
+    #[test]
+    fn round_trip_rar4_format_state() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let cache = ArchiveCache {
+            fingerprint: fingerprint("test4.rar", 1024),
+            entries: vec![],
+            format_state: FormatCacheState::Rar4 {
+                locations: vec![],
+                archive_preamble: vec![0x52, 0x61, 0x72],
+                end_block: vec![0x00],
+                archive_size: 1024,
+            },
+            created_at: 0,
+        };
+        cache.save(tmp.path()).unwrap();
+        let loaded = ArchiveCache::load(tmp.path()).unwrap();
+        if let FormatCacheState::Rar4 { archive_preamble, archive_size, .. } = loaded.format_state {
+            assert_eq!(archive_preamble, vec![0x52, 0x61, 0x72]);
+            assert_eq!(archive_size, 1024);
+        } else {
+            panic!("expected Rar4 format state");
+        }
+    }
+
+    #[test]
+    fn cache_path_for_is_deterministic() {
+        let p1 = cache_path_for("test.rar");
+        let p2 = cache_path_for("test.rar");
+        assert_eq!(p1, p2);
+        // Different sources produce different paths.
+        let p3 = cache_path_for("other.rar");
+        assert_ne!(p1, p3);
+    }
+
+    #[test]
+    fn cache_path_for_ends_with_json() {
+        if let Some(path) = cache_path_for("test.rar") {
+            assert_eq!(path.extension().and_then(|e| e.to_str()), Some("json"));
+        }
     }
 }

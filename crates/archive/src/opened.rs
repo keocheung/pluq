@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use archive_core::{ArchiveReader, ProgressReporter, ScanInfo};
 
 use crate::archive::{Archive, ArchiveInner};
+use crate::cache::{cache_path_for, ArchiveFingerprint};
 use crate::error::{translate_core_error, ArchiveError};
 
 /// Result of opening an archive. Either ready to use or requires a metadata scan.
@@ -21,6 +22,8 @@ pub enum Opened {
 pub struct PendingArchive {
     pub(crate) inner: ArchiveInner,
     info: ScanInfo,
+    pub(crate) fingerprint: ArchiveFingerprint,
+    pub(crate) source: String,
 }
 
 impl Opened {
@@ -37,8 +40,13 @@ impl Opened {
 }
 
 impl PendingArchive {
-    pub(crate) fn new(inner: ArchiveInner, info: ScanInfo) -> Self {
-        Self { inner, info }
+    pub(crate) fn new(
+        inner: ArchiveInner,
+        info: ScanInfo,
+        fingerprint: ArchiveFingerprint,
+        source: String,
+    ) -> Self {
+        Self { inner, info, fingerprint, source }
     }
 
     /// What the scan will cost and why it's needed.
@@ -65,7 +73,15 @@ impl PendingArchive {
                     .map_err(translate_core_error)?;
             }
         }
-        Ok(Archive { inner: self.inner })
+
+        let archive = Archive { inner: self.inner };
+
+        // ── Implicit cache save (failure silently ignored) ────────────────
+        if let Some(cache_path) = cache_path_for(&self.source) {
+            let _ = archive.save_cache(&self.fingerprint, &cache_path);
+        }
+
+        Ok(archive)
     }
 }
 

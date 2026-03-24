@@ -7,6 +7,9 @@ use archive_core::{
 use bytes::Bytes;
 use tokio::io::AsyncWrite;
 
+use crate::cache::{
+    cache_path_for, ArchiveCache, ArchiveFingerprint, FormatCacheState,
+};
 use crate::entry_tree::EntryTree;
 use crate::error::{translate_core_error, ArchiveError};
 use crate::opened::{Opened, PendingArchive};
@@ -49,6 +52,9 @@ impl Archive {
     /// Returns [`Opened::Ready`] if the archive is immediately usable, or
     /// [`Opened::NeedsScan`] if a metadata scan is required first (e.g. RAR over HTTP
     /// without a Quick Open block).
+    ///
+    /// Transparently checks the cache before invoking any format parser. On a valid
+    /// cache hit, returns [`Opened::Ready`] immediately without any I/O scan.
     pub async fn open(source: &str) -> Result<Opened, ArchiveError> {
         let reader = Source::detect(source);
 
@@ -58,14 +64,54 @@ impl Archive {
             .await
             .map_err(|e| translate_core_error(CoreError::from(e)))?;
 
+        // ── Implicit cache check ──────────────────────────────────────────────
+        let source_size = reader
+            .size()
+            .await
+            .map_err(|e| translate_core_error(CoreError::from(e)))?;
+
+        let mtime = std::fs::metadata(source)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+
+        let fingerprint = ArchiveFingerprint {
+            source: source.to_string(),
+            source_size,
+            etag: None,
+            last_modified: None,
+            mtime,
+        };
+
+        if let Some(cache_path) = cache_path_for(source) {
+            if let Ok(cache) = ArchiveCache::load(&cache_path) {
+                if cache.is_valid(&fingerprint) {
+                    let archive = Self::from_cache(cache, reader);
+                    return Ok(Opened::Ready(archive));
+                }
+            }
+        }
+        // ── End cache check ───────────────────────────────────────────────────
+
         // RAR5?
         if magic.len() >= 8 && magic[..8] == RAR5_SIGNATURE {
             let rar = RarArchive::open(reader).await.map_err(translate_core_error)?;
             let info = rar.scan_info();
             return if matches!(info, ScanInfo::Ready) {
-                Ok(Opened::Ready(Self { inner: ArchiveInner::Rar(rar) }))
+                let archive = Self { inner: ArchiveInner::Rar(rar) };
+                // Save cache for local files (already scanned during open).
+                if let Some(cache_path) = cache_path_for(source) {
+                    let _ = archive.save_cache(&fingerprint, &cache_path);
+                }
+                Ok(Opened::Ready(archive))
             } else {
-                Ok(Opened::NeedsScan(PendingArchive::new(ArchiveInner::Rar(rar), info)))
+                Ok(Opened::NeedsScan(PendingArchive::new(
+                    ArchiveInner::Rar(rar),
+                    info,
+                    fingerprint,
+                    source.to_string(),
+                )))
             };
         }
 
@@ -74,15 +120,106 @@ impl Archive {
             let rar4 = Rar4Archive::open(reader).await.map_err(translate_core_error)?;
             let info = rar4.scan_info();
             return if matches!(info, ScanInfo::Ready) {
-                Ok(Opened::Ready(Self { inner: ArchiveInner::Rar4(rar4) }))
+                let archive = Self { inner: ArchiveInner::Rar4(rar4) };
+                // Save cache for local files (already scanned during open).
+                if let Some(cache_path) = cache_path_for(source) {
+                    let _ = archive.save_cache(&fingerprint, &cache_path);
+                }
+                Ok(Opened::Ready(archive))
             } else {
-                Ok(Opened::NeedsScan(PendingArchive::new(ArchiveInner::Rar4(rar4), info)))
+                Ok(Opened::NeedsScan(PendingArchive::new(
+                    ArchiveInner::Rar4(rar4),
+                    info,
+                    fingerprint,
+                    source.to_string(),
+                )))
             };
         }
 
         // Fall back to ZIP (reads EOCD from the end of the file).
         let zip = ZipArchive::open(reader).await.map_err(translate_core_error)?;
-        Ok(Opened::Ready(Self { inner: ArchiveInner::Zip(zip) }))
+        let archive = Self { inner: ArchiveInner::Zip(zip) };
+        // Save cache for ZIP (listing is fast but caching saves 2 range requests on reopen).
+        if let Some(cache_path) = cache_path_for(source) {
+            let _ = archive.save_cache(&fingerprint, &cache_path);
+        }
+        Ok(Opened::Ready(archive))
+    }
+
+    /// Reconstruct an archive from a cache hit without any I/O scan.
+    fn from_cache(cache: ArchiveCache, reader: Source) -> Self {
+        let local_path = reader.local_path().map(|p| p.to_path_buf());
+        match cache.format_state {
+            FormatCacheState::Zip { locations } => {
+                let zip = ZipArchive::from_cached(reader, cache.entries, locations);
+                Self { inner: ArchiveInner::Zip(zip) }
+            }
+            FormatCacheState::Rar { locations, archive_preamble, end_block, archive_size } => {
+                let rar = RarArchive::from_cached(
+                    reader,
+                    cache.entries,
+                    locations,
+                    Bytes::from(archive_preamble),
+                    Bytes::from(end_block),
+                    local_path,
+                    archive_size,
+                );
+                Self { inner: ArchiveInner::Rar(rar) }
+            }
+            FormatCacheState::Rar4 { locations, archive_preamble, end_block, archive_size } => {
+                let rar4 = Rar4Archive::from_cached(
+                    reader,
+                    cache.entries,
+                    locations,
+                    Bytes::from(archive_preamble),
+                    Bytes::from(end_block),
+                    local_path,
+                    archive_size,
+                );
+                Self { inner: ArchiveInner::Rar4(rar4) }
+            }
+        }
+    }
+
+    /// Serialize current state to a cache file. Failure is silently ignored by callers.
+    pub(crate) fn save_cache(
+        &self,
+        fingerprint: &ArchiveFingerprint,
+        path: &std::path::Path,
+    ) -> Result<(), std::io::Error> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let format_state = match &self.inner {
+            ArchiveInner::Zip(z) => FormatCacheState::Zip {
+                locations: z.locations().to_vec(),
+            },
+            ArchiveInner::Rar(r) => FormatCacheState::Rar {
+                locations: r.locations().to_vec(),
+                archive_preamble: r.archive_preamble_bytes().to_vec(),
+                end_block: r.end_block_bytes().to_vec(),
+                archive_size: r.archive_size(),
+            },
+            ArchiveInner::Rar4(r) => FormatCacheState::Rar4 {
+                locations: r.locations().to_vec(),
+                archive_preamble: r.archive_preamble_bytes().to_vec(),
+                end_block: r.end_block_bytes().to_vec(),
+                archive_size: r.archive_size(),
+            },
+        };
+
+        let cache = ArchiveCache {
+            fingerprint: fingerprint.clone(),
+            entries: self.entries().to_vec(),
+            format_state,
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        };
+
+        cache.save(path)
     }
 
     /// All entries in the archive including OS-generated junk.
@@ -276,5 +413,143 @@ mod tests {
         // RAR4 always scans during open — never NeedsScan.
         let opened = Archive::open(&rar_fixture("rar4_sample.rar")).await.unwrap();
         assert!(matches!(opened, Opened::Ready(_)));
+    }
+
+    // ── Cache integration tests ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn zip_cache_round_trip() {
+        use crate::cache::ArchiveCache;
+
+        let buf = build_zip(&[("hello.txt", b"world data")]);
+        let (_f, path) = write_temp(&buf);
+
+        let cache_file = tempfile::NamedTempFile::new().unwrap();
+
+        // Open and get the archive.
+        let archive = Archive::open(&path).await.unwrap().ready().await.unwrap();
+        let entry_count = archive.entries().len();
+        assert!(entry_count > 0);
+
+        // Manually save cache to our temp file.
+        let fingerprint = crate::cache::ArchiveFingerprint {
+            source: path.clone(),
+            source_size: std::fs::metadata(&path).unwrap().len(),
+            etag: None,
+            last_modified: None,
+            mtime: None,
+        };
+        archive.save_cache(&fingerprint, cache_file.path()).unwrap();
+
+        // Load and verify round-trip.
+        let cached = ArchiveCache::load(cache_file.path()).unwrap();
+        assert_eq!(cached.entries.len(), entry_count);
+        assert!(matches!(cached.format_state, crate::cache::FormatCacheState::Zip { .. }));
+    }
+
+    #[tokio::test]
+    async fn rar5_implicit_cache_open_reopen() {
+        let cache_dir = tempfile::TempDir::new().unwrap();
+        let fixture_path = rar_fixture("rar5_store.rar");
+
+        // First open: scans and saves cache.
+        let archive = Archive::open(&fixture_path).await.unwrap().ready().await.unwrap();
+        let expected_entries: Vec<String> = archive.entries().iter().map(|e| e.name.clone()).collect();
+        assert!(!expected_entries.is_empty());
+
+        // Manually save to our isolated temp dir.
+        let fingerprint = crate::cache::ArchiveFingerprint {
+            source: fixture_path.clone(),
+            source_size: std::fs::metadata(&fixture_path).unwrap().len(),
+            etag: None,
+            last_modified: None,
+            mtime: std::fs::metadata(&fixture_path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs()),
+        };
+        let cache_path = cache_dir.path().join("test.json");
+        archive.save_cache(&fingerprint, &cache_path).unwrap();
+
+        // Load cache and reconstruct archive via from_cache.
+        let cached = crate::cache::ArchiveCache::load(&cache_path).unwrap();
+        assert!(cached.is_valid(&fingerprint));
+
+        let reader = Source::detect(&fixture_path);
+        let restored = Archive::from_cache(cached, reader);
+
+        let restored_entries: Vec<String> = restored.entries().iter().map(|e| e.name.clone()).collect();
+        assert_eq!(restored_entries, expected_entries);
+    }
+
+    #[tokio::test]
+    async fn rar4_implicit_cache_open_reopen() {
+        let fixture_path = rar_fixture("rar4_sample.rar");
+
+        let archive = Archive::open(&fixture_path).await.unwrap().ready().await.unwrap();
+        let expected_entries: Vec<String> = archive.entries().iter().map(|e| e.name.clone()).collect();
+        assert!(!expected_entries.is_empty());
+
+        let fingerprint = crate::cache::ArchiveFingerprint {
+            source: fixture_path.clone(),
+            source_size: std::fs::metadata(&fixture_path).unwrap().len(),
+            etag: None,
+            last_modified: None,
+            mtime: std::fs::metadata(&fixture_path)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs()),
+        };
+        let cache_file = tempfile::NamedTempFile::new().unwrap();
+        archive.save_cache(&fingerprint, cache_file.path()).unwrap();
+
+        let cached = crate::cache::ArchiveCache::load(cache_file.path()).unwrap();
+        assert!(cached.is_valid(&fingerprint));
+
+        let reader = Source::detect(&fixture_path);
+        let restored = Archive::from_cache(cached, reader);
+
+        let restored_entries: Vec<String> = restored.entries().iter().map(|e| e.name.clone()).collect();
+        assert_eq!(restored_entries, expected_entries);
+    }
+
+    #[tokio::test]
+    async fn corrupted_cache_falls_through_to_normal_open() {
+        let cache_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(cache_file.path(), b"{{not valid json}}}").unwrap();
+
+        // ArchiveCache::load should fail on corrupted JSON.
+        let result = crate::cache::ArchiveCache::load(cache_file.path());
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn cache_wrong_size_is_invalid() {
+        use crate::cache::{ArchiveCache, ArchiveFingerprint, FormatCacheState};
+
+        let fp = ArchiveFingerprint {
+            source: "test.rar".into(),
+            source_size: 1000,
+            etag: None,
+            last_modified: None,
+            mtime: None,
+        };
+        let cache = ArchiveCache {
+            fingerprint: fp,
+            entries: vec![],
+            format_state: FormatCacheState::Zip { locations: vec![] },
+            created_at: 0,
+        };
+
+        let different_fp = ArchiveFingerprint {
+            source: "test.rar".into(),
+            source_size: 9999, // different size
+            etag: None,
+            last_modified: None,
+            mtime: None,
+        };
+        assert!(!cache.is_valid(&different_fp));
     }
 }
