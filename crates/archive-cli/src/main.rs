@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 
@@ -153,6 +153,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Derive a default extraction subfolder from an archive source.
+///
+/// Strips the file extension from the source's filename component:
+/// - `photos.rar` → `photos/`
+/// - `/tmp/backup.zip` → `backup/`
+/// - `https://example.com/data.rar5` → `data/`
+/// - `archive.tar.gz` → `archive.tar/` (strips one extension)
+///
+/// Returns `None` if no meaningful stem can be extracted.
+pub fn default_output_folder(source: &str) -> Option<PathBuf> {
+    // Extract filename from URL path or filesystem path.
+    let filename = source.rsplit('/').next().or_else(|| source.rsplit('\\').next())?;
+    // Strip query string if URL.
+    let filename = filename.split('?').next()?;
+    let stem = Path::new(filename).file_stem()?;
+    if stem.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(stem))
+}
+
 fn format_size(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * KB;
@@ -166,5 +187,37 @@ fn format_size(bytes: u64) -> String {
         format!("{:.1} KB", bytes as f64 / KB as f64)
     } else {
         format!("{bytes} B")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_output_folder() {
+        assert_eq!(
+            default_output_folder("photos.rar"),
+            Some(PathBuf::from("photos"))
+        );
+        assert_eq!(
+            default_output_folder("/tmp/backup.zip"),
+            Some(PathBuf::from("backup"))
+        );
+        assert_eq!(
+            default_output_folder(
+                "https://drive.google.com/file/d/xxx/data.rar?confirm=t"
+            ),
+            Some(PathBuf::from("data"))
+        );
+        assert_eq!(
+            default_output_folder("archive.tar.gz"),
+            Some(PathBuf::from("archive.tar"))
+        );
+        assert_eq!(
+            default_output_folder(".hidden.zip"),
+            Some(PathBuf::from(".hidden"))
+        );
+        assert_eq!(default_output_folder(""), None);
     }
 }

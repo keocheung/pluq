@@ -803,10 +803,10 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for Rar4Archive<R> {
 
 /// Map a stream `io::Error` to `CoreError` for the elastic scan.
 fn scan_stream_err(e: std::io::Error, offset: u64) -> CoreError {
-    if let Some(inner) = e.into_inner() {
-        if let Ok(re) = inner.downcast::<crate::io::ReadError>() {
-            return CoreError::Io(*re);
-        }
+    if let Some(inner) = e.into_inner()
+        && let Ok(re) = inner.downcast::<crate::io::ReadError>()
+    {
+        return CoreError::Io(*re);
     }
     CoreError::CorruptHeader {
         offset,

@@ -39,13 +39,13 @@ These commands define the CLI's public API. The TUI is the default entry point.
 
 
 ### Phase 2.75: TUI Foundations — Elastic Scan, Cache, CLI Prep
-- [ ] Serialize location types (`RarEntryLocation`, `Rar4EntryLocation`, `ZipEntryLocation`) + `from_cached` constructors.
-- [ ] Elastic scan: replace 64 KiB `read_range` hops with `read_stream` + 10 MB surgical/streaming threshold.
-- [ ] Progress reporting: wire `on_scan_progress` (absolute byte offset + entry count) into scan loop.
-- [ ] Defer RAR4 scan for HTTP sources (same `NeedsScan` pattern as RAR5).
-- [ ] Range support early detection: check `Accept-Ranges` header during `HttpReadAt::size()`, fail fast.
-- [ ] Implicit persistent cache: `Archive::open` checks `~/.cache/archive-sniper/[hash].json`; `PendingArchive::scan` saves after completion. Stores entries, locations, preamble, end_block.
-- [ ] Same-name output folder helper in `archive-cli` (`photos.rar` → extract to `photos/`).
+- [x] Serialize location types (`RarEntryLocation`, `Rar4EntryLocation`, `ZipEntryLocation`) + `from_cached` constructors.
+- [x] Elastic scan: replace 64 KiB `read_range` hops with `read_stream` + 10 MB surgical/streaming threshold.
+- [x] Progress reporting: wire `on_scan_progress` (absolute byte offset + entry count) into scan loop.
+- [x] Defer RAR4 scan for HTTP sources (same `NeedsScan` pattern as RAR5).
+- [x] Range support early detection: check `Accept-Ranges` header during `HttpReadAt::size()`, fail fast.
+- [x] Implicit persistent cache: `Archive::open` checks `~/.cache/archive-sniper/[hash].json`; `PendingArchive::scan` saves after completion. Stores entries, locations, preamble, end_block.
+- [x] Same-name output folder helper in `archive-cli` (`photos.rar` → extract to `photos/`).
 
 ### Phase 3: Interactive TUI (The Cockpit)
 - [ ] `ratatui` integration in `archive-cli`.

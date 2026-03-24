@@ -277,15 +277,15 @@ impl ReadAt for HttpReadAt {
             .map_err(|e| classify_reqwest_error(e, &url, op.clone()))?;
 
         // Fail early if the server explicitly declares no range support.
-        if let Some(accept_ranges) = response.headers().get("accept-ranges") {
-            if accept_ranges.as_bytes() == b"none" {
-                return Err(ReadError::Failed(Box::new(ReadFailure {
-                    source: SourceInfo::Http { url: url.clone() },
-                    operation: op.clone(),
-                    kind: ReadErrorKind::RangeNotSupported,
-                    diagnostic: "server returned Accept-Ranges: none — surgical extraction is not possible".into(),
-                })));
-            }
+        if let Some(accept_ranges) = response.headers().get("accept-ranges")
+            && accept_ranges.as_bytes() == b"none"
+        {
+            return Err(ReadError::Failed(Box::new(ReadFailure {
+                source: SourceInfo::Http { url: url.clone() },
+                operation: op.clone(),
+                kind: ReadErrorKind::RangeNotSupported,
+                diagnostic: "server returned Accept-Ranges: none — surgical extraction is not possible".into(),
+            })));
         }
 
         let content_length = response

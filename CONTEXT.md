@@ -2,9 +2,9 @@
 
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
-* **Current Phase:** Phase 2.75 — TUI Foundations (In Progress).
-* **Current Active Task:** [Step 4] — see SESSION_PLAN.md. (Steps 1–3 complete.)
-* **Baseline:** 192 tests pass. (archive-core: 109 unit + 41 integration [19 rar + 13 zip + 9 rar4]; archive: 42 unit + 11 cloud_e2e ignored). Clippy clean.
+* **Current Phase:** Phase 2.75 — Elastic Scan + Cache (Complete).
+* **Current Active Task:** [HANDOVER] Phase 2.75 complete. Next: Phase 3 (Interactive TUI).
+* **Baseline:** 193 tests pass. (archive-core: 109 unit + 41 integration [19 rar + 13 zip + 9 rar4]; archive: 42 unit + 11 cloud_e2e ignored; archive-cli: 1 unit). Clippy clean.
 
 
 ---

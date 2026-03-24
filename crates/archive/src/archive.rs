@@ -84,13 +84,12 @@ impl Archive {
             mtime,
         };
 
-        if let Some(cache_path) = cache_path_for(source) {
-            if let Ok(cache) = ArchiveCache::load(&cache_path) {
-                if cache.is_valid(&fingerprint) {
-                    let archive = Self::from_cache(cache, reader);
-                    return Ok(Opened::Ready(archive));
-                }
-            }
+        if let Some(cache_path) = cache_path_for(source)
+            && let Ok(cache) = ArchiveCache::load(&cache_path)
+            && cache.is_valid(&fingerprint)
+        {
+            let archive = Self::from_cache(cache, reader);
+            return Ok(Opened::Ready(archive));
         }
         // ── End cache check ───────────────────────────────────────────────────
 
