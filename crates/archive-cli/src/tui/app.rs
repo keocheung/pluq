@@ -112,9 +112,14 @@ impl App {
                 }
             }
             AppMessage::ExtractionComplete(Ok(bytes)) => {
+                let name = if let AppPhase::Extracting { ref entry_name, .. } = self.phase {
+                    entry_name.clone()
+                } else {
+                    String::new()
+                };
                 self.phase = AppPhase::Browsing;
                 self.status_message =
-                    Some(format!("Extracted ({} bytes)", bytes));
+                    Some(format!("Extracted '{}' ({})", name, crate::format_size(bytes)));
             }
             AppMessage::ExtractionComplete(Err(e)) => {
                 self.phase = AppPhase::Browsing;
@@ -126,7 +131,7 @@ impl App {
     pub fn handle_key(
         &mut self,
         key: KeyEvent,
-        _tx: &mpsc::UnboundedSender<AppMessage>,
+        tx: &mpsc::UnboundedSender<AppMessage>,
     ) {
         // Any keypress clears status message.
         self.status_message = None;
@@ -160,7 +165,53 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                // No-op for now — extraction comes in Step 6.
+                if matches!(self.phase, AppPhase::Browsing)
+                    && let Some(entry) = self.entries.get(self.selected)
+                {
+                    if entry.is_directory {
+                        return;
+                    }
+                    let entry_name = entry.name.clone();
+                    let total_bytes = entry.uncompressed_size;
+
+                    self.phase = AppPhase::Extracting {
+                        entry_name: entry_name.clone(),
+                        total_bytes,
+                        bytes_extracted: 0,
+                    };
+
+                    let output_dir = crate::default_output_folder(&self.source)
+                        .unwrap_or_else(|| std::path::PathBuf::from("extracted"));
+                    let output_path = output_dir.join(&entry_name);
+
+                    let archive = self.archive.as_ref().unwrap().clone();
+                    let entry = self.entries[self.selected].clone();
+                    let tx_extract = tx.clone();
+                    let progress =
+                        Arc::new(Mutex::new(TuiProgressReporter::new(tx_extract.clone())));
+
+                    tokio::spawn(async move {
+                        if let Some(parent) = output_path.parent() {
+                            let _ = tokio::fs::create_dir_all(parent).await;
+                        }
+                        match tokio::fs::File::create(&output_path).await {
+                            Ok(mut file) => {
+                                let result = archive.extract(&entry, &mut file, progress, None).await;
+                                let _ = tx_extract.send(AppMessage::ExtractionComplete(result));
+                            }
+                            Err(e) => {
+                                let _ = tx_extract.send(AppMessage::ExtractionComplete(Err(
+                                    archive::ArchiveError::Internal {
+                                        detail: format!(
+                                            "Failed to create {}: {e}",
+                                            output_path.display()
+                                        ),
+                                    },
+                                )));
+                            }
+                        }
+                    });
+                }
             }
             _ => {}
         }
