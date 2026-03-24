@@ -38,6 +38,15 @@ These commands define the CLI's public API. The TUI is the default entry point.
 - [x] RAR4 format support (header parser + extraction via `unrar`).
 
 
+### Phase 2.75: TUI Foundations — Elastic Scan, Cache, CLI Prep
+- [ ] Serialize location types (`RarEntryLocation`, `Rar4EntryLocation`, `ZipEntryLocation`) + `from_cached` constructors.
+- [ ] Elastic scan: replace 64 KiB `read_range` hops with `read_stream` + 10 MB surgical/streaming threshold.
+- [ ] Progress reporting: wire `on_scan_progress` (absolute byte offset + entry count) into scan loop.
+- [ ] Defer RAR4 scan for HTTP sources (same `NeedsScan` pattern as RAR5).
+- [ ] Range support early detection: check `Accept-Ranges` header during `HttpReadAt::size()`, fail fast.
+- [ ] Implicit persistent cache: `Archive::open` checks `~/.cache/archive-sniper/[hash].json`; `PendingArchive::scan` saves after completion. Stores entries, locations, preamble, end_block.
+- [ ] Same-name output folder helper in `archive-cli` (`photos.rar` → extract to `photos/`).
+
 ### Phase 3: Interactive TUI (The Cockpit)
 - [ ] `ratatui` integration in `archive-cli`.
 - [ ] Tree-based navigation (using `archive` state layer).
@@ -52,6 +61,11 @@ These commands define the CLI's public API. The TUI is the default entry point.
 - [ ] Parallel extraction for ZIP/non-solid RAR.
 - [ ] Predictive micro-jumping for RAR sequential scan (on-demand).
 - [ ] Cross-platform release pipeline (GitHub Actions).
+- [ ] Advanced cache invalidation (content hashing, detect modifications between opens).
+- [ ] Configurable cache location (CLI flag or config file).
+- [ ] Cache size limits / LRU eviction.
+- [ ] HTTP fingerprint enrichment (ETag + Last-Modified from HEAD response).
+- [ ] Full range support detection with retry/fallback and user-facing guidance.
 
 ---
 
