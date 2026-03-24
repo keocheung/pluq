@@ -5,6 +5,8 @@ mod error;
 mod opened;
 
 pub use archive::Archive;
+pub use archive_core::ArchiveEntry;
+pub use archive_core::ProgressReporter;
 pub use archive_core::ScanInfo;
 pub use cache::{ArchiveCache, ArchiveFingerprint, FormatCacheState, cache_dir, cache_path_for};
 pub use entry_tree::{EntryTree, TreeNode};

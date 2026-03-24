@@ -2,8 +2,8 @@
 
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
-* **Current Phase:** Phase 2.75 — Elastic Scan + Cache (Complete).
-* **Current Active Task:** [HANDOVER] Phase 2.75 complete. Next: Phase 3 (Interactive TUI).
+* **Current Phase:** Phase 3 — Interactive TUI.
+* **Current Active Task:** SESSION_PLAN.md → **Step 2** (CLI Restructure: Browse Subcommand).
 * **Baseline:** 193 tests pass. (archive-core: 109 unit + 41 integration [19 rar + 13 zip + 9 rar4]; archive: 42 unit + 11 cloud_e2e ignored; archive-cli: 1 unit). Clippy clean.
 
 
