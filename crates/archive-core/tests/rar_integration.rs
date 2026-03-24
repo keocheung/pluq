@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use archive_core::{ArchiveEntry, CoreError, ProgressReporter, RarArchive, Source};
+use archive_core::{ArchiveEntry, ArchiveReader, CoreError, ProgressReporter, RarArchive, Source};
 
 async fn open_rar(path: &str) -> RarArchive<Source> {
     RarArchive::open(Source::detect(path)).await.expect("open RAR")
@@ -378,4 +378,87 @@ async fn rar5_crc_corruption_detected() {
         matches!(result, Err(CoreError::CrcMismatch { .. })),
         "expected CrcMismatch, got: {result:?}"
     );
+}
+
+// ── Elastic scan: scan parity ──────────────────────────────────────────────────
+
+#[tokio::test]
+async fn rar5_elastic_scan_parity_store() {
+    // Elastic scan (new) must produce identical entries to the old sequential scan.
+    let archive = open_rar(&fixture("rar5_store.rar")).await;
+    let entries = archive.entries();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].name, "file1.txt");
+    assert_eq!(entries[1].name, "file2.txt");
+    assert_eq!(entries[0].uncompressed_size, 20);
+    assert_eq!(entries[1].uncompressed_size, 20);
+}
+
+#[tokio::test]
+async fn rar5_elastic_scan_parity_compressed() {
+    let archive = open_rar(&fixture("rar5_compressed.rar")).await;
+    let entries = archive.entries();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].name, "file1.txt");
+    assert_eq!(entries[1].name, "file2.txt");
+}
+
+// ── Elastic scan: scan progress callbacks ─────────────────────────────────────
+
+struct ScanRecorder {
+    scan_started: Vec<u64>,
+    scan_progress: Vec<(u64, usize)>,
+    scan_completed: Vec<usize>,
+}
+
+impl ScanRecorder {
+    fn new() -> Self {
+        Self {
+            scan_started: vec![],
+            scan_progress: vec![],
+            scan_completed: vec![],
+        }
+    }
+}
+
+impl ProgressReporter for ScanRecorder {
+    fn on_scan_start(&mut self, total_bytes: u64) {
+        self.scan_started.push(total_bytes);
+    }
+    fn on_scan_progress(&mut self, bytes_scanned: u64, entries_found: usize) {
+        self.scan_progress.push((bytes_scanned, entries_found));
+    }
+    fn on_scan_complete(&mut self, entries_found: usize) {
+        self.scan_completed.push(entries_found);
+    }
+}
+
+#[tokio::test]
+async fn rar5_elastic_scan_progress_callbacks() {
+    // Open local RAR5 fixture. scan_metadata can be called even on an already-scanned
+    // archive — it just re-scans (safe, idempotent).
+    let mut archive = RarArchive::open(Source::detect(&fixture("rar5_store.rar")))
+        .await
+        .expect("open");
+
+    let recorder = Arc::new(Mutex::new(ScanRecorder::new()));
+    archive
+        .scan_metadata(recorder.clone())
+        .await
+        .expect("scan_metadata");
+
+    let r = recorder.lock().unwrap();
+    let archive_size = archive.archive_size();
+
+    assert_eq!(r.scan_started.len(), 1, "on_scan_start fires once");
+    assert_eq!(r.scan_started[0], archive_size, "on_scan_start receives archive size");
+
+    assert!(!r.scan_progress.is_empty(), "on_scan_progress fires at least once");
+    let (last_offset, last_count) = r.scan_progress.last().copied().unwrap();
+    assert!(last_offset > 0, "bytes_scanned > 0");
+    assert!(last_offset <= archive_size, "bytes_scanned ≤ archive_size");
+    assert!(last_count > 0, "entries_found > 0 in final progress call");
+
+    assert_eq!(r.scan_completed.len(), 1, "on_scan_complete fires once");
+    assert_eq!(r.scan_completed[0], 2, "on_scan_complete receives correct count");
 }

@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio_util::io::SyncIoBridge;
 
 use crate::archive_reader::ArchiveReader;
@@ -151,20 +151,34 @@ impl<R: ReadAt> Rar4Archive<R> {
         let archive_preamble = chunk.slice(0..preamble_end);
         let end_block = build_rar4_end_block();
 
-        // 4. Always scan sequentially (RAR4 has no Quick Open).
-        let (entries, locations) =
-            Self::run_sequential_scan(&reader, chunk, 0, preamble_end as u64, size).await?;
-
-        Ok(Self {
-            reader,
-            entries,
-            locations,
-            archive_preamble,
-            end_block,
-            local_path,
-            archive_size: size,
-            scan_complete: true,
-        })
+        // 4. Local source: scan immediately. HTTP source: defer scan.
+        if local_path.is_some() {
+            let no_op: Arc<Mutex<dyn ProgressReporter>> = Arc::new(Mutex::new(()));
+            let (entries, locations) =
+                Self::run_elastic_scan(&reader, preamble_end as u64, size, &no_op).await?;
+            Ok(Self {
+                reader,
+                entries,
+                locations,
+                archive_preamble,
+                end_block,
+                local_path,
+                archive_size: size,
+                scan_complete: true,
+            })
+        } else {
+            // HTTP source: defer scan, return empty entries.
+            Ok(Self {
+                reader,
+                entries: vec![],
+                locations: vec![],
+                archive_preamble,
+                end_block,
+                local_path,
+                archive_size: size,
+                scan_complete: false,
+            })
+        }
     }
 
     /// All entries in the archive (solid and split-volume entries are omitted).
@@ -226,82 +240,112 @@ impl<R: ReadAt> Rar4Archive<R> {
         self.locations[entry.index].data_size
     }
 
-    /// Sequential metadata scan.
+    /// Elastic metadata scan — streams archive bytes from `start_offset`.
     ///
-    /// Iterates RAR4 blocks from `start_offset`, building the entry and location lists.
-    async fn run_sequential_scan(
+    /// Opens a single `read_stream` and slides through blocks sequentially.
+    /// Small data areas (≤ 10 MiB) are consumed in-stream.
+    /// Large data areas are skipped via a surgical seek (new stream open).
+    async fn run_elastic_scan(
         reader: &R,
-        initial_buffer: Bytes,
-        initial_buffer_start: u64,
         start_offset: u64,
         size: u64,
+        progress: &Arc<Mutex<dyn ProgressReporter>>,
     ) -> Result<(Vec<ArchiveEntry>, Vec<Rar4EntryLocation>), CoreError> {
+        const LARGE_THRESHOLD: u64 = 10 * 1024 * 1024; // 10 MiB
+
         let mut entries: Vec<ArchiveEntry> = Vec::new();
         let mut locations: Vec<Rar4EntryLocation> = Vec::new();
 
+        if start_offset >= size {
+            return Ok((entries, locations));
+        }
+
+        let mut stream = reader
+            .read_stream(start_offset, size - start_offset)
+            .await
+            .map_err(CoreError::Io)?;
+
+        // Sliding buffer: buf[buf_pos..] = archive bytes starting at `offset`.
+        let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
+        let mut buf_pos: usize = 0;
         let mut offset = start_offset;
-        let mut buffer: Bytes = initial_buffer;
-        let mut buffer_start: u64 = initial_buffer_start;
 
         loop {
             if offset >= size {
                 break;
             }
 
-            // Refetch when we're too close to the buffer end to parse even a minimal header.
-            let buf_remaining =
-                (buffer_start + buffer.len() as u64).saturating_sub(offset);
-            if buf_remaining < 64 {
-                let fetch_size = (64 * 1024_u64).min(size - offset);
-                buffer = reader.read_range(offset, fetch_size).await?;
-                buffer_start = offset;
+            // Compact consumed prefix.
+            if buf_pos > 4096 {
+                buf.drain(..buf_pos);
+                buf_pos = 0;
             }
 
-            let local_offset = (offset - buffer_start) as usize;
-            let block = parse_block_header(&buffer[local_offset..], offset)?;
-            let total_size = block.total_size;
+            macro_rules! fill {
+                ($n:expr) => {
+                    let needed = buf_pos + $n;
+                    if buf.len() < needed {
+                        let stream_head =
+                            offset + (buf.len().saturating_sub(buf_pos)) as u64;
+                        let avail = size.saturating_sub(stream_head) as usize;
+                        let to_read = (needed - buf.len()).min(avail);
+                        if to_read > 0 {
+                            let old_len = buf.len();
+                            buf.resize(old_len + to_read, 0);
+                            stream
+                                .read_exact(&mut buf[old_len..])
+                                .await
+                                .map_err(|e| scan_stream_err(e, offset))?;
+                        }
+                    }
+                };
+            }
+
+            // RAR4 common block header: 7 bytes minimum, 11 with FLAG_LONG_BLOCK.
+            fill!(11);
+            if buf.len().saturating_sub(buf_pos) < 7 {
+                break;
+            }
+
+            let block = parse_block_header(&buf[buf_pos..], offset)?;
+            let head_size = block.head_size as usize;
+
+            // Ensure full file header is in buf (head_size bytes from block start).
+            fill!(head_size);
 
             match block.head_type {
                 BLOCK_FILE => {
-                    // Ensure the full file header is in the buffer.
-                    let header_end = local_offset + block.head_size as usize;
-                    if header_end > buffer.len() {
-                        let fetch_size = (64 * 1024_u64).min(size - offset);
-                        buffer = reader.read_range(offset, fetch_size).await?;
-                        buffer_start = offset;
-                    }
-
-                    let local_offset = (offset - buffer_start) as usize;
-                    let file_hdr = parse_file_header(&buffer[local_offset..], block)?;
+                    let file_hdr = parse_file_header(&buf[buf_pos..], block)?;
 
                     let is_solid = file_hdr.raw.head_flags & FLAG_SOLID != 0;
-                    let is_split = file_hdr.raw.head_flags & (FLAG_CONTINUED_PREV | FLAG_CONTINUED_NEXT) != 0;
+                    let is_split = file_hdr.raw.head_flags
+                        & (FLAG_CONTINUED_PREV | FLAG_CONTINUED_NEXT)
+                        != 0;
 
-                    let header_size = file_hdr.raw.head_size as u64;
-                    let data_size = file_hdr.pack_size;
-                    let advance_by = header_size + data_size;
+                    let header_size_u64 = file_hdr.raw.head_size as u64;
+                    let pack_size = file_hdr.pack_size;
+                    let total_advance = header_size_u64 + pack_size;
 
                     if !is_solid && !is_split {
                         let modified_at = dos_datetime_to_system_time(
                             (file_hdr.ftime >> 16) as u16,
                             (file_hdr.ftime & 0xFFFF) as u16,
                         );
-                        let compression_method = rar4_method_to_codec(file_hdr.method);
                         let entry = ArchiveEntry {
                             name: file_hdr.name.clone(),
-                            compressed_size: data_size,
+                            compressed_size: pack_size,
                             uncompressed_size: file_hdr.unp_size,
                             is_directory: file_hdr.is_directory,
                             is_encrypted: file_hdr.is_encrypted,
                             modified_at,
-                            compression_method,
+                            compression_method: rar4_method_to_codec(file_hdr.method),
                             index: entries.len(),
                         };
                         let location = Rar4EntryLocation {
                             header_offset: offset,
-                            header_size,
-                            data_offset: offset + header_size,
-                            data_size,
+                            header_size: header_size_u64,
+                            data_offset: offset + header_size_u64,
+                            data_size: pack_size,
                             crc32: file_hdr.file_crc,
                             method: file_hdr.method,
                             is_encrypted: file_hdr.is_encrypted,
@@ -310,13 +354,72 @@ impl<R: ReadAt> Rar4Archive<R> {
                         locations.push(location);
                     }
 
-                    offset += advance_by;
+                    buf_pos += head_size; // advance past header
+
+                    if pack_size <= LARGE_THRESHOLD {
+                        let data_in_buf = (buf.len() - buf_pos).min(pack_size as usize);
+                        buf_pos += data_in_buf;
+                        let data_remaining = pack_size - data_in_buf as u64;
+                        if data_remaining > 0 {
+                            buf.drain(..buf_pos);
+                            buf_pos = 0;
+                            tokio::io::copy(
+                                &mut (&mut stream).take(data_remaining),
+                                &mut tokio::io::sink(),
+                            )
+                            .await
+                            .map_err(|e| scan_stream_err(e, offset))?;
+                        }
+                    } else {
+                        // Surgical jump.
+                        offset += total_advance;
+                        buf.clear();
+                        buf_pos = 0;
+                        drop(stream);
+                        stream = reader
+                            .read_stream(offset, size.saturating_sub(offset))
+                            .await
+                            .map_err(CoreError::Io)?;
+                        progress
+                            .lock()
+                            .unwrap()
+                            .on_scan_progress(offset, entries.len());
+                        continue;
+                    }
+
+                    offset += total_advance;
+                    progress
+                        .lock()
+                        .unwrap()
+                        .on_scan_progress(offset, entries.len());
+                    continue; // skip bottom offset += block.total_size
                 }
                 BLOCK_END => break,
                 _ => {
-                    offset += total_size;
+                    // Unknown block: consume data area.
+                    let data_size = block.add_size as u64;
+                    buf_pos += head_size;
+                    let data_in_buf = (buf.len() - buf_pos).min(data_size as usize);
+                    buf_pos += data_in_buf;
+                    let data_remaining = data_size - data_in_buf as u64;
+                    if data_remaining > 0 {
+                        buf.drain(..buf_pos);
+                        buf_pos = 0;
+                        tokio::io::copy(
+                            &mut (&mut stream).take(data_remaining),
+                            &mut tokio::io::sink(),
+                        )
+                        .await
+                        .map_err(|e| scan_stream_err(e, offset))?;
+                    }
                 }
             }
+
+            offset += block.total_size;
+            progress
+                .lock()
+                .unwrap()
+                .on_scan_progress(offset, entries.len());
         }
 
         Ok((entries, locations))
@@ -662,9 +765,54 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for Rar4Archive<R> {
     async fn test(&self, entry: &ArchiveEntry) -> Result<(), CoreError> {
         Rar4Archive::test(self, entry).await
     }
+
+    fn scan_info(&self) -> crate::scan::ScanInfo {
+        if self.scan_complete {
+            crate::scan::ScanInfo::Ready
+        } else {
+            crate::scan::ScanInfo::Required {
+                estimated_bytes: self.archive_size,
+                reason: "RAR4 archive requires a one-time sequential scan.",
+            }
+        }
+    }
+
+    async fn scan_metadata(
+        &mut self,
+        progress: Arc<Mutex<dyn ProgressReporter>>,
+    ) -> Result<(), CoreError> {
+        let preamble_end = self.archive_preamble.len() as u64;
+        let size = self.archive_size;
+        {
+            progress.lock().unwrap().on_scan_start(size);
+        }
+        let (entries, locations) =
+            Self::run_elastic_scan(&self.reader, preamble_end, size, &progress).await?;
+        let entry_count = entries.len();
+        self.entries = entries;
+        self.locations = locations;
+        self.scan_complete = true;
+        {
+            progress.lock().unwrap().on_scan_complete(entry_count);
+        }
+        Ok(())
+    }
 }
 
 // ── Helper functions ──────────────────────────────────────────────────────────
+
+/// Map a stream `io::Error` to `CoreError` for the elastic scan.
+fn scan_stream_err(e: std::io::Error, offset: u64) -> CoreError {
+    if let Some(inner) = e.into_inner() {
+        if let Ok(re) = inner.downcast::<crate::io::ReadError>() {
+            return CoreError::Io(*re);
+        }
+    }
+    CoreError::CorruptHeader {
+        offset,
+        reason: "stream read failed during scan".into(),
+    }
+}
 
 /// Map a RAR4 method byte to the codec layer's `CompressionMethod`.
 ///

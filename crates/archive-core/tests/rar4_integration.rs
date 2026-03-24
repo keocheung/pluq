@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use archive_core::{ArchiveEntry, CoreError, Rar4Archive, Source};
+use archive_core::{ArchiveEntry, ArchiveReader, CoreError, ProgressReporter, Rar4Archive, Source};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -232,4 +232,73 @@ async fn rar4_test_integrity_passes() {
         .test(&archive.entries()[0])
         .await
         .expect("integrity check should pass");
+}
+
+// ── Elastic scan: scan parity ──────────────────────────────────────────────────
+
+#[tokio::test]
+async fn rar4_elastic_scan_parity_sample_fixture() {
+    let archive = open_rar4(&fixture("rar4_sample.rar")).await;
+    let entries = archive.entries();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].name, ".gitignore");
+    assert_eq!(entries[0].uncompressed_size, 18);
+    assert!(entries[0].is_encrypted);
+}
+
+#[tokio::test]
+async fn rar4_elastic_scan_parity_synthetic() {
+    let file1 = b"Hello from file one\n";
+    let file2 = b"Second file content\n";
+    let bytes = build_rar4_store_archive(&[("file1.txt", file1), ("file2.txt", file2)]);
+    let (_g, path) = write_tempfile(&bytes);
+
+    let archive = open_rar4(&path).await;
+    let entries = archive.entries();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].name, "file1.txt");
+    assert_eq!(entries[1].name, "file2.txt");
+}
+
+// ── Elastic scan: scan progress callbacks ─────────────────────────────────────
+
+struct ScanRecorder {
+    scan_started: Vec<u64>,
+    scan_progress: Vec<(u64, usize)>,
+    scan_completed: Vec<usize>,
+}
+
+impl ScanRecorder {
+    fn new() -> Self {
+        Self { scan_started: vec![], scan_progress: vec![], scan_completed: vec![] }
+    }
+}
+
+impl ProgressReporter for ScanRecorder {
+    fn on_scan_start(&mut self, total_bytes: u64) { self.scan_started.push(total_bytes); }
+    fn on_scan_progress(&mut self, bytes: u64, count: usize) { self.scan_progress.push((bytes, count)); }
+    fn on_scan_complete(&mut self, count: usize) { self.scan_completed.push(count); }
+}
+
+#[tokio::test]
+async fn rar4_elastic_scan_progress_callbacks() {
+    let file1 = b"Hello from file one\n";
+    let bytes = build_rar4_store_archive(&[("file1.txt", file1)]);
+    let (_g, path) = write_tempfile(&bytes);
+
+    let mut archive = Rar4Archive::open(Source::detect(&path)).await.expect("open");
+    let recorder = Arc::new(Mutex::new(ScanRecorder::new()));
+    archive.scan_metadata(recorder.clone()).await.expect("scan_metadata");
+
+    let r = recorder.lock().unwrap();
+    let archive_size = archive.archive_size();
+
+    assert_eq!(r.scan_started.len(), 1);
+    assert_eq!(r.scan_started[0], archive_size);
+    assert!(!r.scan_progress.is_empty());
+    let (last_offset, _) = r.scan_progress.last().copied().unwrap();
+    assert!(last_offset > 0);
+    assert!(last_offset <= archive_size);
+    assert_eq!(r.scan_completed.len(), 1);
+    assert_eq!(r.scan_completed[0], 1);
 }

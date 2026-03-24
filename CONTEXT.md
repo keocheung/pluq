@@ -3,8 +3,8 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 2.75 — TUI Foundations (In Progress).
-* **Current Active Task:** [Step 2] Engine Refactor — Elastic Scan + Progress Reporting.
-* **Baseline:** 176 tests pass. (archive-core: 108 unit + 35 integration [16 rar + 13 zip + 6 rar4]; archive: 33 unit + 11 cloud_e2e ignored). Clippy clean.
+* **Current Active Task:** [Step 3] — see SESSION_PLAN.md. (Step 2 complete.)
+* **Baseline:** 183 tests pass. (archive-core: 109 unit + 41 integration [19 rar + 13 zip + 9 rar4]; archive: 33 unit + 11 cloud_e2e ignored). Clippy clean.
 
 
 ---

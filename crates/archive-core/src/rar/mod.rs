@@ -14,7 +14,7 @@ use std::io::Read;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio_util::io::SyncIoBridge;
 
 use serde::{Deserialize, Serialize};
@@ -193,12 +193,12 @@ impl<R: ReadAt> RarArchive<R> {
         }
 
         // 5. QO not available or failed.
-        //    - Local source: run sequential scan immediately (same as before).
+        //    - Local source: run elastic scan immediately.
         //    - HTTP source: defer the scan — caller must invoke scan_metadata().
         if local_path.is_some() {
+            let no_op: Arc<Mutex<dyn ProgressReporter>> = Arc::new(Mutex::new(()));
             let (entries, locations) =
-                Self::run_sequential_scan(&reader, chunk, 0, preamble_end as u64, size)
-                    .await?;
+                Self::run_elastic_scan(&reader, preamble_end as u64, size, &no_op).await?;
             return Ok(Self {
                 reader,
                 entries,
@@ -275,60 +275,101 @@ impl<R: ReadAt> RarArchive<R> {
         }
     }
 
-    /// Sequential metadata scan — iterates all blocks from `start_offset`.
+    /// Elastic metadata scan — streams archive bytes from `start_offset`.
     ///
-    /// Shared by [`open`](Self::open) (local source fallback) and
-    /// [`scan_metadata`](ArchiveReader::scan_metadata) (HTTP deferred scan).
+    /// Opens a single `read_stream` and slides through blocks sequentially.
+    /// Small data areas (≤ 10 MiB) are consumed in-stream.
+    /// Large data areas are skipped via a surgical seek (new stream open).
     ///
-    /// `initial_buffer` / `initial_buffer_start` allow reusing a chunk already
-    /// fetched by the caller; pass `(Bytes::new(), start_offset)` to force a
-    /// fresh fetch at the start of the scan.
-    async fn run_sequential_scan(
+    /// Progress callbacks fire after every block with the absolute byte offset
+    /// and current entry count.
+    async fn run_elastic_scan(
         reader: &R,
-        initial_buffer: Bytes,
-        initial_buffer_start: u64,
         start_offset: u64,
         size: u64,
+        progress: &Arc<Mutex<dyn ProgressReporter>>,
     ) -> Result<(Vec<ArchiveEntry>, Vec<RarEntryLocation>), CoreError> {
+        const LARGE_THRESHOLD: u64 = 10 * 1024 * 1024; // 10 MiB
+
         let mut entries: Vec<ArchiveEntry> = Vec::new();
         let mut locations: Vec<RarEntryLocation> = Vec::new();
 
+        if start_offset >= size {
+            return Ok((entries, locations));
+        }
+
+        let mut stream = reader
+            .read_stream(start_offset, size - start_offset)
+            .await
+            .map_err(CoreError::Io)?;
+
+        // Sliding buffer: buf[buf_pos..] = archive bytes starting at `offset`.
+        // Invariant: stream_head = offset + (buf.len() - buf_pos)
+        let mut buf: Vec<u8> = Vec::with_capacity(8 * 1024);
+        let mut buf_pos: usize = 0;
         let mut offset = start_offset;
-        let mut buffer: Bytes = initial_buffer;
-        let mut buffer_start: u64 = initial_buffer_start;
 
         loop {
             if offset >= size {
                 break;
             }
 
-            // Refetch when we've exhausted the current buffer or are too close to
-            // its end to reliably read even the minimum block preamble (5 bytes).
-            let buf_remaining = (buffer_start + buffer.len() as u64).saturating_sub(offset);
-            if buf_remaining < 64 {
-                let fetch_size = (64 * 1024_u64).min(size - offset);
-                buffer = reader.read_range(offset, fetch_size).await?;
-                buffer_start = offset;
+            // Compact consumed prefix to bound memory usage.
+            if buf_pos > 4096 {
+                buf.drain(..buf_pos);
+                buf_pos = 0;
             }
 
-            let local_offset = (offset - buffer_start) as usize;
-            let block = parse_block_header(&buffer[local_offset..], offset)?;
+            // Helper: fill buf so that buf[buf_pos..buf_pos+n] is available.
+            // Reads from stream, up to archive boundary. If insufficient data
+            // exists in the archive, we just return what we have (parse will fail).
+            macro_rules! fill {
+                ($n:expr) => {
+                    let needed = buf_pos + $n;
+                    if buf.len() < needed {
+                        let stream_head =
+                            offset + (buf.len().saturating_sub(buf_pos)) as u64;
+                        let avail = size.saturating_sub(stream_head) as usize;
+                        let to_read = (needed - buf.len()).min(avail);
+                        if to_read > 0 {
+                            let old_len = buf.len();
+                            buf.resize(old_len + to_read, 0);
+                            stream
+                                .read_exact(&mut buf[old_len..])
+                                .await
+                                .map_err(|e| scan_stream_err(e, offset))?;
+                        }
+                    }
+                };
+            }
 
-            // Save total_size before potentially moving `block` into parse_file_header.
+            // Stage 1: enough for CRC (4) + header_size vint (≤8).
+            fill!(12);
+            if buf.len().saturating_sub(buf_pos) < 5 {
+                break; // End of archive data
+            }
+
+            // Parse header_size vint to compute exact header byte count.
+            let mut vpos = buf_pos + 4;
+            let hdr_size_val =
+                parse::read_vint(&buf, &mut vpos).map_err(|_| CoreError::CorruptHeader {
+                    offset,
+                    reason: "block header_size vint is truncated".into(),
+                })?;
+            let hdr_bytes = 4 + (vpos - (buf_pos + 4)) + hdr_size_val as usize;
+
+            // Stage 2: ensure the full header is in buf.
+            fill!(hdr_bytes);
+
+            // Parse common block header and dispatch.
+            let block = parse_block_header(&buf[buf_pos..], offset)?;
             let total_size = block.total_size;
+            let data_size = block.data_size;
 
             match block.block_type {
                 2 => {
-                    // File header: may need a larger slice if it spans the buffer end.
-                    let header_end = local_offset + (total_size - block.data_size) as usize;
-                    if header_end > buffer.len() {
-                        // Header body extends past our current buffer — refetch.
-                        let fetch_size = (64 * 1024_u64).min(size - offset);
-                        buffer = reader.read_range(offset, fetch_size).await?;
-                        buffer_start = offset;
-                    }
-                    let local_offset = (offset - buffer_start) as usize;
-                    let file_hdr = parse_file_header(&buffer[local_offset..], block)?;
+                    // File block.
+                    let file_hdr = parse_file_header(&buf[buf_pos..], block)?;
 
                     if !file_hdr.compression.solid {
                         let hdr_size = file_hdr.raw.total_size - file_hdr.raw.data_size;
@@ -359,14 +400,66 @@ impl<R: ReadAt> RarArchive<R> {
                         entries.push(entry);
                         locations.push(location);
                     }
-                    // Solid entries are silently skipped — not included in listing.
+
+                    buf_pos += hdr_bytes; // advance past header
+
+                    if data_size <= LARGE_THRESHOLD {
+                        // Stream through: consume data_size bytes.
+                        let data_in_buf = (buf.len() - buf_pos).min(data_size as usize);
+                        buf_pos += data_in_buf;
+                        let data_remaining = data_size - data_in_buf as u64;
+                        if data_remaining > 0 {
+                            buf.drain(..buf_pos);
+                            buf_pos = 0;
+                            tokio::io::copy(
+                                &mut (&mut stream).take(data_remaining),
+                                &mut tokio::io::sink(),
+                            )
+                            .await
+                            .map_err(|e| scan_stream_err(e, offset))?;
+                        }
+                    } else {
+                        // Surgical jump: skip the large data area entirely.
+                        offset += total_size;
+                        buf.clear();
+                        buf_pos = 0;
+                        drop(stream);
+                        stream = reader
+                            .read_stream(offset, size.saturating_sub(offset))
+                            .await
+                            .map_err(CoreError::Io)?;
+                        progress
+                            .lock()
+                            .unwrap()
+                            .on_scan_progress(offset, entries.len());
+                        continue;
+                    }
                 }
-                3 => {} // Service header (QO, RR, CMT) — skip.
                 5 => break, // End of archive.
-                _ => {}     // Unknown block type — skip gracefully.
+                _ => {
+                    // Service header (3) or unknown: consume data area.
+                    buf_pos += hdr_bytes;
+                    let data_in_buf = (buf.len() - buf_pos).min(data_size as usize);
+                    buf_pos += data_in_buf;
+                    let data_remaining = data_size - data_in_buf as u64;
+                    if data_remaining > 0 {
+                        buf.drain(..buf_pos);
+                        buf_pos = 0;
+                        tokio::io::copy(
+                            &mut (&mut stream).take(data_remaining),
+                            &mut tokio::io::sink(),
+                        )
+                        .await
+                        .map_err(|e| scan_stream_err(e, offset))?;
+                    }
+                }
             }
 
             offset += total_size;
+            progress
+                .lock()
+                .unwrap()
+                .on_scan_progress(offset, entries.len());
         }
 
         Ok((entries, locations))
@@ -935,13 +1028,8 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for RarArchive<R> {
             p.on_scan_start(size);
         }
 
-        // Re-read the initial chunk so run_sequential_scan can reuse it.
-        let initial_chunk_size = (64 * 1024_u64).min(size);
-        let initial_chunk = self.reader.read_range(0, initial_chunk_size).await?;
-
         let (entries, locations) =
-            Self::run_sequential_scan(&self.reader, initial_chunk, 0, preamble_end, size)
-                .await?;
+            Self::run_elastic_scan(&self.reader, preamble_end, size, &progress).await?;
 
         let entry_count = entries.len();
         self.entries = entries;
@@ -958,6 +1046,23 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for RarArchive<R> {
 }
 
 // ── Helper functions ──────────────────────────────────────────────────────────
+
+/// Map a stream `io::Error` to `CoreError` for the elastic scan.
+///
+/// HTTP `read_stream` wraps [`ReadError`](crate::io::ReadError) inside
+/// `io::Error::other`, so we unwrap it when present. Local I/O errors
+/// (e.g. truncated archive) become [`CoreError::CorruptHeader`].
+fn scan_stream_err(e: std::io::Error, offset: u64) -> CoreError {
+    if let Some(inner) = e.into_inner() {
+        if let Ok(re) = inner.downcast::<crate::io::ReadError>() {
+            return CoreError::Io(*re);
+        }
+    }
+    CoreError::CorruptHeader {
+        offset,
+        reason: "stream read failed during scan".into(),
+    }
+}
 
 /// Convert a Unix timestamp (seconds since 1970-01-01) to `SystemTime`.
 fn unix_to_system_time(timestamp: u32) -> SystemTime {

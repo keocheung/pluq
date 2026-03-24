@@ -59,7 +59,11 @@ impl PendingArchive {
                     .await
                     .map_err(translate_core_error)?;
             }
-            ArchiveInner::Rar4(_) => {} // always scans during open
+            ArchiveInner::Rar4(r) => {
+                r.scan_metadata(progress)
+                    .await
+                    .map_err(translate_core_error)?;
+            }
         }
         Ok(Archive { inner: self.inner })
     }

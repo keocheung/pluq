@@ -72,7 +72,12 @@ impl Archive {
         // RAR4?
         if magic.len() >= 7 && magic[..7] == RAR4_SIGNATURE {
             let rar4 = Rar4Archive::open(reader).await.map_err(translate_core_error)?;
-            return Ok(Opened::Ready(Self { inner: ArchiveInner::Rar4(rar4) }));
+            let info = rar4.scan_info();
+            return if matches!(info, ScanInfo::Ready) {
+                Ok(Opened::Ready(Self { inner: ArchiveInner::Rar4(rar4) }))
+            } else {
+                Ok(Opened::NeedsScan(PendingArchive::new(ArchiveInner::Rar4(rar4), info)))
+            };
         }
 
         // Fall back to ZIP (reads EOCD from the end of the file).
