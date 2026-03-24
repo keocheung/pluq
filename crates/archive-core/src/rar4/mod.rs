@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio_util::io::SyncIoBridge;
 
@@ -37,8 +38,11 @@ const FLAG_CONTINUED_NEXT: u16 = 0x0002;
 
 // ── Location data (private) ───────────────────────────────────────────────────
 
-/// Private per-entry location data, parallel to `Rar4Archive::entries`.
-pub(crate) struct Rar4EntryLocation {
+/// Per-entry location data, parallel to `Rar4Archive::entries`.
+///
+/// `pub` for cache serialization in the `archive` crate.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Rar4EntryLocation {
     /// Absolute offset of the file header block in the archive.
     pub header_offset: u64,
     /// Byte length of the file header (fields only, not data area).
@@ -84,6 +88,10 @@ pub struct Rar4Archive<R: ReadAt> {
     end_block: Bytes,
     /// Local filesystem path, if the source is a local file.
     local_path: Option<PathBuf>,
+    /// Total archive size in bytes.
+    archive_size: u64,
+    /// Whether the entry list has been populated.
+    scan_complete: bool,
 }
 
 impl<R: ReadAt> std::fmt::Debug for Rar4Archive<R> {
@@ -154,17 +162,63 @@ impl<R: ReadAt> Rar4Archive<R> {
             archive_preamble,
             end_block,
             local_path,
+            archive_size: size,
+            scan_complete: true,
         })
     }
 
     /// All entries in the archive (solid and split-volume entries are omitted).
+    ///
+    /// Returns an empty slice if the archive has not yet been scanned.
     pub fn entries(&self) -> &[ArchiveEntry] {
-        &self.entries
+        if self.scan_complete { &self.entries } else { &[] }
     }
 
     /// Entries with OS-generated junk filtered out.
     pub fn entries_clean(&self) -> Vec<&ArchiveEntry> {
         self.entries.iter().filter(|e| !junk::is_junk(e)).collect()
+    }
+
+    /// Per-entry location data, parallel to `entries()`. Used by the cache layer.
+    pub fn locations(&self) -> &[Rar4EntryLocation] {
+        &self.locations
+    }
+
+    /// RAR4 signature + main header bytes (for synthetic archive construction).
+    pub fn archive_preamble_bytes(&self) -> &[u8] {
+        &self.archive_preamble
+    }
+
+    /// Minimal RAR4 end-of-archive block bytes.
+    pub fn end_block_bytes(&self) -> &[u8] {
+        &self.end_block
+    }
+
+    /// Total archive size in bytes.
+    pub fn archive_size(&self) -> u64 {
+        self.archive_size
+    }
+
+    /// Reconstruct a `Rar4Archive` from cached data, skipping all I/O.
+    pub fn from_cached(
+        reader: R,
+        entries: Vec<ArchiveEntry>,
+        locations: Vec<Rar4EntryLocation>,
+        archive_preamble: Bytes,
+        end_block: Bytes,
+        local_path: Option<PathBuf>,
+        archive_size: u64,
+    ) -> Self {
+        Self {
+            reader,
+            entries,
+            locations,
+            archive_preamble,
+            end_block,
+            local_path,
+            archive_size,
+            scan_complete: true,
+        }
     }
 
     /// Bytes that must be transferred to produce this entry.

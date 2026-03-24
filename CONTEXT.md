@@ -2,9 +2,9 @@
 
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
-* **Current Phase:** Phase 2.5 — Engine Expansion (Complete).
-* **Current Active Task:** [HANDOVER] Codecs (BZip2, LZMA, Zstd) + RAR4 support (local + cloud) complete. Next: Phase 3 (Interactive TUI).
-* **Baseline:** 176 tests pass. (archive-core: 108 unit + 35 integration [6 rar + 16 zip + 13 rar4]; archive: 33 unit + 11 cloud_e2e ignored — require live network). Clippy clean.
+* **Current Phase:** Phase 2.75 — TUI Foundations (In Progress).
+* **Current Active Task:** [Step 2] Engine Refactor — Elastic Scan + Progress Reporting.
+* **Baseline:** 176 tests pass. (archive-core: 108 unit + 35 integration [16 rar + 13 zip + 6 rar4]; archive: 33 unit + 11 cloud_e2e ignored). Clippy clean.
 
 
 ---

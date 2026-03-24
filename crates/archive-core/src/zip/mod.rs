@@ -18,8 +18,8 @@ mod crypto;
 mod parse;
 
 pub use index::ZipIndex;
+pub use parse::{AesExtraInfo, ZipEntryLocation};
 use crypto::{ZipCryptoDecryptor, ZipCryptoReader};
-use parse::{AesExtraInfo, ZipEntryLocation};
 
 use std::io::Read;
 use std::sync::{Arc, Mutex};
@@ -80,6 +80,20 @@ impl<R: ReadAt> ZipArchive<R> {
     /// This is the **default** for user-facing output (CLI, UI).
     pub fn entries_clean(&self) -> Vec<&ArchiveEntry> {
         self.entries.iter().filter(|e| !junk::is_junk(e)).collect()
+    }
+
+    /// Per-entry location data, parallel to `entries()`. Used by the cache layer.
+    pub fn locations(&self) -> &[ZipEntryLocation] {
+        &self.locations
+    }
+
+    /// Reconstruct a `ZipArchive` from cached data, skipping all I/O.
+    pub fn from_cached(
+        reader: R,
+        entries: Vec<ArchiveEntry>,
+        locations: Vec<ZipEntryLocation>,
+    ) -> Self {
+        Self { reader, entries, locations }
     }
 
     /// Bytes that must be downloaded and decompressed to produce this entry.

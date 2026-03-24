@@ -9,6 +9,8 @@
 //!
 //! Both slices are indexed identically: `entries[i]` corresponds to `locations[i]`.
 
+use serde::{Deserialize, Serialize};
+
 use crate::codec::CompressionMethod;
 use crate::time::dos_datetime_to_system_time;
 use crate::{ArchiveEntry, CoreError, ReadAt};
@@ -71,28 +73,29 @@ const GP_FLAG_ENCRYPTED: u16 = 1 << 0;
 
 /// ZIP-specific location details for a single entry.
 ///
-/// Never exposed outside `archive-core`. The format parser holds
+/// `pub` for cache serialization in the `archive` crate. The format parser holds
 /// `entries: Vec<ArchiveEntry>` + `locations: Vec<ZipEntryLocation>` as
 /// parallel arrays — same index maps an entry to its location.
-pub(crate) struct ZipEntryLocation {
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ZipEntryLocation {
     /// Byte offset of the Local File Header in the archive.
-    pub(crate) offset: u64,
+    pub offset: u64,
     /// Raw ZIP compression method ID (0 = stored, 8 = deflate, 99 = AES, …).
-    pub(crate) method_id: u16,
+    pub method_id: u16,
     /// CRC-32 of the uncompressed data, as stored in the Central Directory.
     /// For AE-2 entries this is 0; rely on HMAC instead.
-    pub(crate) crc32: u32,
+    pub crc32: u32,
     /// Populated when method_id == 99 (WinZip AES marker).
-    pub(crate) aes_info: Option<AesExtraInfo>,
+    pub aes_info: Option<AesExtraInfo>,
 }
 
 /// Parsed WinZip AES extra field (tag 0x9901).
-#[derive(Debug, Clone)]
-pub(crate) struct AesExtraInfo {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AesExtraInfo {
     /// Key strength: 1 = AES-128, 2 = AES-192, 3 = AES-256.
-    pub(crate) strength: u8,
+    pub strength: u8,
     /// The real compression method (Deflate, Store, …) hidden behind the AES marker.
-    pub(crate) actual_method_id: u16,
+    pub actual_method_id: u16,
 }
 
 // ── Helper: read little-endian integers from a byte slice ─────────────────

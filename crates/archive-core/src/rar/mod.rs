@@ -17,6 +17,8 @@ use bytes::Bytes;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio_util::io::SyncIoBridge;
 
+use serde::{Deserialize, Serialize};
+
 use crate::archive_reader::ArchiveReader;
 use crate::codec::CompressionMethod;
 use crate::io::LocalPath;
@@ -28,11 +30,12 @@ use crate::{ArchiveEntry, CoreError, ReadAt};
 
 // ── Location data (private) ───────────────────────────────────────────────────
 
-/// Private per-entry location data, parallel to `RarArchive::entries`.
+/// Per-entry location data, parallel to `RarArchive::entries`.
 ///
 /// Holds byte offsets and extraction metadata that are not part of the
-/// public `ArchiveEntry` API.
-pub(crate) struct RarEntryLocation {
+/// public `ArchiveEntry` API. `pub` for cache serialization in the `archive` crate.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct RarEntryLocation {
     /// Absolute offset of the file header block in the archive.
     /// Used in cloud extraction (synthetic archive construction).
     pub header_offset: u64,
@@ -228,6 +231,48 @@ impl<R: ReadAt> RarArchive<R> {
     /// only called after a successful scan, so this is a safety net only.
     pub fn entries(&self) -> &[ArchiveEntry] {
         if self.scan_complete { &self.entries } else { &[] }
+    }
+
+    /// Per-entry location data, parallel to `entries()`. Used by the cache layer.
+    pub fn locations(&self) -> &[RarEntryLocation] {
+        &self.locations
+    }
+
+    /// RAR5 signature + main header bytes (for synthetic archive construction).
+    pub fn archive_preamble_bytes(&self) -> &[u8] {
+        &self.archive_preamble
+    }
+
+    /// Minimal end-of-archive block bytes.
+    pub fn end_block_bytes(&self) -> &[u8] {
+        &self.end_block
+    }
+
+    /// Total archive size in bytes.
+    pub fn archive_size(&self) -> u64 {
+        self.archive_size
+    }
+
+    /// Reconstruct a `RarArchive` from cached data, skipping all I/O.
+    pub fn from_cached(
+        reader: R,
+        entries: Vec<ArchiveEntry>,
+        locations: Vec<RarEntryLocation>,
+        archive_preamble: Bytes,
+        end_block: Bytes,
+        local_path: Option<PathBuf>,
+        archive_size: u64,
+    ) -> Self {
+        Self {
+            reader,
+            entries,
+            locations,
+            archive_preamble,
+            end_block,
+            local_path,
+            archive_size,
+            scan_complete: true,
+        }
     }
 
     /// Sequential metadata scan — iterates all blocks from `start_offset`.
