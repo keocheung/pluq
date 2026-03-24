@@ -16,6 +16,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Interactive archive browser.
+    Browse {
+        /// Path to a local file or an HTTP(S) URL.
+        source: String,
+    },
     /// List files inside an archive.
     List {
         /// Path to a local file or an HTTP(S) URL.
@@ -52,6 +57,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
+        Command::Browse { source } => {
+            tui::run(source).await?;
+        }
         Command::List { source, all } => {
             let archive = Archive::open(&source).await?.ready().await?;
 
