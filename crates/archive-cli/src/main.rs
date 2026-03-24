@@ -184,7 +184,7 @@ pub fn default_output_folder(source: &str) -> Option<PathBuf> {
     Some(PathBuf::from(stem))
 }
 
-fn format_size(bytes: u64) -> String {
+pub(crate) fn format_size(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * KB;
     const GB: u64 = 1024 * MB;

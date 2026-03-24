@@ -138,10 +138,8 @@ impl App {
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if matches!(self.phase, AppPhase::Browsing) {
-                    if !self.entries.is_empty() {
-                        self.selected = (self.selected + 1).min(self.entries.len() - 1);
-                    }
+                if matches!(self.phase, AppPhase::Browsing) && !self.entries.is_empty() {
+                    self.selected = (self.selected + 1).min(self.entries.len() - 1);
                 }
             }
             KeyCode::Enter => {
