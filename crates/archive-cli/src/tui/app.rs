@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use archive::{Archive, ArchiveEntry, ArchiveError, Opened, ProgressReporter, ScanInfo};
 use crossterm::event::{KeyCode, KeyEvent};
+use ratatui::widgets::TableState;
 use tokio::sync::mpsc;
 
 /// Messages sent from background tasks to the main loop.
@@ -45,6 +46,7 @@ pub struct App {
     pub selected: usize,
     pub should_quit: bool,
     pub status_message: Option<String>,
+    pub table_state: TableState,
 }
 
 impl App {
@@ -57,6 +59,7 @@ impl App {
             selected: 0,
             should_quit: false,
             status_message: None,
+            table_state: TableState::default().with_selected(Some(0)),
         }
     }
 
@@ -135,11 +138,25 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => {
                 if matches!(self.phase, AppPhase::Browsing) {
                     self.selected = self.selected.saturating_sub(1);
+                    self.table_state.select(Some(self.selected));
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 if matches!(self.phase, AppPhase::Browsing) && !self.entries.is_empty() {
                     self.selected = (self.selected + 1).min(self.entries.len() - 1);
+                    self.table_state.select(Some(self.selected));
+                }
+            }
+            KeyCode::Home | KeyCode::Char('g') => {
+                if matches!(self.phase, AppPhase::Browsing) {
+                    self.selected = 0;
+                    self.table_state.select(Some(0));
+                }
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                if matches!(self.phase, AppPhase::Browsing) && !self.entries.is_empty() {
+                    self.selected = self.entries.len() - 1;
+                    self.table_state.select(Some(self.selected));
                 }
             }
             KeyCode::Enter => {

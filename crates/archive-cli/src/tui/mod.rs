@@ -52,7 +52,7 @@ pub async fn run(source: String) -> Result<(), Box<dyn std::error::Error>> {
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(50));
 
     loop {
-        terminal.draw(|frame| ui::draw(frame, &app))?;
+        terminal.draw(|frame| ui::draw(frame, &mut app))?;
 
         tokio::select! {
             _ = tick.tick() => {}
