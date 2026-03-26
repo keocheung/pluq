@@ -6,6 +6,7 @@ use archive_core::{
 };
 use bytes::Bytes;
 use tokio::io::AsyncWrite;
+use tracing::{debug, info};
 
 use crate::cache::{
     cache_path_for, ArchiveCache, ArchiveFingerprint, FormatCacheState,
@@ -56,6 +57,7 @@ impl Archive {
     /// Transparently checks the cache before invoking any format parser. On a valid
     /// cache hit, returns [`Opened::Ready`] immediately without any I/O scan.
     pub async fn open(source: &str) -> Result<Opened, ArchiveError> {
+        info!(source = %source, "Archive::open");
         let reader = Source::detect(source);
 
         // Sniff the first 8 bytes to select the right parser.
@@ -63,6 +65,7 @@ impl Archive {
             .read_range(0, 8)
             .await
             .map_err(|e| translate_core_error(CoreError::from(e)))?;
+        debug!(magic = ?&magic[..magic.len().min(8)], "magic bytes read");
 
         // ── Implicit cache check ──────────────────────────────────────────────
         let source_size = reader
@@ -88,13 +91,16 @@ impl Archive {
             && let Ok(cache) = ArchiveCache::load(&cache_path)
             && cache.is_valid(&fingerprint)
         {
+            info!(entries = cache.entries.len(), "cache hit — skipping parse");
             let archive = Self::from_cache(cache, reader);
             return Ok(Opened::Ready(archive));
         }
+        debug!("cache miss — parsing from source");
         // ── End cache check ───────────────────────────────────────────────────
 
         // RAR5?
         if magic.len() >= 8 && magic[..8] == RAR5_SIGNATURE {
+            info!("format detected: RAR5");
             let rar = RarArchive::open(reader).await.map_err(translate_core_error)?;
             let info = rar.scan_info();
             return if matches!(info, ScanInfo::Ready) {
@@ -116,6 +122,7 @@ impl Archive {
 
         // RAR4?
         if magic.len() >= 7 && magic[..7] == RAR4_SIGNATURE {
+            info!("format detected: RAR4");
             let rar4 = Rar4Archive::open(reader).await.map_err(translate_core_error)?;
             let info = rar4.scan_info();
             return if matches!(info, ScanInfo::Ready) {
@@ -136,6 +143,7 @@ impl Archive {
         }
 
         // Fall back to ZIP (reads EOCD from the end of the file).
+        info!("format detected: ZIP (fallback)");
         let zip = ZipArchive::open(reader).await.map_err(translate_core_error)?;
         let archive = Self { inner: ArchiveInner::Zip(zip) };
         // Save cache for ZIP (listing is fast but caching saves 2 range requests on reopen).
@@ -254,6 +262,7 @@ impl Archive {
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
     ) -> Result<u64, ArchiveError> {
+        debug!(name = %entry.name, "Archive::extract delegating to format parser");
         match &self.inner {
             ArchiveInner::Zip(z) => z.extract(entry, sink, progress, password).await,
             ArchiveInner::Rar(r) => r.extract(entry, sink, progress, password).await,

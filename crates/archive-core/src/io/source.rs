@@ -7,6 +7,7 @@ use std::path::Path;
 
 use bytes::Bytes;
 use tokio::io::AsyncRead;
+use tracing::info;
 
 use super::{HttpReadAt, LocalReadAt, ReadAt};
 use crate::io::ReadError;
@@ -39,12 +40,14 @@ impl Source {
     /// - Everything else is treated as a local file path.
     pub fn detect(source: &str) -> Self {
         if source.starts_with("http://") || source.starts_with("https://") {
+            info!(source = %source, "source detected as HTTP");
             let client = reqwest::Client::builder()
                 .user_agent("archive-sniper")
                 .build()
                 .expect("failed to create HTTP client");
             Source::Http(HttpReadAt::new(source, client))
         } else {
+            info!(source = %source, "source detected as local file");
             Source::Local(LocalReadAt::new(source))
         }
     }

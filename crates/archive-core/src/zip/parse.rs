@@ -11,6 +11,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use tracing::{debug, trace};
+
 use crate::codec::CompressionMethod;
 use crate::time::dos_datetime_to_system_time;
 use crate::{ArchiveEntry, CoreError, ReadAt};
@@ -146,6 +148,7 @@ pub struct Eocd {
 /// locate the ZIP64 EOCD Locator (immediately before the standard EOCD) and read
 /// the ZIP64 EOCD Record to get the real 64-bit field values.
 pub async fn find_eocd(reader: &impl ReadAt) -> Result<Eocd, CoreError> {
+    debug!("searching for ZIP EOCD");
     let file_size = reader.size().await.map_err(CoreError::Io)?;
 
     if file_size < EOCD_MIN_SIZE as u64 {
@@ -187,6 +190,7 @@ pub async fn find_eocd(reader: &impl ReadAt) -> Result<Eocd, CoreError> {
         || cd_offset_32 == ZIP64_MAGIC32;
 
     if !is_zip64 {
+        debug!(file_size, entry_count = entry_count_16, "standard ZIP EOCD found");
         return Ok(Eocd {
             entry_count: entry_count_16 as u64,
             cd_size: cd_size_32 as u64,
@@ -195,6 +199,7 @@ pub async fn find_eocd(reader: &impl ReadAt) -> Result<Eocd, CoreError> {
     }
 
     // ── ZIP64 path ────────────────────────────────────────────────────────
+    debug!(file_size, "ZIP64 sentinels detected, reading ZIP64 EOCD");
     // The ZIP64 EOCD Locator sits immediately before the standard EOCD.
     if pos < EOCD64_LOCATOR_SIZE {
         return Err(CoreError::InvalidFormat {
@@ -281,6 +286,13 @@ pub async fn parse_central_directory(
             ),
         });
     }
+
+    debug!(
+        cd_offset = eocd.cd_offset,
+        cd_size = eocd.cd_size,
+        entry_count = eocd.entry_count,
+        "reading Central Directory"
+    );
 
     let cd_bytes = reader
         .read_range(eocd.cd_offset, eocd.cd_size)
@@ -387,6 +399,14 @@ pub async fn parse_central_directory(
             crc32,
             aes_info,
         });
+
+        trace!(
+            index,
+            name = %entries.last().unwrap().name,
+            compressed = compressed_size,
+            uncompressed = uncompressed_size,
+            "parsed CD entry"
+        );
 
         cursor = name_end + extra_len + comment_len;
     }

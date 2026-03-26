@@ -27,6 +27,8 @@ use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio_util::io::SyncIoBridge;
 
+use tracing::{debug, info, trace, warn};
+
 use crate::archive_reader::ArchiveReader;
 use crate::codec::{build_decoder, CompressionMethod};
 use crate::junk;
@@ -57,8 +59,16 @@ impl<R: ReadAt> ZipArchive<R> {
     ///
     /// This issues exactly **2 range reads** (or 1 if the file is small).
     pub async fn open(reader: R) -> Result<Self, CoreError> {
+        info!("opening ZIP archive");
         let eocd = parse::find_eocd(&reader).await?;
+        debug!(
+            cd_offset = eocd.cd_offset,
+            cd_size = eocd.cd_size,
+            entry_count = eocd.entry_count,
+            "EOCD found"
+        );
         let (entries, locations) = parse::parse_central_directory(&reader, &eocd).await?;
+        info!(entries = entries.len(), "ZIP archive opened");
 
         Ok(Self {
             reader,
@@ -126,7 +136,16 @@ impl<R: ReadAt> ZipArchive<R> {
             return Ok(0);
         }
 
+        info!(
+            name = %entry.name,
+            compressed = entry.compressed_size,
+            uncompressed = entry.uncompressed_size,
+            encrypted = entry.is_encrypted,
+            "ZIP extract start"
+        );
+
         if entry.is_encrypted && password.is_none() {
+            debug!(name = %entry.name, "password required but not provided");
             return Err(CoreError::PasswordRequired);
         }
 
@@ -321,7 +340,19 @@ impl<R: ReadAt> ZipArchive<R> {
             // verified in decrypt_winzip_aes; AE-2 entries have CRC == 0).
             if !skip_crc_check {
                 let actual_crc = hasher.finalize();
+                trace!(
+                    entry = %entry_name,
+                    expected = format_args!("{expected_crc:#010x}"),
+                    actual = format_args!("{actual_crc:#010x}"),
+                    "CRC32 verification"
+                );
                 if actual_crc != expected_crc {
+                    warn!(
+                        entry = %entry_name,
+                        expected = format_args!("{expected_crc:#010x}"),
+                        actual = format_args!("{actual_crc:#010x}"),
+                        "CRC32 mismatch"
+                    );
                     let mut p = progress.lock().unwrap();
                     p.on_entry_complete(&entry_name, false);
                     return Err(CoreError::CrcMismatch {
@@ -352,6 +383,7 @@ impl<R: ReadAt> ZipArchive<R> {
                 detail: format!("write to sink failed: {e}"),
             })?;
 
+        info!(name = %entry.name, bytes_written, "ZIP extract complete");
         Ok(bytes_written)
     }
 

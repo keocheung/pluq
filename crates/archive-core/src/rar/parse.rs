@@ -7,6 +7,8 @@
 // Suppress dead_code until those steps are implemented.
 #![allow(dead_code)]
 
+use tracing::trace;
+
 use crate::CoreError;
 
 // ── Signatures ────────────────────────────────────────────────────────────────
@@ -135,6 +137,15 @@ pub(crate) fn parse_block_header(
 
     let body_offset = pos;
     let total_size = crc_end as u64 + data_size;
+
+    trace!(
+        archive_offset,
+        block_type,
+        header_size,
+        data_size,
+        total_size,
+        "parsed block header"
+    );
 
     Ok(RawBlockHeader {
         header_crc,
@@ -288,6 +299,16 @@ pub(crate) fn parse_file_header(
     } else {
         (None, None, None)
     };
+
+    trace!(
+        name = %name,
+        unpacked_size,
+        method = compression.method,
+        solid = compression.solid,
+        is_directory,
+        encrypted = encryption.is_some(),
+        "parsed file header"
+    );
 
     Ok(RarFileHeader {
         raw,

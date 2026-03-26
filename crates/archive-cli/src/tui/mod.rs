@@ -12,6 +12,7 @@ use crossterm::{
 };
 use futures::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend};
+use tracing::{debug, info};
 
 fn init_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
     enable_raw_mode()?;
@@ -28,6 +29,7 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io
 }
 
 pub async fn run(source: String) -> Result<(), Box<dyn std::error::Error>> {
+    info!(source = %source, "TUI starting");
     // Install panic hook that restores terminal before printing panic info.
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -42,6 +44,7 @@ pub async fn run(source: String) -> Result<(), Box<dyn std::error::Error>> {
     let mut app = app::App::new(source.clone());
 
     // Spawn the initial archive open task.
+    debug!("spawning Archive::open task");
     let tx_open = tx.clone();
     tokio::spawn(async move {
         let result = archive::Archive::open(&source).await;
@@ -73,6 +76,7 @@ pub async fn run(source: String) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    info!("TUI shutting down");
     restore_terminal(&mut terminal)?;
     Ok(())
 }

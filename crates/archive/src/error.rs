@@ -2,6 +2,7 @@ use archive_core::io::read_error::{
     NetworkPhase, ReadErrorKind, ReadFailure, SourceInfo,
 };
 use archive_core::{CoreError, ReadError};
+use tracing::{debug, warn};
 
 // ── ArchiveError ────────────────────────────────────────────────────────────────
 
@@ -50,6 +51,7 @@ pub enum ArchiveError {
 /// state layer. Transport errors are forwarded opaquely so decorators
 /// (auth, metering, etc.) can downcast their own payloads.
 pub fn translate_core_error(err: CoreError) -> ArchiveError {
+    debug!(core_error = %err, "translating CoreError → ArchiveError");
     match err {
         // I/O errors: route by ReadError variant.
         CoreError::Io(ReadError::Transport(boxed)) => ArchiveError::Transport(boxed),
@@ -86,12 +88,18 @@ pub fn translate_core_error(err: CoreError) -> ArchiveError {
         CoreError::UnsupportedFeature { detail } => ArchiveError::UnsupportedFormat { detail },
 
         // Security.
-        CoreError::PathTraversal { path } => ArchiveError::SecurityRisk {
-            detail: format!("dangerous path: {path}"),
-        },
-        CoreError::SymlinkTargetEscape { path, target } => ArchiveError::SecurityRisk {
-            detail: format!("dangerous symlink: {path} -> {target}"),
-        },
+        CoreError::PathTraversal { ref path } => {
+            warn!(path = %path, "path traversal detected");
+            ArchiveError::SecurityRisk {
+                detail: format!("dangerous path: {path}"),
+            }
+        }
+        CoreError::SymlinkTargetEscape { ref path, ref target } => {
+            warn!(path = %path, target = %target, "symlink escape detected");
+            ArchiveError::SecurityRisk {
+                detail: format!("dangerous symlink: {path} -> {target}"),
+            }
+        }
 
         // Cancellation.
         CoreError::Cancelled => ArchiveError::Cancelled,

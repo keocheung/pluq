@@ -27,6 +27,8 @@ pub use zstd::ZstdDecoder;
 
 use std::io::{self, Read, Write};
 
+use tracing::debug;
+
 use crate::CoreError;
 
 // ── CompressionMethod ──────────────────────────────────────────────────────
@@ -136,6 +138,7 @@ pub fn build_decoder<'a>(
     input: impl Read + Send + 'a,
     properties: &[u8],
 ) -> Result<Box<dyn Decoder + 'a>, CoreError> {
+    debug!(method = %method, properties_len = properties.len(), "building decoder");
     match method {
         CompressionMethod::Store => Ok(Box::new(StoreDecoder::new(input))),
         CompressionMethod::Deflate => Ok(Box::new(DeflateDecoder::new(input))),

@@ -19,6 +19,8 @@ use tokio_util::io::SyncIoBridge;
 
 use serde::{Deserialize, Serialize};
 
+use tracing::{debug, info};
+
 use crate::archive_reader::ArchiveReader;
 use crate::codec::CompressionMethod;
 use crate::io::LocalPath;
@@ -131,8 +133,10 @@ impl<R: ReadAt> RarArchive<R> {
     where
         R: LocalPath,
     {
+        info!("opening RAR archive");
         let local_path = reader.local_path().map(|p| p.to_path_buf());
         let size = reader.size().await?;
+        debug!(size, local = local_path.is_some(), "RAR archive size determined");
 
         // 1. Verify RAR5 signature (8 bytes at offset 0).
         let sig = reader.read_range(0, 8).await?;
@@ -176,9 +180,11 @@ impl<R: ReadAt> RarArchive<R> {
             && let Some(qo_offset) = locator.quick_open_offset
         {
             let qo_abs = main_header.raw.archive_offset + qo_offset;
+            debug!(qo_offset = qo_abs, "attempting Quick Open");
             if let Ok(Some((entries, locations))) =
                 Self::try_quick_open(&reader, qo_abs, size).await
             {
+                info!(entries = entries.len(), "RAR opened via Quick Open");
                 return Ok(Self {
                     reader,
                     entries,
@@ -195,7 +201,9 @@ impl<R: ReadAt> RarArchive<R> {
         // 5. QO not available or failed.
         //    - Local source: run elastic scan immediately.
         //    - HTTP source: defer the scan — caller must invoke scan_metadata().
+        debug!("Quick Open unavailable or failed, falling back");
         if local_path.is_some() {
+            debug!("local source: running immediate elastic scan");
             let no_op: Arc<Mutex<dyn ProgressReporter>> = Arc::new(Mutex::new(()));
             let (entries, locations) =
                 Self::run_elastic_scan(&reader, preamble_end as u64, size, &no_op).await?;
@@ -212,6 +220,7 @@ impl<R: ReadAt> RarArchive<R> {
         }
 
         // HTTP source without QO — defer scan.
+        info!("HTTP source without Quick Open — deferring metadata scan");
         Ok(Self {
             reader,
             entries: vec![],
@@ -290,6 +299,7 @@ impl<R: ReadAt> RarArchive<R> {
         progress: &Arc<Mutex<dyn ProgressReporter>>,
     ) -> Result<(Vec<ArchiveEntry>, Vec<RarEntryLocation>), CoreError> {
         const LARGE_THRESHOLD: u64 = 10 * 1024 * 1024; // 10 MiB
+        debug!(start_offset, size, "elastic scan starting");
 
         let mut entries: Vec<ArchiveEntry> = Vec::new();
         let mut locations: Vec<RarEntryLocation> = Vec::new();
@@ -462,6 +472,7 @@ impl<R: ReadAt> RarArchive<R> {
                 .on_scan_progress(offset, entries.len());
         }
 
+        info!(entries = entries.len(), "elastic scan complete");
         Ok((entries, locations))
     }
 
@@ -494,7 +505,18 @@ impl<R: ReadAt> RarArchive<R> {
 
         let loc = &self.locations[entry.index];
 
+        info!(
+            name = %entry.name,
+            method = loc.method,
+            compressed = loc.data_size,
+            uncompressed = entry.uncompressed_size,
+            encrypted = loc.is_encrypted,
+            solid = loc.is_solid,
+            "RAR extract start"
+        );
+
         if loc.is_encrypted && password.is_none() {
+            debug!(name = %entry.name, "password required but not provided");
             return Err(CoreError::PasswordRequired);
         }
 
@@ -506,12 +528,19 @@ impl<R: ReadAt> RarArchive<R> {
 
         // Encrypted entries must go through unrar (it handles AES decryption).
         if loc.is_encrypted {
+            debug!(name = %entry.name, "encrypted entry — routing to unrar");
             return self.extract_compressed(entry, loc, sink, progress, password).await;
         }
 
         match loc.method {
-            0 => self.extract_store(entry, loc, sink, progress).await,
-            1..=5 => self.extract_compressed(entry, loc, sink, progress, None).await,
+            0 => {
+                debug!(name = %entry.name, "store extraction (method 0)");
+                self.extract_store(entry, loc, sink, progress).await
+            }
+            1..=5 => {
+                debug!(name = %entry.name, method = loc.method, "compressed extraction via unrar");
+                self.extract_compressed(entry, loc, sink, progress, None).await
+            }
             m => Err(CoreError::UnsupportedCompression {
                 algorithm: format!("RAR method {m}"),
             }),
@@ -673,10 +702,12 @@ impl<R: ReadAt> RarArchive<R> {
         password: Option<&[u8]>,
     ) -> Result<u64, CoreError> {
         if let Some(path) = &self.local_path {
+            debug!(name = %entry.name, path = %path.display(), "unrar local path");
             return self
                 .extract_via_unrar_local(entry, loc, path, sink, progress, password)
                 .await;
         }
+        debug!(name = %entry.name, "unrar cloud path (synthetic archive)");
         self.extract_via_unrar_cloud(entry, loc, sink, progress, password)
             .await
     }

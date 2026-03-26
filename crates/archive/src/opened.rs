@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use archive_core::{ArchiveReader, ProgressReporter, ScanInfo};
+use tracing::{debug, info};
 
 use crate::archive::{Archive, ArchiveInner};
 use crate::cache::{cache_path_for, ArchiveFingerprint};
@@ -60,8 +61,11 @@ impl PendingArchive {
         mut self,
         progress: Arc<Mutex<dyn ProgressReporter>>,
     ) -> Result<Archive, ArchiveError> {
+        info!(scan_info = ?self.info, "PendingArchive::scan starting");
         match &mut self.inner {
-            ArchiveInner::Zip(_) => {}  // no-op, should not happen
+            ArchiveInner::Zip(_) => {
+                debug!("ZIP scan no-op (should not happen)");
+            }
             ArchiveInner::Rar(r) => {
                 r.scan_metadata(progress)
                     .await
@@ -75,9 +79,11 @@ impl PendingArchive {
         }
 
         let archive = Archive { inner: self.inner };
+        info!(entries = archive.entries().len(), "PendingArchive::scan complete");
 
         // ── Implicit cache save (failure silently ignored) ────────────────
         if let Some(cache_path) = cache_path_for(&self.source) {
+            debug!(cache_path = %cache_path.display(), "saving scan result to cache");
             let _ = archive.save_cache(&self.fingerprint, &cache_path);
         }
 

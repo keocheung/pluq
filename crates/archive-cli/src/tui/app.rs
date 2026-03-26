@@ -6,6 +6,7 @@ use archive::{Archive, ArchiveEntry, ArchiveError, Opened, ProgressReporter, Sca
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::TableState;
 use tokio::sync::mpsc;
+use tracing::{debug, error, info, warn};
 
 /// Messages sent from background tasks to the main loop.
 pub enum AppMessage {
@@ -70,6 +71,8 @@ impl App {
     ) {
         match msg {
             AppMessage::ArchiveOpened(Ok(Opened::Ready(archive))) => {
+                let count = archive.entries_clean().len();
+                info!(entries = count, "archive opened → Browsing");
                 self.entries = archive.entries_clean().into_iter().cloned().collect();
                 self.archive = Some(Arc::new(archive));
                 self.phase = AppPhase::Browsing;
@@ -79,7 +82,9 @@ impl App {
                     ScanInfo::Required { estimated_bytes, .. } => *estimated_bytes,
                     ScanInfo::Ready => 0,
                 };
+                info!(total_bytes, "archive needs scan → Scanning");
                 self.phase = AppPhase::Scanning { total_bytes, bytes_scanned: 0, entries_found: 0 };
+                debug!("spawning scan task");
                 let tx_scan = tx.clone();
                 tokio::spawn(async move {
                     let progress = Arc::new(Mutex::new(TuiProgressReporter::new(tx_scan.clone())));
@@ -88,6 +93,7 @@ impl App {
                 });
             }
             AppMessage::ArchiveOpened(Err(e)) => {
+                error!(error = %e, "archive open failed → Error");
                 self.phase = AppPhase::Error(e.to_string());
             }
             AppMessage::ScanProgress { bytes_scanned, entries_found } => {
@@ -99,11 +105,14 @@ impl App {
                 }
             }
             AppMessage::ScanComplete(Ok(archive)) => {
+                let count = archive.entries_clean().len();
+                info!(entries = count, "scan complete → Browsing");
                 self.entries = archive.entries_clean().into_iter().cloned().collect();
                 self.archive = Some(Arc::new(archive));
                 self.phase = AppPhase::Browsing;
             }
             AppMessage::ScanComplete(Err(e)) => {
+                error!(error = %e, "scan failed → Error");
                 self.phase = AppPhase::Error(e.to_string());
             }
             AppMessage::ExtractionProgress { bytes_so_far } => {
@@ -117,11 +126,13 @@ impl App {
                 } else {
                     String::new()
                 };
+                info!(name = %name, bytes, "extraction complete → Browsing");
                 self.phase = AppPhase::Browsing;
                 self.status_message =
                     Some(format!("Extracted '{}' ({})", name, crate::format_size(bytes)));
             }
             AppMessage::ExtractionComplete(Err(e)) => {
+                warn!(error = %e, "extraction failed → Browsing");
                 self.phase = AppPhase::Browsing;
                 self.status_message = Some(format!("Extraction failed: {e}"));
             }
@@ -174,6 +185,12 @@ impl App {
                     let entry_name = entry.name.clone();
                     let total_bytes = entry.uncompressed_size;
 
+                    info!(
+                        name = %entry_name,
+                        total_bytes,
+                        "user requested extraction → Extracting"
+                    );
+
                     self.phase = AppPhase::Extracting {
                         entry_name: entry_name.clone(),
                         total_bytes,
@@ -190,6 +207,7 @@ impl App {
                     let progress =
                         Arc::new(Mutex::new(TuiProgressReporter::new(tx_extract.clone())));
 
+                    debug!(output = %output_path.display(), "spawning extraction task");
                     tokio::spawn(async move {
                         if let Some(parent) = output_path.parent() {
                             let _ = tokio::fs::create_dir_all(parent).await;

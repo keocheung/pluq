@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt};
+use tracing::{debug, trace, warn};
 
 use super::ReadAt;
 use super::read_error::{ReadErrorKind, ReadFailure, ReadOperation, SourceInfo};
@@ -26,6 +27,7 @@ impl LocalReadAt {
 
 /// Convert a `std::io::Error` from a local file operation into a [`ReadError`].
 fn io_err_to_read(e: std::io::Error, path: &Path, op: ReadOperation) -> ReadError {
+    warn!(path = %path.display(), operation = ?op, error = %e, "local I/O error");
     ReadError::Failed(Box::new(ReadFailure {
         source: SourceInfo::LocalFile {
             path: path.to_path_buf(),
@@ -44,6 +46,7 @@ impl ReadAt for LocalReadAt {
             return Ok(Bytes::new());
         }
 
+        trace!(path = %self.path.display(), offset, len, "local read_range");
         let mut file = tokio::fs::File::open(&self.path)
             .await
             .map_err(|e| io_err_to_read(e, &self.path, ReadOperation::Open))?;
@@ -83,6 +86,7 @@ impl ReadAt for LocalReadAt {
             return Ok(Box::new(tokio::io::empty()) as Box<dyn AsyncRead + Send + Unpin>);
         }
 
+        debug!(path = %self.path.display(), offset, len, "local read_stream");
         let mut file = tokio::fs::File::open(&self.path)
             .await
             .map_err(|e| io_err_to_read(e, &self.path, ReadOperation::Open))?;
@@ -114,6 +118,7 @@ impl ReadAt for LocalReadAt {
         let meta = tokio::fs::metadata(&self.path)
             .await
             .map_err(|e| io_err_to_read(e, &self.path, ReadOperation::SizeCheck))?;
+        debug!(path = %self.path.display(), size = meta.len(), "local size check");
         Ok(meta.len())
     }
 }

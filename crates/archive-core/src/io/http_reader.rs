@@ -7,6 +7,7 @@ use reqwest::{
 use tokio::io::AsyncRead;
 use tokio::sync::OnceCell;
 use tokio_util::io::StreamReader;
+use tracing::{debug, trace, warn};
 
 use super::ReadAt;
 use super::read_error::{NetworkPhase, ReadErrorKind, ReadFailure, ReadOperation, SourceInfo};
@@ -67,10 +68,16 @@ impl HttpReadAt {
     /// On first call: sends a plain GET (no Range), follows all redirects,
     /// and caches the final URL.  Subsequent calls return the cached value.
     async fn effective_url(&self) -> Result<String, ReadError> {
-        self.resolved_url
+        let is_first = self.resolved_url.get().is_none();
+        let url = self
+            .resolved_url
             .get_or_try_init(|| resolve_url(&self.client, &self.url, &self.extra_headers))
             .await
-            .cloned()
+            .cloned()?;
+        if is_first {
+            debug!(original = %self.url, resolved = %url, "URL resolved");
+        }
+        Ok(url)
     }
 }
 
@@ -93,6 +100,8 @@ async fn resolve_url(
 ) -> Result<String, ReadError> {
     let op = ReadOperation::SizeCheck;
 
+    debug!(url = %url, "resolving redirect chain");
+
     let resp = client
         .get(url)
         .headers(extra_headers.clone())
@@ -113,11 +122,13 @@ async fn resolve_url(
     // Non-success (e.g. 404 from a test mock): keep the original URL so the
     // subsequent range request surfaces a proper HTTP error.
     if !status.is_success() {
+        warn!(url = %url, status = %status, "redirect resolution got non-success, keeping original URL");
         return Ok(url.to_string());
     }
 
     // HTML = Google Drive confirmation page → append confirm=t to bypass.
     if content_type.contains("text/html") {
+        debug!(resolved = %resolved, "HTML response detected (Google Drive confirmation), retrying with confirm=t");
         let confirm_url = if resolved.contains('?') {
             format!("{resolved}&confirm=t")
         } else {
@@ -131,14 +142,17 @@ async fn resolve_url(
             .map_err(|e| classify_reqwest_error(e, &confirm_url, op))?;
         let final_url = resp2.url().to_string();
         drop(resp2);
+        debug!(final_url = %final_url, "Google Drive confirmation bypass resolved");
         return Ok(final_url);
     }
 
+    trace!(original = %url, resolved = %resolved, "redirect chain followed");
     Ok(resolved)
 }
 
 /// Classify a `reqwest::Error` into a [`ReadError`].
 fn classify_reqwest_error(e: reqwest::Error, url: &str, op: ReadOperation) -> ReadError {
+    warn!(url = %url, operation = ?op, error = %e, "HTTP request failed");
     let kind = if e.is_timeout() {
         ReadErrorKind::NetworkTimeout {
             phase: NetworkPhase::Transfer,
@@ -178,6 +192,8 @@ async fn send_range_request(
     let range_value = format!("bytes={offset}-{range_end}");
     let op = ReadOperation::ReadRange { offset, len };
 
+    trace!(url = %url, offset, len, range = %range_value, "sending range request");
+
     let response = client
         .get(url)
         .headers(extra_headers.clone())
@@ -203,16 +219,35 @@ async fn send_range_request(
             len,
             size: 0,
         }),
-        status => Err(ReadError::Failed(Box::new(ReadFailure {
-            source: SourceInfo::Http { url: url.to_string() },
-            operation: op,
-            kind: ReadErrorKind::HttpStatus {
-                code: status.as_u16(),
-                headers: vec![],
-                body: None,
-            },
-            diagnostic: format!("unexpected HTTP status {status} for range request"),
-        }))),
+        status => {
+            // Capture full server response for diagnostics — invaluable when
+            // cloud providers return HTML error pages or JSON error bodies.
+            let resp_headers: Vec<(String, String)> = response
+                .headers()
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("<binary>").to_string()))
+                .collect();
+            let resp_body = response.bytes().await.ok();
+
+            warn!(
+                url = %url,
+                status = status.as_u16(),
+                headers = ?resp_headers,
+                body = resp_body.as_ref().map(|b| String::from_utf8_lossy(&b[..b.len().min(2048)])).as_deref().unwrap_or("<read failed>"),
+                "unexpected HTTP status for range request"
+            );
+
+            Err(ReadError::Failed(Box::new(ReadFailure {
+                source: SourceInfo::Http { url: url.to_string() },
+                operation: op,
+                kind: ReadErrorKind::HttpStatus {
+                    code: status.as_u16(),
+                    headers: resp_headers,
+                    body: resp_body,
+                },
+                diagnostic: format!("unexpected HTTP status {status} for range request"),
+            })))
+        }
     }
 }
 
@@ -223,6 +258,7 @@ impl ReadAt for HttpReadAt {
         }
 
         let url = self.effective_url().await?;
+        debug!(offset, len, "http read_range start");
         let op = ReadOperation::ReadRange { offset, len };
         let response =
             send_range_request(&self.client, &url, &self.extra_headers, offset, len).await?;
@@ -232,6 +268,7 @@ impl ReadAt for HttpReadAt {
             .await
             .map_err(|e| classify_reqwest_error(e, &url, op))?;
 
+        trace!(offset, len, received = body.len(), "http read_range complete");
         Ok(body)
     }
 
@@ -245,6 +282,7 @@ impl ReadAt for HttpReadAt {
         }
 
         let url = self.effective_url().await?;
+        debug!(offset, len, "http read_stream start");
         let response =
             send_range_request(&self.client, &url, &self.extra_headers, offset, len).await?;
 
@@ -265,6 +303,7 @@ impl ReadAt for HttpReadAt {
     }
 
     async fn size(&self) -> Result<u64, ReadError> {
+        debug!("http size check (HEAD request)");
         let op = ReadOperation::SizeCheck;
         let url = self.effective_url().await?;
 
@@ -276,10 +315,26 @@ impl ReadAt for HttpReadAt {
             .await
             .map_err(|e| classify_reqwest_error(e, &url, op.clone()))?;
 
+        // Log all HEAD response headers at debug — essential for diagnosing
+        // cloud provider quirks (missing Content-Length, wrong Accept-Ranges, etc.)
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let head_headers: Vec<(&str, &str)> = response
+                .headers()
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.to_str().unwrap_or("<binary>")))
+                .collect();
+            debug!(
+                status = response.status().as_u16(),
+                headers = ?head_headers,
+                "HEAD response"
+            );
+        }
+
         // Fail early if the server explicitly declares no range support.
         if let Some(accept_ranges) = response.headers().get("accept-ranges")
             && accept_ranges.as_bytes() == b"none"
         {
+            warn!(url = %url, "server returned Accept-Ranges: none");
             return Err(ReadError::Failed(Box::new(ReadFailure {
                 source: SourceInfo::Http { url: url.clone() },
                 operation: op.clone(),
@@ -292,6 +347,7 @@ impl ReadAt for HttpReadAt {
             .headers()
             .get(CONTENT_LENGTH)
             .ok_or_else(|| {
+                warn!(url = %url, "server did not return Content-Length header");
                 ReadError::Failed(Box::new(ReadFailure {
                     source: SourceInfo::Http { url: url.clone() },
                     operation: op.clone(),
@@ -318,6 +374,7 @@ impl ReadAt for HttpReadAt {
                 }))
             })?;
 
+        debug!(size = content_length, "http size check complete");
         Ok(content_length)
     }
 }

@@ -3,6 +3,7 @@ mod tui;
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
+use tracing::info;
 
 use archive::Archive;
 
@@ -10,6 +11,9 @@ use archive::Archive;
 #[derive(Parser)]
 #[command(name = "snipe", version, about)]
 struct Cli {
+    /// Enable debug logging to archive-sniper.log (or set ARCHIVE_SNIPER_LOG=debug).
+    #[arg(long, global = true)]
+    debug: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -55,6 +59,15 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+
+    // ── Logging setup ────────────────────────────────────────────────────
+    // Writes to archive-sniper.log in the current directory. Activated by
+    // --debug flag or ARCHIVE_SNIPER_LOG env var (e.g. ARCHIVE_SNIPER_LOG=trace).
+    // When neither is set, no subscriber is installed and all tracing macros
+    // are zero-cost no-ops.
+    let _log_guard = init_logging(cli.debug);
+
+    info!(command = ?std::env::args().collect::<Vec<_>>(), "snipe starting");
 
     match cli.command {
         Command::Browse { source } => {
@@ -198,6 +211,42 @@ pub(crate) fn format_size(bytes: u64) -> String {
     } else {
         format!("{bytes} B")
     }
+}
+
+/// Initialize file-based logging. Returns a guard that must be held alive for the
+/// duration of the program (dropping it flushes the writer).
+///
+/// Activated by `--debug` flag (sets level to `debug`) or the `ARCHIVE_SNIPER_LOG`
+/// env var (accepts any tracing level: `trace`, `debug`, `info`, `warn`, `error`).
+/// When neither is set, returns `None` and all tracing macros are zero-cost no-ops.
+fn init_logging(debug_flag: bool) -> Option<tracing_appender::non_blocking::WorkerGuard> {
+    let env_level = std::env::var("ARCHIVE_SNIPER_LOG").ok();
+
+    let level = if debug_flag {
+        Some("debug".to_string())
+    } else {
+        env_level
+    };
+
+    let level = level?;
+
+    let file_appender = tracing_appender::rolling::never(".", "archive-sniper.log");
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+
+    tracing_subscriber::fmt()
+        .with_writer(non_blocking)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::builder()
+                .parse_lossy(format!("archive_core={level},archive={level},archive_cli={level}"))
+        )
+        .with_ansi(false)
+        .with_target(true)
+        .with_thread_ids(true)
+        .with_file(true)
+        .with_line_number(true)
+        .init();
+
+    Some(guard)
 }
 
 #[cfg(test)]
