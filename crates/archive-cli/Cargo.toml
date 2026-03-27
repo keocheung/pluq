@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 archive = { path = "../archive" }
+archive-gdrive = { path = "../archive-gdrive" }
 clap = { version = "4", features = ["derive"] }
 crossterm = { version = "0.28", features = ["event-stream"] }
 futures = "0.3"

@@ -28,7 +28,10 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io
     Ok(())
 }
 
-pub async fn run(source: String) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run(
+    source: String,
+    reader: Option<archive::Source>,
+) -> Result<(), Box<dyn std::error::Error>> {
     info!(source = %source, "TUI starting");
     // Install panic hook that restores terminal before printing panic info.
     let original_hook = std::panic::take_hook();
@@ -47,7 +50,10 @@ pub async fn run(source: String) -> Result<(), Box<dyn std::error::Error>> {
     debug!("spawning Archive::open task");
     let tx_open = tx.clone();
     tokio::spawn(async move {
-        let result = archive::Archive::open(&source).await;
+        let result = match reader {
+            Some(r) => archive::Archive::open_reader(&source, r).await,
+            None => archive::Archive::open(&source).await,
+        };
         let _ = tx_open.send(app::AppMessage::ArchiveOpened(result));
     });
 

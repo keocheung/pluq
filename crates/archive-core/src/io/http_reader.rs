@@ -2,7 +2,7 @@ use bytes::Bytes;
 use futures_util::TryStreamExt;
 use reqwest::{
     Client, StatusCode,
-    header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, HeaderValue, RANGE},
+    header::{CONTENT_LENGTH, HeaderMap, HeaderValue, RANGE},
 };
 use tokio::io::AsyncRead;
 use tokio::sync::OnceCell;
@@ -84,15 +84,12 @@ impl HttpReadAt {
 /// Follow any redirect chain for `url` and return the final URL.
 ///
 /// Sends a plain GET (no `Range` header) so that intermediary services
-/// (e.g. Google Drive, short-links) perform their full redirect flow.
+/// (e.g. short-links) perform their full redirect flow.
 /// The response body is never read — the connection is dropped immediately
-/// after inspecting the status and Content-Type.
+/// after inspecting the status.
 ///
-/// Special cases:
-/// - Non-2xx response (e.g. 404 from a test mock): returns `url` unchanged
-///   so the caller can surface a proper error on the subsequent range request.
-/// - HTML response: indicates a Google Drive virus-scan confirmation page.
-///   Retries once with `?confirm=t` appended to bypass it.
+/// Special case: non-2xx response (e.g. 404 from a test mock) returns `url`
+/// unchanged so the caller can surface a proper error on the subsequent range request.
 async fn resolve_url(
     client: &Client,
     url: &str,
@@ -107,15 +104,9 @@ async fn resolve_url(
         .headers(extra_headers.clone())
         .send()
         .await
-        .map_err(|e| classify_reqwest_error(e, url, op.clone()))?;
+        .map_err(|e| classify_reqwest_error(e, url, op))?;
 
     let status = resp.status();
-    let content_type = resp
-        .headers()
-        .get(CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_owned();
     let resolved = resp.url().to_string();
     drop(resp); // abort body download — we only needed the URL
 
@@ -124,26 +115,6 @@ async fn resolve_url(
     if !status.is_success() {
         warn!(url = %url, status = %status, "redirect resolution got non-success, keeping original URL");
         return Ok(url.to_string());
-    }
-
-    // HTML = Google Drive confirmation page → append confirm=t to bypass.
-    if content_type.contains("text/html") {
-        debug!(resolved = %resolved, "HTML response detected (Google Drive confirmation), retrying with confirm=t");
-        let confirm_url = if resolved.contains('?') {
-            format!("{resolved}&confirm=t")
-        } else {
-            format!("{resolved}?confirm=t")
-        };
-        let resp2 = client
-            .get(&confirm_url)
-            .headers(extra_headers.clone())
-            .send()
-            .await
-            .map_err(|e| classify_reqwest_error(e, &confirm_url, op))?;
-        let final_url = resp2.url().to_string();
-        drop(resp2);
-        debug!(final_url = %final_url, "Google Drive confirmation bypass resolved");
-        return Ok(final_url);
     }
 
     trace!(original = %url, resolved = %resolved, "redirect chain followed");

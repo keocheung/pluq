@@ -1,3 +1,4 @@
+mod provider;
 mod tui;
 
 use std::path::{Path, PathBuf};
@@ -57,7 +58,7 @@ enum Command {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() {
     let cli = Cli::parse();
 
     // ── Logging setup ────────────────────────────────────────────────────
@@ -69,12 +70,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!(command = ?std::env::args().collect::<Vec<_>>(), "snipe starting");
 
-    match cli.command {
+    if let Err(e) = run(cli.command).await {
+        if let Some(archive::ArchiveError::Transport(inner)) =
+            e.downcast_ref::<archive::ArchiveError>()
+            && let Some(msg) = provider::format_transport_error(inner.as_ref())
+        {
+            eprintln!("  Error: {msg}");
+            std::process::exit(1);
+        }
+        eprintln!("  Error: {e}");
+        std::process::exit(1);
+    }
+}
+
+async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
         Command::Browse { source } => {
-            tui::run(source).await?;
+            let reader = provider::build_reader(&source)?;
+            tui::run(source, reader).await?;
         }
         Command::List { source, all } => {
-            let archive = Archive::open(&source).await?.ready().await?;
+            let archive = open_archive(&source).await?.ready().await?;
 
             let entries: Vec<_> = if all {
                 archive.entries().iter().collect()
@@ -114,7 +130,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             entry,
             output,
         } => {
-            let archive = Archive::open(&source).await?.ready().await?;
+            let archive = open_archive(&source).await?.ready().await?;
 
             let found = archive
                 .entries()
@@ -140,7 +156,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         Command::Test { source, all } => {
-            let archive = Archive::open(&source).await?.ready().await?;
+            let archive = open_archive(&source).await?.ready().await?;
 
             let entries: Vec<_> = if all {
                 archive.entries().iter().collect()
@@ -174,6 +190,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Open an archive, using the provider dispatch for cloud URLs.
+async fn open_archive(source: &str) -> Result<archive::Opened, Box<dyn std::error::Error>> {
+    match provider::build_reader(source)? {
+        Some(reader) => Ok(Archive::open_reader(source, reader).await?),
+        None => Ok(Archive::open(source).await?),
+    }
 }
 
 /// Derive a default extraction subfolder from an archive source.
