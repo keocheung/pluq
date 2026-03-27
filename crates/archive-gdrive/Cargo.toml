@@ -5,7 +5,9 @@ edition = "2024"
 
 [dependencies]
 archive-core = { path = "../archive-core" }
+bytes = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+tokio = { version = "1", features = ["sync", "io-util"] }
 url = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
