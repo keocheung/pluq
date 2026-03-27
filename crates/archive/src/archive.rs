@@ -57,8 +57,24 @@ impl Archive {
     /// Transparently checks the cache before invoking any format parser. On a valid
     /// cache hit, returns [`Opened::Ready`] immediately without any I/O scan.
     pub async fn open(source: &str) -> Result<Opened, ArchiveError> {
-        info!(source = %source, "Archive::open");
         let reader = Source::detect(source);
+        Self::open_inner(source, reader).await
+    }
+
+    /// Open an archive from an externally-built [`Source`].
+    ///
+    /// Use this when a product layer needs to inject a decorated reader (e.g. a
+    /// progress-reporting wrapper, Google Drive, Dropbox) via [`Source::provider`].
+    ///
+    /// `source_label` is the user-facing string used for cache keying and tracing —
+    /// it is **not** resolved as a filesystem path.
+    pub async fn open_reader(source_label: &str, reader: Source) -> Result<Opened, ArchiveError> {
+        Self::open_inner(source_label, reader).await
+    }
+
+    /// Shared implementation for [`open`](Self::open) and [`open_reader`](Self::open_reader).
+    async fn open_inner(source: &str, reader: Source) -> Result<Opened, ArchiveError> {
+        info!(source = %source, "Archive::open");
 
         // Sniff the first 8 bytes to select the right parser.
         let magic = reader
