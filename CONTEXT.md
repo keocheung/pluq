@@ -2,8 +2,8 @@
 
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
-* **Current Phase:** Phase 3 — Interactive TUI (Complete).
-* **Current Active Task:** `SESSION_PLAN_STEP5.md`
+* **Current Phase:** Phase 3 — Interactive TUI + Google Drive Provider.
+* **Current Active Task:** [HANDOVER] Google Drive API provider complete (decorator pattern). Next: TUI search/multi-select, or Dropbox provider.
 * **Baseline:** 200 tests pass. (archive-core: 109 unit + 41 integration [19 rar + 13 zip + 9 rar4]; archive: 42 unit + 11 cloud_e2e ignored; archive-cli: 1 unit; archive-gdrive: 7 unit). Clippy clean.
 
 
