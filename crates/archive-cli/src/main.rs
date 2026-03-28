@@ -45,6 +45,17 @@ enum Command {
         #[arg(short, long, default_value = ".")]
         output: PathBuf,
     },
+    /// Extract all files from an archive to a directory.
+    ExtractAll {
+        /// Path to a local file or an HTTP(S) URL.
+        source: String,
+        /// Output directory (default: archive name without extension).
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Include OS-generated junk files (.DS_Store, __MACOSX/, Thumbs.db, etc.).
+        #[arg(long)]
+        all: bool,
+    },
     /// Test archive integrity — decompress and CRC-verify every entry.
     ///
     /// Exits with a non-zero status code if any entry fails.
@@ -153,6 +164,64 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
                 entry,
                 out_path.display(),
                 format_size(data.len() as u64)
+            );
+        }
+        Command::ExtractAll { source, output, all } => {
+            let archive = open_archive(&source).await?.ready().await?;
+
+            let entries: Vec<_> = if all {
+                archive.entries().iter().collect()
+            } else {
+                archive.entries_clean()
+            };
+
+            let output_dir = output
+                .unwrap_or_else(|| default_output_folder(&source).unwrap_or_else(|| PathBuf::from(".")));
+
+            tokio::fs::create_dir_all(&output_dir).await?;
+
+            let mut extracted: usize = 0;
+            let mut skipped: usize = 0;
+
+            for entry in &entries {
+                if entry.is_directory {
+                    continue;
+                }
+
+                // CLI-local path traversal guard (core-level sanitization is a future phase).
+                if entry.name.split('/').any(|seg| seg == "..")
+                    || entry.name.starts_with('/')
+                    || entry.name.starts_with('\\')
+                {
+                    eprintln!("  SKIP {} (unsafe path)", entry.name);
+                    skipped += 1;
+                    continue;
+                }
+
+                let dest = output_dir.join(&entry.name);
+                if let Some(parent) = dest.parent() {
+                    tokio::fs::create_dir_all(parent).await?;
+                }
+
+                let mut file = tokio::fs::File::create(&dest).await?;
+                let progress: std::sync::Arc<std::sync::Mutex<dyn archive::ProgressReporter>> =
+                    std::sync::Arc::new(std::sync::Mutex::new(()));
+                archive.extract(entry, &mut file, progress, None).await?;
+
+                println!(
+                    "  OK  {} ({})",
+                    entry.name,
+                    format_size(entry.uncompressed_size)
+                );
+                extracted += 1;
+            }
+
+            if skipped > 0 {
+                eprintln!("\n  {skipped} file(s) skipped (unsafe paths)");
+            }
+            println!(
+                "\n  Extracted {extracted} file(s) to {}/",
+                output_dir.display()
             );
         }
         Command::Test { source, all } => {

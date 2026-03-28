@@ -58,7 +58,6 @@ These commands define the CLI's public API. The TUI is the default entry point.
 - [ ] Handling of expired tokens/auth challenges in the TUI.
 
 ### Phase 5: Polishing, Performance & Security Hardening
-- [ ] Strict path traversal protection for all extraction sinks (prevent `..` escapes).
 - [ ] Anti-bomb safeguards: enforce entry count, compression ratio, and header size limits.
 - [ ] Memory-safe decoding: cap dictionary sizes for LZMA/LZMA2 to prevent OOM attacks.
 - [ ] Symlink target verification to ensure links stay within the output directory.
