@@ -11,6 +11,7 @@ Cargo.lock
 .vscode/
 *.swp
 *.swo
+*.log
 
 # Environment files (never commit secrets)
 .env

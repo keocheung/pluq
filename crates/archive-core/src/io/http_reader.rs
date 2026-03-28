@@ -5,7 +5,6 @@ use reqwest::{
     header::{CONTENT_LENGTH, HeaderMap, HeaderValue, RANGE},
 };
 use tokio::io::AsyncRead;
-use tokio::sync::OnceCell;
 use tokio_util::io::StreamReader;
 use tracing::{debug, trace, warn};
 
@@ -25,17 +24,12 @@ use crate::io::ReadError;
 /// An optional set of extra headers can be injected at construction time
 /// (e.g. `Authorization: Bearer <token>` for cloud storage APIs).
 ///
-/// On the first real request, the original URL is pre-resolved by following
-/// any redirect chain (e.g. Google Drive → CDN). The resolved URL is cached
-/// in `resolved_url` and reused for all subsequent range requests.  For
-/// providers that already serve bytes from the original URL (GitHub raw,
-/// Dropbox, S3) this costs nothing beyond one plain GET.
+/// Stateless and dumb: no redirect resolution, no retries, no auth refresh.
+/// Those are product-level concerns handled via [`ReadAt`] decorators.
 pub struct HttpReadAt {
     url: String,
     client: Client,
     extra_headers: HeaderMap,
-    /// Lazily populated with the CDN / final URL after redirect resolution.
-    resolved_url: OnceCell<String>,
 }
 
 impl HttpReadAt {
@@ -48,7 +42,6 @@ impl HttpReadAt {
             url: url.into(),
             client,
             extra_headers: HeaderMap::new(),
-            resolved_url: OnceCell::new(),
         }
     }
 
@@ -62,63 +55,6 @@ impl HttpReadAt {
         self.extra_headers = headers;
         self
     }
-
-    /// Returns the effective URL to use for range requests.
-    ///
-    /// On first call: sends a plain GET (no Range), follows all redirects,
-    /// and caches the final URL.  Subsequent calls return the cached value.
-    async fn effective_url(&self) -> Result<String, ReadError> {
-        let is_first = self.resolved_url.get().is_none();
-        let url = self
-            .resolved_url
-            .get_or_try_init(|| resolve_url(&self.client, &self.url, &self.extra_headers))
-            .await
-            .cloned()?;
-        if is_first {
-            debug!(original = %self.url, resolved = %url, "URL resolved");
-        }
-        Ok(url)
-    }
-}
-
-/// Follow any redirect chain for `url` and return the final URL.
-///
-/// Sends a plain GET (no `Range` header) so that intermediary services
-/// (e.g. short-links) perform their full redirect flow.
-/// The response body is never read — the connection is dropped immediately
-/// after inspecting the status.
-///
-/// Special case: non-2xx response (e.g. 404 from a test mock) returns `url`
-/// unchanged so the caller can surface a proper error on the subsequent range request.
-async fn resolve_url(
-    client: &Client,
-    url: &str,
-    extra_headers: &HeaderMap,
-) -> Result<String, ReadError> {
-    let op = ReadOperation::SizeCheck;
-
-    debug!(url = %url, "resolving redirect chain");
-
-    let resp = client
-        .get(url)
-        .headers(extra_headers.clone())
-        .send()
-        .await
-        .map_err(|e| classify_reqwest_error(e, url, op))?;
-
-    let status = resp.status();
-    let resolved = resp.url().to_string();
-    drop(resp); // abort body download — we only needed the URL
-
-    // Non-success (e.g. 404 from a test mock): keep the original URL so the
-    // subsequent range request surfaces a proper HTTP error.
-    if !status.is_success() {
-        warn!(url = %url, status = %status, "redirect resolution got non-success, keeping original URL");
-        return Ok(url.to_string());
-    }
-
-    trace!(original = %url, resolved = %resolved, "redirect chain followed");
-    Ok(resolved)
 }
 
 /// Classify a `reqwest::Error` into a [`ReadError`].
@@ -228,16 +164,15 @@ impl ReadAt for HttpReadAt {
             return Ok(Bytes::new());
         }
 
-        let url = self.effective_url().await?;
         debug!(offset, len, "http read_range start");
         let op = ReadOperation::ReadRange { offset, len };
         let response =
-            send_range_request(&self.client, &url, &self.extra_headers, offset, len).await?;
+            send_range_request(&self.client, &self.url, &self.extra_headers, offset, len).await?;
 
         let body = response
             .bytes()
             .await
-            .map_err(|e| classify_reqwest_error(e, &url, op))?;
+            .map_err(|e| classify_reqwest_error(e, &self.url, op))?;
 
         trace!(offset, len, received = body.len(), "http read_range complete");
         Ok(body)
@@ -252,14 +187,11 @@ impl ReadAt for HttpReadAt {
             return Ok(Box::new(tokio::io::empty()) as Box<dyn AsyncRead + Send + Unpin>);
         }
 
-        let url = self.effective_url().await?;
         debug!(offset, len, "http read_stream start");
         let response =
-            send_range_request(&self.client, &url, &self.extra_headers, offset, len).await?;
+            send_range_request(&self.client, &self.url, &self.extra_headers, offset, len).await?;
 
-        // Wrap the response bytes_stream into an AsyncRead — zero buffering.
-        // Mid-stream errors are embedded as ReadError inside io::Error so the
-        // extraction code can recover structured context after SyncIoBridge.
+        let url = self.url.clone();
         let stream = response.bytes_stream().map_err(move |e| {
             let read_error = classify_reqwest_error(
                 e,
@@ -276,15 +208,14 @@ impl ReadAt for HttpReadAt {
     async fn size(&self) -> Result<u64, ReadError> {
         debug!("http size check (HEAD request)");
         let op = ReadOperation::SizeCheck;
-        let url = self.effective_url().await?;
 
         let response = self
             .client
-            .head(&url)
+            .head(&self.url)
             .headers(self.extra_headers.clone())
             .send()
             .await
-            .map_err(|e| classify_reqwest_error(e, &url, op.clone()))?;
+            .map_err(|e| classify_reqwest_error(e, &self.url, op.clone()))?;
 
         // Log all HEAD response headers at debug — essential for diagnosing
         // cloud provider quirks (missing Content-Length, wrong Accept-Ranges, etc.)
@@ -305,9 +236,9 @@ impl ReadAt for HttpReadAt {
         if let Some(accept_ranges) = response.headers().get("accept-ranges")
             && accept_ranges.as_bytes() == b"none"
         {
-            warn!(url = %url, "server returned Accept-Ranges: none");
+            warn!(url = %self.url, "server returned Accept-Ranges: none");
             return Err(ReadError::Failed(Box::new(ReadFailure {
-                source: SourceInfo::Http { url: url.clone() },
+                source: SourceInfo::Http { url: self.url.clone() },
                 operation: op.clone(),
                 kind: ReadErrorKind::RangeNotSupported,
                 diagnostic: "server returned Accept-Ranges: none — surgical extraction is not possible".into(),
@@ -318,9 +249,9 @@ impl ReadAt for HttpReadAt {
             .headers()
             .get(CONTENT_LENGTH)
             .ok_or_else(|| {
-                warn!(url = %url, "server did not return Content-Length header");
+                warn!(url = %self.url, "server did not return Content-Length header");
                 ReadError::Failed(Box::new(ReadFailure {
-                    source: SourceInfo::Http { url: url.clone() },
+                    source: SourceInfo::Http { url: self.url.clone() },
                     operation: op.clone(),
                     kind: ReadErrorKind::RangeNotSupported,
                     diagnostic: "server did not return Content-Length header".into(),
@@ -329,7 +260,7 @@ impl ReadAt for HttpReadAt {
             .to_str()
             .map_err(|e| {
                 ReadError::Failed(Box::new(ReadFailure {
-                    source: SourceInfo::Http { url: url.clone() },
+                    source: SourceInfo::Http { url: self.url.clone() },
                     operation: op.clone(),
                     kind: ReadErrorKind::RangeNotSupported,
                     diagnostic: format!("invalid Content-Length: {e}"),
@@ -338,7 +269,7 @@ impl ReadAt for HttpReadAt {
             .parse::<u64>()
             .map_err(|e| {
                 ReadError::Failed(Box::new(ReadFailure {
-                    source: SourceInfo::Http { url: url.clone() },
+                    source: SourceInfo::Http { url: self.url.clone() },
                     operation: op,
                     kind: ReadErrorKind::RangeNotSupported,
                     diagnostic: format!("Content-Length not a number: {e}"),

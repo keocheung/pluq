@@ -1,4 +1,5 @@
 use archive::Source;
+use archive::CachingReadAt;
 use archive_gdrive::{self, GDriveError, GoogleDriveReadAt};
 use tracing::info;
 
@@ -22,7 +23,7 @@ pub fn build_reader(url: &str) -> Result<Option<Source>, String> {
     let file_id = archive_gdrive::extract_file_id(url)
         .ok_or_else(|| format!("Could not extract file ID from Google Drive URL: {url}"))?;
 
-    let reader = GoogleDriveReadAt::new(file_id, api_key);
+    let reader = CachingReadAt::new(GoogleDriveReadAt::new(file_id, api_key));
     Ok(Some(Source::provider(reader)))
 }
 

@@ -28,7 +28,7 @@ pub use progress::ProgressReporter;
 pub use scan::ScanInfo;
 
 // I/O building blocks (for power users / tests).
-pub use io::{HttpReadAt, LocalReadAt, ReadAt, ReadError, Source};
+pub use io::{CachingReadAt, HttpReadAt, LocalReadAt, ReadAt, ReadError, Source};
 pub use rar::{RarArchive, RarEntryLocation, RAR4_SIGNATURE, RAR5_SIGNATURE};
 pub use rar4::{Rar4Archive, Rar4EntryLocation};
 pub use zip::{AesExtraInfo, ZipArchive, ZipEntryLocation, ZipIndex};

@@ -198,8 +198,6 @@ mod tests {
     async fn read_range_delegates_to_inner() {
         let server = MockServer::start().await;
         // Only match requests that include a Range header (the actual data request).
-        // The URL-resolution GET (no Range) from HttpReadAt::effective_url() will
-        // get wiremock's default 404, causing it to keep the original URL — which is fine.
         Mock::given(method("GET"))
             .and(header("range", "bytes=0-9"))
             .respond_with(ResponseTemplate::new(206).set_body_bytes(b"0123456789"))
