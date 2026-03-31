@@ -68,7 +68,6 @@ pub struct RarEntryLocation {
 
 /// Sent from producer to consumer over the bounded channel.
 /// Used by the streaming splitter pipeline.
-#[allow(dead_code)]
 pub(crate) struct SnippetMsg {
     /// Path to the temp file containing a valid standalone RAR archive.
     pub(crate) path: std::path::PathBuf,
@@ -82,7 +81,6 @@ pub(crate) struct SnippetMsg {
 
 /// Extraction config passed into the modified elastic scan.
 /// When provided, the scan writes snippet micro-archives instead of discarding data.
-#[allow(dead_code)]
 pub(crate) struct SnippetConfig {
     pub(crate) sender: tokio::sync::mpsc::Sender<SnippetMsg>,
     pub(crate) preamble: bytes::Bytes,
@@ -1314,6 +1312,83 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for RarArchive<R> {
 
         Ok(())
     }
+
+    async fn extract_all_streaming<Filter, SinkFn>(
+        &mut self,
+        filter: Filter,
+        sink_factory: SinkFn,
+        progress: Arc<Mutex<dyn ProgressReporter>>,
+        password: Option<&[u8]>,
+    ) -> Result<u64, CoreError>
+    where
+        Filter: Fn(&ArchiveEntry) -> bool + Send + Sync + 'static,
+        SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn std::io::Write + Send>> + Send + 'static,
+    {
+        // Local path: delegate to existing unrar direct path.
+        if let Some(path) = &self.local_path {
+            let work: Vec<(ArchiveEntry, RarEntryLocation)> = self
+                .entries
+                .iter()
+                .zip(self.locations.iter())
+                .filter(|(e, loc)| !e.is_directory && !loc.is_solid && filter(e))
+                .map(|(e, loc)| (e.clone(), loc.clone()))
+                .collect();
+
+            if work.is_empty() {
+                return Ok(0);
+            }
+
+            return extract_all_via_unrar(path.clone(), work, sink_factory, progress, password)
+                .await;
+        }
+
+        // Cloud path: pipelined streaming splitter.
+        let preamble_end = self.archive_preamble.len() as u64;
+        let size = self.archive_size;
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<SnippetMsg>(2);
+        let password_owned = password.map(|p| p.to_vec());
+
+        // Spawn consumer.
+        let consumer_progress = progress.clone();
+        let consumer =
+            tokio::spawn(consume_snippets(rx, sink_factory, consumer_progress, password_owned));
+
+        // Build snippet config.
+        let config = SnippetConfig {
+            sender: tx,
+            preamble: self.archive_preamble.clone(),
+            end_block: self.end_block.clone(),
+            filter: Box::new(filter),
+        };
+
+        // Signal scan start.
+        { progress.lock().unwrap().on_scan_start(size); }
+
+        // Run producer (in current task — borrows self.reader).
+        // When run_elastic_scan returns, config is dropped, tx is dropped,
+        // signaling the consumer that no more snippets are coming.
+        let (entries, locations) =
+            Self::run_elastic_scan(&self.reader, preamble_end, size, &progress, Some(config))
+                .await?;
+
+        // Await consumer.
+        let total_bytes = consumer
+            .await
+            .map_err(|e| CoreError::BitstreamError {
+                detail: format!("consumer panicked: {e}"),
+            })??;
+
+        // Populate self with harvested metadata.
+        let entry_count = entries.len();
+        self.entries = entries;
+        self.locations = locations;
+        self.scan_complete = true;
+
+        { progress.lock().unwrap().on_scan_complete(entry_count); }
+
+        Ok(total_bytes)
+    }
 }
 
 // ── Helper functions ──────────────────────────────────────────────────────────
@@ -1560,6 +1635,112 @@ where
     })??;
 
     Ok(result)
+}
+
+/// Receives snippet micro-archives from the producer, extracts each via
+/// `unrar` in a blocking task, verifies integrity, writes to sink, and
+/// deletes the snippet.
+///
+/// `pub(crate)` so RAR4 (Step 5) can reuse this function.
+pub(crate) async fn consume_snippets<SinkFn>(
+    mut rx: tokio::sync::mpsc::Receiver<SnippetMsg>,
+    mut sink_factory: SinkFn,
+    progress: Arc<Mutex<dyn ProgressReporter>>,
+    password: Option<Vec<u8>>,
+) -> Result<u64, CoreError>
+where
+    SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn std::io::Write + Send>> + Send + 'static,
+{
+    let mut total_bytes: u64 = 0;
+
+    while let Some(msg) = rx.recv().await {
+        let result =
+            extract_single_snippet(&msg, &mut sink_factory, &progress, password.as_deref()).await;
+
+        // Always clean up snippet, even on error.
+        let _ = tokio::fs::remove_file(&msg.path).await;
+
+        total_bytes += result?;
+    }
+
+    Ok(total_bytes)
+}
+
+async fn extract_single_snippet<SinkFn>(
+    msg: &SnippetMsg,
+    sink_factory: &mut SinkFn,
+    progress: &Arc<Mutex<dyn ProgressReporter>>,
+    password: Option<&[u8]>,
+) -> Result<u64, CoreError>
+where
+    SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn std::io::Write + Send>> + Send,
+{
+    let Some(mut sink) = sink_factory(&msg.entry) else {
+        return Ok(0); // sink factory says skip
+    };
+
+    let entry_name = msg.entry.name.clone();
+    let uncompressed_size = msg.entry.uncompressed_size;
+    let expected_crc = msg.crc32;
+    let expected_blake2 = msg.blake2_hash;
+    let snippet_path = msg.path.clone();
+    let password_bytes = password.map(|p| p.to_vec());
+
+    { progress.lock().unwrap().on_entry_start(&entry_name, uncompressed_size); }
+
+    // Extract via unrar in blocking task.
+    let data = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, CoreError> {
+        let archive = match &password_bytes {
+            Some(pw) => unrar::Archive::with_password(&snippet_path, pw.as_slice())
+                .open_for_processing()
+                .map_err(map_unrar_error)?,
+            None => unrar::Archive::new(&snippet_path)
+                .open_for_processing()
+                .map_err(map_unrar_error)?,
+        };
+
+        let header = archive.read_header().map_err(map_unrar_error)?;
+        let header = header.ok_or_else(|| CoreError::BitstreamError {
+            detail: "snippet archive produced no entries".into(),
+        })?;
+        let (data, _) = header.read().map_err(map_unrar_error)?;
+        Ok(data)
+    })
+    .await
+    .map_err(|e| CoreError::BitstreamError {
+        detail: format!("extract task panicked: {e}"),
+    })??;
+
+    // CRC32 verification.
+    if let Some(expected) = expected_crc {
+        let actual = crc32fast::hash(&data);
+        if actual != expected {
+            progress.lock().unwrap().on_entry_complete(&entry_name, false);
+            return Err(CoreError::CrcMismatch { entry: entry_name, expected, actual });
+        }
+    }
+
+    // BLAKE2sp verification.
+    if let Some(expected_hash) = expected_blake2 {
+        let mut state = blake2s_simd::blake2sp::State::new();
+        state.update(&data);
+        if state.finalize().as_array() != &expected_hash {
+            progress.lock().unwrap().on_entry_complete(&entry_name, false);
+            return Err(CoreError::BitstreamError {
+                detail: format!("BLAKE2sp hash mismatch for '{entry_name}'"),
+            });
+        }
+    }
+
+    // Write to sink.
+    use std::io::Write;
+    sink.write_all(&data).map_err(|e| CoreError::BitstreamError {
+        detail: format!("write failed for '{entry_name}': {e}"),
+    })?;
+
+    progress.lock().unwrap().on_entry_complete(&entry_name, true);
+
+    Ok(data.len() as u64)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

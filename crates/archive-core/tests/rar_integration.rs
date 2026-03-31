@@ -403,6 +403,81 @@ async fn rar5_elastic_scan_parity_compressed() {
     assert_eq!(entries[1].name, "file2.txt");
 }
 
+// ── extract_all_streaming (local path) ───────────────────────────────────────
+
+#[tokio::test]
+async fn rar5_extract_all_streaming_local_byte_count() {
+    // rar5_store.rar: file1.txt (20 B) + file2.txt (20 B)
+    let mut archive = RarArchive::open(Source::detect(&fixture("rar5_store.rar")))
+        .await
+        .expect("open");
+
+    let progress = Arc::new(Mutex::new(()));
+    let total = archive
+        .extract_all_streaming(
+            |_| true,
+            |_entry| Some(Box::new(std::io::sink()) as Box<dyn std::io::Write + Send>),
+            progress,
+            None,
+        )
+        .await
+        .expect("extract_all_streaming");
+
+    assert_eq!(total, 40, "expected 20 + 20 = 40 bytes");
+    assert_eq!(archive.entries().len(), 2);
+    assert_eq!(archive.entries()[0].name, "file1.txt");
+    assert_eq!(archive.entries()[1].name, "file2.txt");
+    assert_eq!(archive.entries()[0].uncompressed_size, 20);
+    assert_eq!(archive.entries()[1].uncompressed_size, 20);
+}
+
+#[tokio::test]
+async fn rar5_extract_all_streaming_local_content() {
+    // Verify the bytes written to memory sinks match the expected file contents.
+    let mut archive = RarArchive::open(Source::detect(&fixture("rar5_store.rar")))
+        .await
+        .expect("open");
+
+    let buf1 = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let buf2 = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let buf1c = buf1.clone();
+    let buf2c = buf2.clone();
+    let mut call = 0_usize;
+
+    archive
+        .extract_all_streaming(
+            |_| true,
+            move |_entry| {
+                call += 1;
+                if call == 1 {
+                    Some(Box::new(LockedSink(buf1c.clone())) as Box<dyn std::io::Write + Send>)
+                } else {
+                    Some(Box::new(LockedSink(buf2c.clone())) as Box<dyn std::io::Write + Send>)
+                }
+            },
+            Arc::new(Mutex::new(())),
+            None,
+        )
+        .await
+        .expect("extract_all_streaming");
+
+    assert_eq!(buf1.lock().unwrap().as_slice(), b"Hello from file one\n");
+    assert_eq!(buf2.lock().unwrap().as_slice(), b"Second file content\n");
+}
+
+/// Simple `Write` impl that appends to a shared `Vec<u8>`.
+struct LockedSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LockedSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 // ── Elastic scan: scan progress callbacks ─────────────────────────────────────
 
 struct ScanRecorder {

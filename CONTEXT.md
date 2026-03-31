@@ -3,8 +3,8 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 3 — Interactive TUI + Google Drive Provider.
-* **Current Active Task:** SESSION_PLAN.md step 3 — RAR5 Consumer + Orchestrator.
-* **Baseline:** 209 tests pass, 11 ignored. (archive-core: 118 unit + 41 integration [19 rar + 13 zip + 9 rar4]; archive: 42 unit + 11 cloud_e2e ignored; archive-cli: 1 unit; archive-gdrive: 7 unit). Clippy clean.
+* **Current Active Task:** SESSION_PLAN.md step 4 — Replace RAR5 cloud `extract_all` path.
+* **Baseline:** 211 tests pass, 11 ignored. (archive-core: 118 unit + 43 integration [21 rar + 13 zip + 9 rar4]; archive: 42 unit + 11 cloud_e2e ignored; archive-cli: 1 unit; archive-gdrive: 7 unit). 3 pre-existing clippy warnings (collapsible_if in run_elastic_scan, let_and_return in extract_all, too_many_arguments in zip/mod.rs).
 * **Pre-existing:** `extract_all_via_unrar` free function already in `crates/archive-core/src/rar/mod.rs` (kept from prior work).
 
 
