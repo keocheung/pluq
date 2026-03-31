@@ -476,6 +476,116 @@ impl<R: ReadAt> RarArchive<R> {
         Ok((entries, locations))
     }
 
+    /// Extract multiple entries in a single pass.
+    ///
+    /// - **Local archives**: one `unrar` pass through the original file.
+    /// - **Cloud archives**: downloads the entire archive body in **one**
+    ///   `read_stream` to a temp file, then extracts locally. Reduces HTTP
+    ///   round trips from O(N) to O(1).
+    ///
+    /// `sink_factory` is called once per entry from a blocking context.
+    /// Return `Some(writer)` to extract, `None` to skip.
+    pub async fn extract_all<F>(
+        &self,
+        entry_indices: &[usize],
+        sink_factory: F,
+        progress: Arc<Mutex<dyn ProgressReporter>>,
+        password: Option<&[u8]>,
+    ) -> Result<u64, CoreError>
+    where
+        F: FnMut(&ArchiveEntry) -> Option<Box<dyn std::io::Write + Send>> + Send + 'static,
+    {
+        let work: Vec<(ArchiveEntry, RarEntryLocation)> = entry_indices
+            .iter()
+            .filter(|&&idx| {
+                !self.entries[idx].is_directory && !self.locations[idx].is_solid
+            })
+            .map(|&idx| (self.entries[idx].clone(), self.locations[idx].clone()))
+            .collect();
+
+        if work.is_empty() {
+            return Ok(0);
+        }
+
+        if let Some(path) = &self.local_path {
+            info!(entries = work.len(), "RAR extract_all: local path");
+            return extract_all_via_unrar(
+                path.clone(),
+                work,
+                sink_factory,
+                progress,
+                password,
+            )
+            .await;
+        }
+
+        // Cloud path: download to temp file via one stream, then extract locally.
+        info!(entries = work.len(), "RAR extract_all: cloud path (single stream to temp)");
+        let preamble = self.archive_preamble.clone();
+        let preamble_end = preamble.len() as u64;
+        let archive_size = self.archive_size;
+
+        // Create temp file.
+        let temp_file = tokio::task::spawn_blocking(tempfile::NamedTempFile::new)
+            .await
+            .map_err(|e| CoreError::BitstreamError {
+                detail: format!("spawn temp file failed: {e}"),
+            })?
+            .map_err(|e| CoreError::BitstreamError {
+                detail: format!("create temp file failed: {e}"),
+            })?;
+
+        // Write preamble + stream body + end block to temp file.
+        let temp_std = temp_file.as_file().try_clone().map_err(|e| {
+            CoreError::BitstreamError {
+                detail: format!("temp file clone failed: {e}"),
+            }
+        })?;
+        let mut temp_writer =
+            tokio::io::BufWriter::new(tokio::fs::File::from_std(temp_std));
+
+        temp_writer.write_all(&preamble).await.map_err(|e| {
+            CoreError::BitstreamError {
+                detail: format!("temp file write preamble failed: {e}"),
+            }
+        })?;
+
+        // One HTTP request: stream the entire body.
+        let body_len = archive_size.saturating_sub(preamble_end);
+        let mut stream = self
+            .reader
+            .read_stream(preamble_end, body_len)
+            .await
+            .map_err(CoreError::Io)?;
+
+        tokio::io::copy(&mut stream, &mut temp_writer)
+            .await
+            .map_err(|e| CoreError::BitstreamError {
+                detail: format!("temp file stream copy failed: {e}"),
+            })?;
+
+        temp_writer.flush().await.map_err(|e| {
+            CoreError::BitstreamError {
+                detail: format!("temp file flush failed: {e}"),
+            }
+        })?;
+        drop(temp_writer);
+
+        // Extract from the local temp file.
+        let temp_path = temp_file.path().to_path_buf();
+        let result = extract_all_via_unrar(
+            temp_path,
+            work,
+            sink_factory,
+            progress,
+            password,
+        )
+        .await;
+
+        // temp_file dropped here → auto-deleted.
+        result
+    }
+
     /// Bytes that must be transferred to produce this entry.
     ///
     /// For non-solid RAR archives every entry is independently seekable, so
@@ -1207,6 +1317,115 @@ pub(crate) async fn verify_and_write<W: AsyncWrite + Send + Unpin>(
         .unwrap()
         .on_entry_complete(entry_name, true);
     Ok(bytes_written)
+}
+
+/// Extract multiple entries from a RAR5 archive via `unrar` in a single pass.
+///
+/// Opens the archive once and iterates through all headers, extracting entries
+/// that are present in `work`. Skips unwanted entries efficiently without
+/// decompressing them.
+///
+/// Returns the total number of uncompressed bytes written.
+async fn extract_all_via_unrar<F>(
+    archive_path: PathBuf,
+    work: Vec<(ArchiveEntry, RarEntryLocation)>,
+    mut sink_factory: F,
+    progress: Arc<Mutex<dyn ProgressReporter>>,
+    password: Option<&[u8]>,
+) -> Result<u64, CoreError>
+where
+    F: FnMut(&ArchiveEntry) -> Option<Box<dyn std::io::Write + Send>> + Send + 'static,
+{
+    let password_bytes = password.map(|p| p.to_vec());
+
+    // Build name → work-index lookup for O(1) dispatch inside spawn_blocking.
+    let wanted: std::collections::HashMap<String, usize> = work
+        .iter()
+        .enumerate()
+        .map(|(i, (entry, _))| (entry.name.clone(), i))
+        .collect();
+
+    let result = tokio::task::spawn_blocking(move || -> Result<u64, CoreError> {
+        let mut archive = match &password_bytes {
+            Some(pw) => unrar::Archive::with_password(&archive_path, pw.as_slice())
+                .open_for_processing()
+                .map_err(map_unrar_error)?,
+            None => unrar::Archive::new(&archive_path)
+                .open_for_processing()
+                .map_err(map_unrar_error)?,
+        };
+
+        let mut total_bytes: u64 = 0;
+
+        loop {
+            let header = archive.read_header().map_err(map_unrar_error)?;
+            let header = match header {
+                Some(h) => h,
+                None => break,
+            };
+
+            let name = header.entry().filename.to_string_lossy().replace('\\', "/");
+
+            if let Some(&idx) = wanted.get(&name) {
+                let (entry, loc) = &work[idx];
+
+                if let Some(mut sink) = sink_factory(entry) {
+                    progress
+                        .lock()
+                        .unwrap()
+                        .on_entry_start(&name, entry.uncompressed_size);
+
+                    let (data, next_archive) = header.read().map_err(map_unrar_error)?;
+                    archive = next_archive;
+
+                    // CRC32 verification.
+                    if let Some(expected) = loc.crc32 {
+                        let actual = crc32fast::hash(&data);
+                        if actual != expected {
+                            return Err(CoreError::CrcMismatch {
+                                entry: name,
+                                expected,
+                                actual,
+                            });
+                        }
+                    }
+
+                    // BLAKE2sp verification.
+                    if let Some(expected_hash) = loc.blake2_hash {
+                        let mut state = blake2s_simd::blake2sp::State::new();
+                        state.update(&data);
+                        let actual = state.finalize();
+                        if actual.as_array() != &expected_hash {
+                            return Err(CoreError::BitstreamError {
+                                detail: format!("BLAKE2sp hash mismatch for '{name}'"),
+                            });
+                        }
+                    }
+
+                    use std::io::Write;
+                    sink.write_all(&data).map_err(|e| CoreError::BitstreamError {
+                        detail: format!("write failed for '{name}': {e}"),
+                    })?;
+
+                    total_bytes += data.len() as u64;
+                    progress.lock().unwrap().on_entry_complete(&name, true);
+                } else {
+                    // Sink factory returned None — skip this entry.
+                    archive = header.skip().map_err(map_unrar_error)?;
+                }
+            } else {
+                archive = header.skip().map_err(map_unrar_error)?;
+            }
+        }
+
+        Ok(total_bytes)
+    })
+    .await
+    .map_err(|e| CoreError::BitstreamError {
+        detail: format!("extract_all task panicked: {e}"),
+    })??;
+
+    Ok(result)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

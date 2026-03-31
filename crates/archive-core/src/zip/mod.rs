@@ -397,6 +397,141 @@ impl<R: ReadAt> ZipArchive<R> {
             .await
             .map(|_| ())
     }
+
+    /// Extract multiple entries in a single streaming pass.
+    ///
+    /// Opens **one** `read_stream` covering all requested entries (sorted by
+    /// physical offset), then processes each entry sequentially from that single
+    /// stream. This reduces HTTP round trips from O(2N) to O(1).
+    ///
+    /// `sink_factory` is called once per entry (in archive physical order) from
+    /// a blocking context. Return `Some(writer)` to extract, `None` to skip.
+    /// Directories are always skipped.
+    pub async fn extract_all<F>(
+        &self,
+        entry_indices: &[usize],
+        sink_factory: F,
+        progress: Arc<Mutex<dyn ProgressReporter>>,
+        password: Option<&[u8]>,
+    ) -> Result<u64, CoreError>
+    where
+        F: FnMut(&ArchiveEntry) -> Option<Box<dyn std::io::Write + Send>> + Send + 'static,
+    {
+        // Build work list sorted by physical LFH offset.
+        let mut work: Vec<(ArchiveEntry, ZipEntryLocation)> = entry_indices
+            .iter()
+            .filter(|&&idx| !self.entries[idx].is_directory)
+            .map(|&idx| (self.entries[idx].clone(), self.locations[idx].clone()))
+            .collect();
+        work.sort_by_key(|(_, loc)| loc.offset);
+
+        if work.is_empty() {
+            return Ok(0);
+        }
+
+        // Compute stream range: first LFH to end of file.
+        let stream_start = work[0].1.offset;
+        let file_size = self.reader.size().await.map_err(CoreError::Io)?;
+        let stream_len = file_size.saturating_sub(stream_start);
+
+        info!(
+            entries = work.len(),
+            stream_start,
+            stream_len,
+            "ZIP extract_all: opening single stream"
+        );
+
+        // One stream for the entire body.
+        let stream = self
+            .reader
+            .read_stream(stream_start, stream_len)
+            .await
+            .map_err(CoreError::Io)?;
+
+        let handle = tokio::runtime::Handle::current();
+        let password_bytes: Option<Vec<u8>> = password.map(|p| p.to_vec());
+
+        // Everything runs in spawn_blocking — sync I/O for both read and write.
+        tokio::task::spawn_blocking(move || -> Result<u64, CoreError> {
+            let mut sync_reader = SyncIoBridge::new_with_handle(stream, handle);
+            let mut sink_factory = sink_factory;
+            let mut stream_pos = stream_start;
+            let mut total_bytes: u64 = 0;
+
+            for (entry, location) in &work {
+                // ── Skip gap bytes to reach this entry's LFH ─────────────
+                let gap = location.offset.saturating_sub(stream_pos);
+                if gap > 0 {
+                    skip_exact(&mut sync_reader, gap)?;
+                    stream_pos += gap;
+                }
+
+                // ── Parse Local File Header (30 bytes) ───────────────────
+                let mut lfh = [0u8; 30];
+                sync_reader
+                    .read_exact(&mut lfh)
+                    .map_err(|e| stream_io_err(e, stream_pos))?;
+                stream_pos += 30;
+
+                let sig = u32::from_le_bytes([lfh[0], lfh[1], lfh[2], lfh[3]]);
+                if sig != 0x04034b50 {
+                    return Err(CoreError::InvalidFormat {
+                        message: format!(
+                            "invalid LFH signature at offset {:#x}: {sig:#010x}",
+                            location.offset
+                        ),
+                    });
+                }
+                let name_len = u16::from_le_bytes([lfh[26], lfh[27]]) as u64;
+                let extra_len = u16::from_le_bytes([lfh[28], lfh[29]]) as u64;
+                let var_len = name_len + extra_len;
+                if var_len > 0 {
+                    skip_exact(&mut sync_reader, var_len)?;
+                    stream_pos += var_len;
+                }
+
+                // ── Create sink (or skip this entry) ─────────────────────
+                let compressed_size = entry.compressed_size;
+
+                if let Some(mut sink) = sink_factory(entry) {
+                    // Read compressed data into memory, then decompress.
+                    let mut compressed = vec![0u8; compressed_size as usize];
+                    sync_reader
+                        .read_exact(&mut compressed)
+                        .map_err(|e| stream_io_err(e, stream_pos))?;
+                    stream_pos += compressed_size;
+
+                    let verified = decompress_and_verify(
+                        std::io::Cursor::new(compressed),
+                        &entry.name,
+                        compressed_size,
+                        entry.uncompressed_size,
+                        location.method_id,
+                        location.aes_info.clone(),
+                        location.crc32,
+                        entry.is_encrypted,
+                        password_bytes.as_deref(),
+                        &progress,
+                    )?;
+
+                    sink.write_all(&verified).map_err(|e| CoreError::BitstreamError {
+                        detail: format!("write failed for '{}': {e}", entry.name),
+                    })?;
+                    total_bytes += verified.len() as u64;
+                } else {
+                    // Skip compressed data.
+                    skip_exact(&mut sync_reader, compressed_size)?;
+                    stream_pos += compressed_size;
+                }
+            }
+
+            Ok(total_bytes)
+        })
+        .await
+        .map_err(|e| CoreError::BitstreamError {
+            detail: format!("extract_all task panicked: {e}"),
+        })?
+    }
 }
 
 impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for ZipArchive<R> {
@@ -445,6 +580,208 @@ pub(crate) fn read_zip_lzma_header(reader: &mut impl Read) -> Result<Vec<u8>, Co
         message: format!("truncated LZMA properties: {e}"),
     })?;
     Ok(props)
+}
+
+// ── Shared helpers for extract() and extract_all() ───────────────────────────
+
+/// Skip exactly `n` bytes from a reader by reading and discarding.
+fn skip_exact(reader: &mut impl Read, n: u64) -> Result<(), CoreError> {
+    let mut remaining = n;
+    let mut buf = [0u8; 8192];
+    while remaining > 0 {
+        let to_read = (remaining as usize).min(buf.len());
+        reader.read_exact(&mut buf[..to_read]).map_err(|e| {
+            stream_io_err(e, 0)
+        })?;
+        remaining -= to_read as u64;
+    }
+    Ok(())
+}
+
+/// Convert a stream `io::Error` to `CoreError`, recovering embedded `ReadError`
+/// from the `SyncIoBridge` when present.
+fn stream_io_err(e: std::io::Error, offset: u64) -> CoreError {
+    if let Some(inner) = e.into_inner()
+        && let Ok(read_error) = inner.downcast::<crate::io::ReadError>()
+    {
+        return CoreError::Io(*read_error);
+    }
+    CoreError::CorruptHeader {
+        offset,
+        reason: "stream read failed".into(),
+    }
+}
+
+/// Decompress and CRC-verify one ZIP entry from an in-memory compressed buffer.
+///
+/// Shared by [`ZipArchive::extract`] (single entry) and [`ZipArchive::extract_all`]
+/// (batch). The reader must be positioned at the start of the compressed (or
+/// encrypted+compressed) data and contain exactly `compressed_size` bytes.
+fn decompress_and_verify<R: Read + Send>(
+    mut reader: R,
+    entry_name: &str,
+    compressed_size: u64,
+    uncompressed_size: u64,
+    method_id: u16,
+    aes_info: Option<AesExtraInfo>,
+    expected_crc: u32,
+    is_encrypted: bool,
+    password: Option<&[u8]>,
+    progress: &Arc<Mutex<dyn ProgressReporter>>,
+) -> Result<Vec<u8>, CoreError> {
+    let is_aes = aes_info.is_some() && is_encrypted;
+    let skip_crc_check = is_aes;
+
+    // ── Decryption + decoder setup ───────────────────────────────────────
+    let mut decoder: Box<dyn crate::codec::Decoder + '_> = if is_aes {
+        let aes_extra = aes_info.as_ref().unwrap();
+        let pwd = password.ok_or(CoreError::PasswordRequired)?;
+        let decrypted =
+            aes::decrypt_winzip_aes(&mut reader, pwd, aes_extra.strength, compressed_size)?;
+        let method = parse::zip_method_to_codec(aes_extra.actual_method_id).ok_or_else(|| {
+            CoreError::UnsupportedCompression {
+                algorithm: format!("ZIP AES actual method id {}", aes_extra.actual_method_id),
+            }
+        })?;
+        let mut aes_stream = std::io::Cursor::new(decrypted);
+        let properties = if method == CompressionMethod::Lzma {
+            read_zip_lzma_header(&mut aes_stream)?
+        } else {
+            vec![]
+        };
+        build_decoder(method, aes_stream, &properties)?
+    } else if is_encrypted {
+        let pwd = password.ok_or(CoreError::PasswordRequired)?;
+        let mut enc_header = [0u8; 12];
+        reader.read_exact(&mut enc_header).map_err(|io_err| {
+            if let Some(inner) = io_err.into_inner()
+                && let Ok(read_error) = inner.downcast::<crate::io::ReadError>()
+            {
+                return CoreError::Io(*read_error);
+            }
+            CoreError::InvalidFormat {
+                message: format!("truncated encryption header for '{entry_name}'"),
+            }
+        })?;
+        let mut decryptor = ZipCryptoDecryptor::new(pwd);
+        decryptor.decrypt(&mut enc_header);
+        if enc_header[11] != (expected_crc >> 24) as u8 {
+            return Err(CoreError::WrongPassword {
+                method: crate::PasswordDetectionMethod::EarlyHeaderValidation,
+            });
+        }
+        let method = parse::zip_method_to_codec(method_id).ok_or_else(|| {
+            CoreError::UnsupportedCompression {
+                algorithm: format!("ZIP method id {method_id}"),
+            }
+        })?;
+        let mut crypto_reader = ZipCryptoReader::new(reader, decryptor);
+        let properties = if method == CompressionMethod::Lzma {
+            read_zip_lzma_header(&mut crypto_reader)?
+        } else {
+            vec![]
+        };
+        build_decoder(method, crypto_reader, &properties)?
+    } else {
+        let method = parse::zip_method_to_codec(method_id).ok_or_else(|| {
+            CoreError::UnsupportedCompression {
+                algorithm: format!("ZIP method id {method_id}"),
+            }
+        })?;
+        let properties = if method == CompressionMethod::Lzma {
+            read_zip_lzma_header(&mut reader)?
+        } else {
+            vec![]
+        };
+        build_decoder(method, reader, &properties)?
+    };
+
+    // ── Decompress + CRC verify ──────────────────────────────────────────
+    const CHUNK_SIZE: usize = 64 * 1024;
+    let max_output = if compressed_size > 0 {
+        compressed_size.saturating_mul(1000).max(10 * 1024 * 1024)
+    } else {
+        uncompressed_size.max(10 * 1024 * 1024)
+    };
+
+    let mut hasher = crc32fast::Hasher::new();
+    let mut total_written: u64 = 0;
+    let mut chunk_buf = vec![0u8; CHUNK_SIZE];
+    let mut verified_buf = Vec::with_capacity(uncompressed_size as usize);
+
+    {
+        let mut p = progress.lock().unwrap();
+        p.on_entry_start(entry_name, uncompressed_size);
+    }
+
+    loop {
+        let n = decoder.read(&mut chunk_buf).map_err(|io_err| {
+            if let Some(inner) = io_err.into_inner()
+                && let Ok(read_error) = inner.downcast::<crate::io::ReadError>()
+            {
+                return CoreError::Io(*read_error);
+            }
+            CoreError::BitstreamError {
+                detail: format!("decompression failed for '{entry_name}'"),
+            }
+        })?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&chunk_buf[..n]);
+        verified_buf.extend_from_slice(&chunk_buf[..n]);
+        total_written += n as u64;
+
+        if total_written > max_output {
+            return Err(CoreError::ResourceLimitExceeded {
+                message: format!(
+                    "decompression ratio exceeded for '{}': {} bytes from {} compressed",
+                    entry_name, total_written, compressed_size
+                ),
+            });
+        }
+
+        {
+            let mut p = progress.lock().unwrap();
+            p.on_bytes_progress(total_written);
+            if p.should_cancel() {
+                p.on_entry_complete(entry_name, false);
+                return Err(CoreError::Cancelled);
+            }
+        }
+    }
+
+    if !skip_crc_check {
+        let actual_crc = hasher.finalize();
+        trace!(
+            entry = %entry_name,
+            expected = format_args!("{expected_crc:#010x}"),
+            actual = format_args!("{actual_crc:#010x}"),
+            "CRC32 verification"
+        );
+        if actual_crc != expected_crc {
+            warn!(
+                entry = %entry_name,
+                expected = format_args!("{expected_crc:#010x}"),
+                actual = format_args!("{actual_crc:#010x}"),
+                "CRC32 mismatch"
+            );
+            let mut p = progress.lock().unwrap();
+            p.on_entry_complete(entry_name, false);
+            return Err(CoreError::CrcMismatch {
+                entry: entry_name.to_owned(),
+                expected: expected_crc,
+                actual: actual_crc,
+            });
+        }
+    }
+
+    {
+        let mut p = progress.lock().unwrap();
+        p.on_entry_complete(entry_name, true);
+    }
+
+    Ok(verified_buf)
 }
 
 #[cfg(test)]
