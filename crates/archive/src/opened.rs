@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use archive_core::{ArchiveReader, ProgressReporter, ScanInfo};
+use archive_core::{ArchiveEntry, ArchiveReader, CoreError, ProgressReporter, ScanInfo};
 use tracing::{debug, info};
 
 use crate::archive::{Archive, ArchiveInner};
@@ -88,6 +88,48 @@ impl PendingArchive {
         }
 
         Ok(archive)
+    }
+
+    /// Scan and extract in a single streaming pass.
+    ///
+    /// Equivalent to calling `scan()` followed by extraction, but done in one
+    /// HTTP stream for RAR5/RAR4 cloud archives.
+    pub async fn scan_and_extract<Filter, SinkFn>(
+        mut self,
+        filter: Filter,
+        sink_factory: SinkFn,
+        progress: Arc<Mutex<dyn ProgressReporter>>,
+        password: Option<&[u8]>,
+    ) -> Result<(Archive, u64), ArchiveError>
+    where
+        Filter: Fn(&ArchiveEntry) -> bool + Send + Sync + 'static,
+        SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn std::io::Write + Send>> + Send + 'static,
+    {
+        let total = match &mut self.inner {
+            ArchiveInner::Zip(_) => {
+                return Err(translate_core_error(CoreError::UnsupportedFeature {
+                    detail: "streaming extraction not supported for ZIP".into(),
+                }));
+            }
+            ArchiveInner::Rar(r) => r
+                .extract_all_streaming(filter, sink_factory, progress.clone(), password)
+                .await
+                .map_err(translate_core_error)?,
+            ArchiveInner::Rar4(r) => r
+                .extract_all_streaming(filter, sink_factory, progress.clone(), password)
+                .await
+                .map_err(translate_core_error)?,
+        };
+
+        let archive = Archive { inner: self.inner };
+
+        // Save cache (same pattern as PendingArchive::scan).
+        if let Some(cache_path) = cache_path_for(&self.source) {
+            debug!(cache_path = %cache_path.display(), "saving scan+extract result to cache");
+            let _ = archive.save_cache(&self.fingerprint, &cache_path);
+        }
+
+        Ok((archive, total))
     }
 }
 

@@ -3,9 +3,10 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 3 — Interactive TUI + Google Drive Provider.
-* **Current Active Task:** SESSION_PLAN.md step 6 — Facade wiring.
+* **Current Active Task:** [HANDOVER] — SESSION_PLAN.md complete.
 * **Baseline:** 214 tests pass, 11 ignored. (archive-core: 118 unit + 46 integration [21 rar + 13 zip + 12 rar4]; archive: 42 unit + 11 cloud_e2e ignored; archive-cli: 1 unit; archive-gdrive: 7 unit). 3 pre-existing clippy warnings (collapsible_if in run_elastic_scan, let_and_return in extract_all, too_many_arguments in zip/mod.rs).
 * **Pre-existing:** `extract_all_via_unrar` free function already in `crates/archive-core/src/rar/mod.rs` (kept from prior work).
+* **Completed:** Pipelined Streaming Splitter (RAR5 + RAR4) — all 6 steps done. `Archive::extract_all_streaming` and `PendingArchive::scan_and_extract` wired in `archive` crate.
 
 
 ---

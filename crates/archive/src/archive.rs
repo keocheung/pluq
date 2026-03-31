@@ -320,6 +320,35 @@ impl Archive {
         }
         .map_err(translate_core_error)
     }
+
+    /// Extract entries in a single streaming pass with pipelined I/O.
+    ///
+    /// For RAR5/RAR4 cloud archives, this replaces the "download everything
+    /// to a temp file" approach with a one-pass streaming splitter that uses
+    /// 1x disk space (one snippet at a time).
+    ///
+    /// Populates entries as a side effect (like `scan`).
+    /// Returns total uncompressed bytes written.
+    pub async fn extract_all_streaming<Filter, SinkFn>(
+        &mut self,
+        filter: Filter,
+        sink_factory: SinkFn,
+        progress: Arc<Mutex<dyn ProgressReporter>>,
+        password: Option<&[u8]>,
+    ) -> Result<u64, ArchiveError>
+    where
+        Filter: Fn(&ArchiveEntry) -> bool + Send + Sync + 'static,
+        SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn std::io::Write + Send>> + Send + 'static,
+    {
+        match &mut self.inner {
+            ArchiveInner::Zip(z) => z.extract_all_streaming(filter, sink_factory, progress, password)
+                .await.map_err(translate_core_error),
+            ArchiveInner::Rar(r) => r.extract_all_streaming(filter, sink_factory, progress, password)
+                .await.map_err(translate_core_error),
+            ArchiveInner::Rar4(r) => r.extract_all_streaming(filter, sink_factory, progress, password)
+                .await.map_err(translate_core_error),
+        }
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
