@@ -232,7 +232,7 @@ impl<R: ReadAt> RarArchive<R> {
             debug!("local source: running immediate elastic scan");
             let no_op: Arc<Mutex<dyn ProgressReporter>> = Arc::new(Mutex::new(()));
             let (entries, locations) =
-                Self::run_elastic_scan(&reader, preamble_end as u64, size, &no_op).await?;
+                Self::run_elastic_scan(&reader, preamble_end as u64, size, &no_op, None).await?;
             return Ok(Self {
                 reader,
                 entries,
@@ -323,6 +323,7 @@ impl<R: ReadAt> RarArchive<R> {
         start_offset: u64,
         size: u64,
         progress: &Arc<Mutex<dyn ProgressReporter>>,
+        snippet_config: Option<SnippetConfig>,
     ) -> Result<(Vec<ArchiveEntry>, Vec<RarEntryLocation>), CoreError> {
         const LARGE_THRESHOLD: u64 = 10 * 1024 * 1024; // 10 MiB
         debug!(start_offset, size, "elastic scan starting");
@@ -433,8 +434,111 @@ impl<R: ReadAt> RarArchive<R> {
                             is_solid: false,
                             is_encrypted: file_hdr.encryption.is_some(),
                         };
-                        entries.push(entry);
+                        let crc32 = location.crc32;
+                        let blake2_hash = location.blake2_hash;
+                        entries.push(entry.clone());
                         locations.push(location);
+
+                        // Snippet branch: produce a mini-archive for this entry.
+                        if let Some(ref config) = snippet_config {
+                            if (config.filter)(&entry) {
+                                let hdr_bytes_owned =
+                                    buf[buf_pos..buf_pos + hdr_bytes].to_vec();
+
+                                let temp_file = tokio::task::spawn_blocking(
+                                    tempfile::NamedTempFile::new,
+                                )
+                                .await
+                                .map_err(|e| CoreError::BitstreamError {
+                                    detail: format!("spawn temp: {e}"),
+                                })?
+                                .map_err(|e| CoreError::BitstreamError {
+                                    detail: format!("create temp: {e}"),
+                                })?;
+
+                                let std_file = temp_file.as_file().try_clone().map_err(
+                                    |e| CoreError::BitstreamError {
+                                        detail: format!("clone temp file: {e}"),
+                                    },
+                                )?;
+                                let mut snippet_writer =
+                                    tokio::io::BufWriter::with_capacity(
+                                        64 * 1024,
+                                        tokio::fs::File::from_std(std_file),
+                                    );
+
+                                snippet_writer
+                                    .write_all(&config.preamble)
+                                    .await
+                                    .map_err(snippet_write_err)?;
+                                snippet_writer
+                                    .write_all(&hdr_bytes_owned)
+                                    .await
+                                    .map_err(snippet_write_err)?;
+
+                                buf_pos += hdr_bytes;
+                                let data_in_buf =
+                                    (buf.len() - buf_pos).min(data_size as usize);
+                                if data_in_buf > 0 {
+                                    snippet_writer
+                                        .write_all(&buf[buf_pos..buf_pos + data_in_buf])
+                                        .await
+                                        .map_err(snippet_write_err)?;
+                                }
+                                buf_pos += data_in_buf;
+
+                                let data_remaining = data_size - data_in_buf as u64;
+                                if data_remaining > 0 {
+                                    buf.drain(..buf_pos);
+                                    buf_pos = 0;
+                                    tokio::io::copy(
+                                        &mut (&mut stream).take(data_remaining),
+                                        &mut snippet_writer,
+                                    )
+                                    .await
+                                    .map_err(|e| scan_stream_err(e, offset))?;
+                                }
+
+                                snippet_writer
+                                    .write_all(&config.end_block)
+                                    .await
+                                    .map_err(snippet_write_err)?;
+                                snippet_writer
+                                    .flush()
+                                    .await
+                                    .map_err(snippet_write_err)?;
+                                drop(snippet_writer);
+
+                                let (_, snippet_path) =
+                                    temp_file.keep().map_err(|e| CoreError::BitstreamError {
+                                        detail: format!("keep temp file: {e}"),
+                                    })?;
+                                if config
+                                    .sender
+                                    .send(SnippetMsg {
+                                        path: snippet_path.clone(),
+                                        entry: entry.clone(),
+                                        crc32,
+                                        blake2_hash,
+                                    })
+                                    .await
+                                    .is_err()
+                                {
+                                    let _ = std::fs::remove_file(&snippet_path);
+                                    return Err(CoreError::BitstreamError {
+                                        detail: "extraction consumer dropped unexpectedly"
+                                            .into(),
+                                    });
+                                }
+
+                                offset += total_size;
+                                progress
+                                    .lock()
+                                    .unwrap()
+                                    .on_scan_progress(offset, entries.len());
+                                continue;
+                            }
+                        }
                     }
 
                     buf_pos += hdr_bytes; // advance past header
@@ -1196,7 +1300,7 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for RarArchive<R> {
         }
 
         let (entries, locations) =
-            Self::run_elastic_scan(&self.reader, preamble_end, size, &progress).await?;
+            Self::run_elastic_scan(&self.reader, preamble_end, size, &progress, None).await?;
 
         let entry_count = entries.len();
         self.entries = entries;
@@ -1229,6 +1333,10 @@ fn scan_stream_err(e: std::io::Error, offset: u64) -> CoreError {
         offset,
         reason: "stream read failed during scan".into(),
     }
+}
+
+fn snippet_write_err(e: std::io::Error) -> CoreError {
+    CoreError::BitstreamError { detail: format!("snippet write: {e}") }
 }
 
 /// Convert a Unix timestamp (seconds since 1970-01-01) to `SystemTime`.
