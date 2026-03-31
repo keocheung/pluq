@@ -614,28 +614,33 @@ impl<R: ReadAt> RarArchive<R> {
     /// `sink_factory` is called once per entry from a blocking context.
     /// Return `Some(writer)` to extract, `None` to skip.
     pub async fn extract_all<F>(
-        &self,
+        &mut self,
         entry_indices: &[usize],
         sink_factory: F,
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
     ) -> Result<u64, CoreError>
     where
+        R: Send + Sync + 'static,
         F: FnMut(&ArchiveEntry) -> Option<Box<dyn std::io::Write + Send>> + Send + 'static,
     {
-        let work: Vec<(ArchiveEntry, RarEntryLocation)> = entry_indices
-            .iter()
-            .filter(|&&idx| {
-                !self.entries[idx].is_directory && !self.locations[idx].is_solid
-            })
-            .map(|&idx| (self.entries[idx].clone(), self.locations[idx].clone()))
-            .collect();
-
-        if work.is_empty() {
+        if entry_indices.is_empty() {
             return Ok(0);
         }
 
         if let Some(path) = &self.local_path {
+            let work: Vec<(ArchiveEntry, RarEntryLocation)> = entry_indices
+                .iter()
+                .filter(|&&idx| {
+                    !self.entries[idx].is_directory && !self.locations[idx].is_solid
+                })
+                .map(|&idx| (self.entries[idx].clone(), self.locations[idx].clone()))
+                .collect();
+
+            if work.is_empty() {
+                return Ok(0);
+            }
+
             info!(entries = work.len(), "RAR extract_all: local path");
             return extract_all_via_unrar(
                 path.clone(),
@@ -647,71 +652,16 @@ impl<R: ReadAt> RarArchive<R> {
             .await;
         }
 
-        // Cloud path: download to temp file via one stream, then extract locally.
-        info!(entries = work.len(), "RAR extract_all: cloud path (single stream to temp)");
-        let preamble = self.archive_preamble.clone();
-        let preamble_end = preamble.len() as u64;
-        let archive_size = self.archive_size;
-
-        // Create temp file.
-        let temp_file = tokio::task::spawn_blocking(tempfile::NamedTempFile::new)
-            .await
-            .map_err(|e| CoreError::BitstreamError {
-                detail: format!("spawn temp file failed: {e}"),
-            })?
-            .map_err(|e| CoreError::BitstreamError {
-                detail: format!("create temp file failed: {e}"),
-            })?;
-
-        // Write preamble + stream body + end block to temp file.
-        let temp_std = temp_file.as_file().try_clone().map_err(|e| {
-            CoreError::BitstreamError {
-                detail: format!("temp file clone failed: {e}"),
-            }
-        })?;
-        let mut temp_writer =
-            tokio::io::BufWriter::new(tokio::fs::File::from_std(temp_std));
-
-        temp_writer.write_all(&preamble).await.map_err(|e| {
-            CoreError::BitstreamError {
-                detail: format!("temp file write preamble failed: {e}"),
-            }
-        })?;
-
-        // One HTTP request: stream the entire body.
-        let body_len = archive_size.saturating_sub(preamble_end);
-        let mut stream = self
-            .reader
-            .read_stream(preamble_end, body_len)
-            .await
-            .map_err(CoreError::Io)?;
-
-        tokio::io::copy(&mut stream, &mut temp_writer)
-            .await
-            .map_err(|e| CoreError::BitstreamError {
-                detail: format!("temp file stream copy failed: {e}"),
-            })?;
-
-        temp_writer.flush().await.map_err(|e| {
-            CoreError::BitstreamError {
-                detail: format!("temp file flush failed: {e}"),
-            }
-        })?;
-        drop(temp_writer);
-
-        // Extract from the local temp file.
-        let temp_path = temp_file.path().to_path_buf();
-        let result = extract_all_via_unrar(
-            temp_path,
-            work,
+        // Cloud path: use streaming splitter pipeline.
+        let wanted: std::collections::HashSet<usize> =
+            entry_indices.iter().copied().collect();
+        self.extract_all_streaming(
+            move |e: &ArchiveEntry| wanted.contains(&e.index),
             sink_factory,
             progress,
             password,
         )
-        .await;
-
-        // temp_file dropped here → auto-deleted.
-        result
+        .await
     }
 
     /// Bytes that must be transferred to produce this entry.
