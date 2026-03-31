@@ -64,6 +64,32 @@ pub struct RarEntryLocation {
     pub is_encrypted: bool,
 }
 
+// ── Streaming splitter types (private) ───────────────────────────────────────
+
+/// Sent from producer to consumer over the bounded channel.
+/// Used by the streaming splitter pipeline.
+#[allow(dead_code)]
+pub(crate) struct SnippetMsg {
+    /// Path to the temp file containing a valid standalone RAR archive.
+    pub(crate) path: std::path::PathBuf,
+    /// The discovered entry metadata.
+    pub(crate) entry: ArchiveEntry,
+    /// CRC32 of uncompressed data (for verification after unrar).
+    pub(crate) crc32: Option<u32>,
+    /// BLAKE2sp hash (RAR5 only; None for RAR4).
+    pub(crate) blake2_hash: Option<[u8; 32]>,
+}
+
+/// Extraction config passed into the modified elastic scan.
+/// When provided, the scan writes snippet micro-archives instead of discarding data.
+#[allow(dead_code)]
+pub(crate) struct SnippetConfig {
+    pub(crate) sender: tokio::sync::mpsc::Sender<SnippetMsg>,
+    pub(crate) preamble: bytes::Bytes,
+    pub(crate) end_block: bytes::Bytes,
+    pub(crate) filter: Box<dyn Fn(&ArchiveEntry) -> bool + Send + Sync>,
+}
+
 // ── RarArchive ────────────────────────────────────────────────────────────────
 
 /// A parsed RAR5 archive backed by any [`ReadAt`] source.

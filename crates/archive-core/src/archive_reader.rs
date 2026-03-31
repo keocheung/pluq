@@ -79,4 +79,36 @@ pub trait ArchiveReader {
     ) -> impl std::future::Future<Output = Result<(), CoreError>> + Send {
         async { Ok(()) }
     }
+
+    /// Extract entries in a single streaming pass.
+    ///
+    /// Scans the archive linearly, populating `entries()` as a side effect
+    /// (like `scan_metadata`), while simultaneously extracting entries that
+    /// pass `filter` via `sink_factory`.
+    ///
+    /// - **Local archives:** delegates to the existing `unrar` direct path.
+    /// - **Cloud archives:** uses the pipelined streaming splitter (one HTTP
+    ///   stream, per-entry snippet micro-archives, bounded-channel backpressure).
+    ///
+    /// Returns total uncompressed bytes written.
+    ///
+    /// Default: returns `UnsupportedFeature` (ZIP has random access).
+    fn extract_all_streaming<Filter, SinkFn>(
+        &mut self,
+        filter: Filter,
+        sink_factory: SinkFn,
+        progress: Arc<Mutex<dyn ProgressReporter>>,
+        password: Option<&[u8]>,
+    ) -> impl std::future::Future<Output = Result<u64, CoreError>> + Send
+    where
+        Filter: Fn(&ArchiveEntry) -> bool + Send + Sync + 'static,
+        SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn std::io::Write + Send>> + Send + 'static,
+    {
+        async move {
+            let _ = (filter, sink_factory, progress, password);
+            Err(CoreError::UnsupportedFeature {
+                detail: "streaming extraction not supported for this format".into(),
+            })
+        }
+    }
 }
