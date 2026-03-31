@@ -302,3 +302,104 @@ async fn rar4_elastic_scan_progress_callbacks() {
     assert_eq!(r.scan_completed.len(), 1);
     assert_eq!(r.scan_completed[0], 1);
 }
+
+// ── extract_all_streaming (local path) ────────────────────────────────────────
+
+/// Simple `Write` impl that appends to a shared `Vec<u8>`.
+struct LockedSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LockedSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn rar4_extract_all_streaming_local_byte_count() {
+    let file1 = b"Hello from file one\n";
+    let file2 = b"Second file content\n";
+    let bytes = build_rar4_store_archive(&[("file1.txt", file1), ("file2.txt", file2)]);
+    let (_g, path) = write_tempfile(&bytes);
+
+    let mut archive = Rar4Archive::open(Source::detect(&path)).await.expect("open");
+    let progress = Arc::new(Mutex::new(()));
+    let total = archive
+        .extract_all_streaming(
+            |_| true,
+            |_entry| Some(Box::new(std::io::sink()) as Box<dyn std::io::Write + Send>),
+            progress,
+            None,
+        )
+        .await
+        .expect("extract_all_streaming");
+
+    assert_eq!(total, (file1.len() + file2.len()) as u64);
+}
+
+#[tokio::test]
+async fn rar4_extract_all_streaming_local_content() {
+    let file1 = b"Hello from file one\n";
+    let file2 = b"Second file content\n";
+    let bytes = build_rar4_store_archive(&[("file1.txt", file1), ("file2.txt", file2)]);
+    let (_g, path) = write_tempfile(&bytes);
+
+    let mut archive = Rar4Archive::open(Source::detect(&path)).await.expect("open");
+
+    let buf1 = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let buf2 = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let buf1c = buf1.clone();
+    let buf2c = buf2.clone();
+    let mut call = 0_usize;
+
+    archive
+        .extract_all_streaming(
+            |_| true,
+            move |_entry| {
+                call += 1;
+                if call == 1 {
+                    Some(Box::new(LockedSink(buf1c.clone())) as Box<dyn std::io::Write + Send>)
+                } else {
+                    Some(Box::new(LockedSink(buf2c.clone())) as Box<dyn std::io::Write + Send>)
+                }
+            },
+            Arc::new(Mutex::new(())),
+            None,
+        )
+        .await
+        .expect("extract_all_streaming");
+
+    assert_eq!(buf1.lock().unwrap().as_slice(), file1 as &[u8]);
+    assert_eq!(buf2.lock().unwrap().as_slice(), file2 as &[u8]);
+}
+
+#[tokio::test]
+async fn rar4_extract_all_streaming_local_filter() {
+    let file1 = b"Hello from file one\n";
+    let file2 = b"Second file content\n";
+    let bytes = build_rar4_store_archive(&[("file1.txt", file1), ("file2.txt", file2)]);
+    let (_g, path) = write_tempfile(&bytes);
+
+    let mut archive = Rar4Archive::open(Source::detect(&path)).await.expect("open");
+    let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let bufc = buf.clone();
+
+    let progress = Arc::new(Mutex::new(()));
+    let total = archive
+        .extract_all_streaming(
+            |e| e.name == "file1.txt", // only extract file1
+            move |_entry| {
+                Some(Box::new(LockedSink(bufc.clone())) as Box<dyn std::io::Write + Send>)
+            },
+            progress,
+            None,
+        )
+        .await
+        .expect("extract_all_streaming");
+
+    assert_eq!(total, file1.len() as u64);
+    assert_eq!(buf.lock().unwrap().as_slice(), file1 as &[u8]);
+}
