@@ -279,8 +279,28 @@ async fn open_archive(source: &str) -> Result<archive::Opened, Box<dyn std::erro
 ///
 /// Returns `None` if no meaningful stem can be extracted.
 pub fn default_output_folder(source: &str) -> Option<PathBuf> {
+    // For Google Drive "view" links, the last segment is just "view".
+    // Try to extract the file ID instead.
+    if archive_gdrive::is_gdrive_url(source) {
+        if let Some(id) = archive_gdrive::extract_file_id(source) {
+            // If the URL ends in "view", "uc", or "open" (ignoring query), use the ID.
+            let filename = source
+                .split('?')
+                .next()?
+                .rsplit('/')
+                .next()
+                .or_else(|| source.rsplit('\\').next())?;
+            if filename == "view" || filename == "uc" || filename == "open" {
+                return Some(PathBuf::from(id));
+            }
+        }
+    }
+
     // Extract filename from URL path or filesystem path.
-    let filename = source.rsplit('/').next().or_else(|| source.rsplit('\\').next())?;
+    let filename = source
+        .rsplit('/')
+        .next()
+        .or_else(|| source.rsplit('\\').next())?;
     // Strip query string if URL.
     let filename = filename.split('?').next()?;
     let stem = Path::new(filename).file_stem()?;
@@ -369,6 +389,18 @@ mod tests {
         assert_eq!(
             default_output_folder(".hidden.zip"),
             Some(PathBuf::from(".hidden"))
+        );
+        assert_eq!(
+            default_output_folder(
+                "https://drive.google.com/file/d/1ExampleGDriveFileId000000000000/view?usp=sharing"
+            ),
+            Some(PathBuf::from("1ExampleGDriveFileId000000000000"))
+        );
+        assert_eq!(
+            default_output_folder(
+                "https://drive.google.com/uc?id=1ExampleGDriveFileId000000000000&export=download"
+            ),
+            Some(PathBuf::from("1ExampleGDriveFileId000000000000"))
         );
         assert_eq!(default_output_folder(""), None);
     }

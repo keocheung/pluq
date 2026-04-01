@@ -5,10 +5,12 @@
 # Cargo lock files — keep root lock, ignore crate-level ones
 Cargo.lock
 
-# Editor / OS files
+# Editor / OS / Tool files
 .DS_Store
 .idea/
 .vscode/
+.gemini/
+.claude/
 *.swp
 *.swo
 *.log
