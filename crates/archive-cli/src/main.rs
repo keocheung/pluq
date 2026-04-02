@@ -4,7 +4,7 @@ mod tui;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::{Parser, Subcommand};
 use tracing::info;
@@ -84,7 +84,21 @@ async fn main() {
 
     info!(command = ?std::env::args().collect::<Vec<_>>(), "snipe starting");
 
-    if let Err(e) = run(cli.command).await {
+    // ── Ctrl-C cancellation ───────────────────────────────────────────────
+    // Shared flag: set by the signal handler, polled by scan/extraction loops.
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_for_handler = cancel.clone();
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        cancel_for_handler.store(true, Ordering::Relaxed);
+        eprintln!("\n  Cancelling...");
+    });
+
+    if let Err(e) = run(cli.command, cancel).await {
+        // Clean exit on Ctrl-C — message already printed by the handler.
+        if let Some(archive::ArchiveError::Cancelled) = e.downcast_ref::<archive::ArchiveError>() {
+            std::process::exit(130); // Standard Unix exit code for Ctrl-C
+        }
         if let Some(archive::ArchiveError::Transport(inner)) =
             e.downcast_ref::<archive::ArchiveError>()
             && let Some(msg) = provider::format_transport_error(inner.as_ref())
@@ -97,14 +111,13 @@ async fn main() {
     }
 }
 
-async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
+async fn run(command: Command, cancel: Arc<AtomicBool>) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         Command::Browse { source } => {
             let reader = provider::build_reader(&source)?;
             tui::run(source, reader).await?;
         }
         Command::List { source, all } => {
-            let cancel = Arc::new(AtomicBool::new(false));
             let archive = open_with_progress(&source, &cancel).await?;
 
             let entries: Vec<_> = if all {
@@ -145,7 +158,6 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             entry,
             output,
         } => {
-            let cancel = Arc::new(AtomicBool::new(false));
             let archive = open_with_progress(&source, &cancel).await?;
 
             let found = archive
@@ -193,7 +205,6 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         Command::ExtractAll { source, output, all } => {
-            let cancel = Arc::new(AtomicBool::new(false));
             let archive = open_with_progress(&source, &cancel).await?;
 
             let entries: Vec<_> = if all {
@@ -260,7 +271,6 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         Command::Test { source, all } => {
-            let cancel = Arc::new(AtomicBool::new(false));
             let archive = open_with_progress(&source, &cancel).await?;
 
             let entries: Vec<_> = if all {

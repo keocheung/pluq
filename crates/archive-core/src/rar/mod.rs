@@ -349,6 +349,11 @@ impl<R: ReadAt> RarArchive<R> {
                 break;
             }
 
+            // Check for cancellation at the top of each block iteration.
+            if progress.lock().unwrap().should_cancel() {
+                return Err(CoreError::Cancelled);
+            }
+
             // Compact consumed prefix to bound memory usage.
             if buf_pos > 4096 {
                 buf.drain(..buf_pos);
