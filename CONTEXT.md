@@ -3,7 +3,7 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 3 — Interactive TUI + Google Drive Provider.
-* **Current Active Task:** [HANDOVER] — SESSION_PLAN.md complete.
+* **Current Active Task:** [HANDOVER] — SESSION_PLAN.md complete (CLI Progress Reporting — 7 steps).
 * **Baseline:** 214 tests pass, 11 ignored. (archive-core: 118 unit + 46 integration [21 rar + 13 zip + 12 rar4]; archive: 42 unit + 11 cloud_e2e ignored; archive-cli: 1 unit; archive-gdrive: 7 unit). 3 pre-existing clippy warnings (collapsible_if in run_elastic_scan, let_and_return in extract_all, too_many_arguments in zip/mod.rs).
 * **Pre-existing:** `extract_all_via_unrar` free function already in `crates/archive-core/src/rar/mod.rs` (kept from prior work).
 * **Completed:** Pipelined Streaming Splitter (RAR5 + RAR4) — all 6 steps done. `Archive::extract_all_streaming` and `PendingArchive::scan_and_extract` wired in `archive` crate.
@@ -23,7 +23,8 @@
 ### Agent Developer Guidelines
 
 1.  **Start of Session:** Read this file first. Consult Tier 2 docs on-demand for deeper context.
-2.  **During Work:** Keep `Current Active Task` pointing to the active `SESSION_PLAN.md` step.
+2.  **Session Planning:** Use a "Master-Step" pattern at the project root: `SESSION_PLAN.md` (overview/index) + `SESSION_PLAN_STEP_N.md` (detailed steps in separate files). This naming convention ensures they are automatically ignored by `.gitignore`.
+3.  **During Work:** Keep `Current Active Task` pointing to the active `SESSION_PLAN.md` step.
 3.  **End of Task:** Update `[Dynamic State]` (task pointer + baseline). On plan completion, reset to `[HANDOVER]`.
 4.  **Commits:** **Conventional Commits** with crate scope (`feat(archive-core): ...`). Bodies use strict `-` bullet lists.
 5.  **Git Protocol:** **NEVER** auto-commit or stage. Always ask Stefan first.
