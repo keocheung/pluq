@@ -3,7 +3,7 @@ mod provider;
 mod tui;
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::AtomicBool;
 
 use clap::{Parser, Subcommand};
@@ -186,6 +186,12 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
 
             tokio::fs::create_dir_all(&output_dir).await?;
 
+            let file_count = entries.iter().filter(|e| !e.is_directory).count();
+            let mut reporter = cli_progress::CliProgressReporter::new(cancel.clone());
+            reporter.set_total_entries(file_count as u64);
+            let progress: Arc<Mutex<dyn archive::ProgressReporter>> =
+                Arc::new(Mutex::new(reporter));
+
             let mut extracted: usize = 0;
             let mut skipped: usize = 0;
 
@@ -209,16 +215,18 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
                     tokio::fs::create_dir_all(parent).await?;
                 }
 
-                let mut file = tokio::fs::File::create(&dest).await?;
-                let progress: std::sync::Arc<std::sync::Mutex<dyn archive::ProgressReporter>> =
-                    std::sync::Arc::new(std::sync::Mutex::new(()));
-                archive.extract(entry, &mut file, progress, None).await?;
+                {
+                    let mut p = progress.lock().unwrap();
+                    p.on_entry_start(&entry.name, entry.uncompressed_size);
+                }
 
-                println!(
-                    "  OK  {} ({})",
-                    entry.name,
-                    format_size(entry.uncompressed_size)
-                );
+                let mut file = tokio::fs::File::create(&dest).await?;
+                archive.extract(entry, &mut file, progress.clone(), None).await?;
+
+                {
+                    let mut p = progress.lock().unwrap();
+                    p.on_entry_complete(&entry.name, true);
+                }
                 extracted += 1;
             }
 
