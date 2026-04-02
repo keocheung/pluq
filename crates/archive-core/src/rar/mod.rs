@@ -1570,6 +1570,7 @@ where
                     })?;
 
                     total_bytes += data.len() as u64;
+                    progress.lock().unwrap().on_bytes_progress(data.len() as u64);
                     progress.lock().unwrap().on_entry_complete(&name, true);
                 } else {
                     // Sink factory returned None — skip this entry.
@@ -1691,6 +1692,7 @@ where
         detail: format!("write failed for '{entry_name}': {e}"),
     })?;
 
+    progress.lock().unwrap().on_bytes_progress(data.len() as u64);
     progress.lock().unwrap().on_entry_complete(&entry_name, true);
 
     Ok(data.len() as u64)
