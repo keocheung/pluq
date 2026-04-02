@@ -229,7 +229,7 @@ async fn rar4_test_integrity_passes() {
     let (_g, path) = write_tempfile(&bytes);
     let archive = open_rar4(&path).await;
     archive
-        .test(&archive.entries()[0])
+        .test(&archive.entries()[0], Arc::new(Mutex::new(())))
         .await
         .expect("integrity check should pass");
 }

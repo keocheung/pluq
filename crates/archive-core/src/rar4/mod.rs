@@ -565,8 +565,11 @@ impl<R: ReadAt> Rar4Archive<R> {
     }
 
     /// Decompress and verify CRC without retaining output.
-    pub async fn test(&self, entry: &ArchiveEntry) -> Result<(), CoreError> {
-        let progress = Arc::new(Mutex::new(()));
+    pub async fn test(
+        &self,
+        entry: &ArchiveEntry,
+        progress: Arc<Mutex<dyn ProgressReporter>>,
+    ) -> Result<(), CoreError> {
         self.extract(entry, &mut tokio::io::sink(), progress, None)
             .await
             .map(|_| ())
@@ -869,8 +872,8 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for Rar4Archive<R> {
         Rar4Archive::extract(self, entry, sink, progress, password).await
     }
 
-    async fn test(&self, entry: &ArchiveEntry) -> Result<(), CoreError> {
-        Rar4Archive::test(self, entry).await
+    async fn test(&self, entry: &ArchiveEntry, progress: Arc<Mutex<dyn ProgressReporter>>) -> Result<(), CoreError> {
+        Rar4Archive::test(self, entry, progress).await
     }
 
     fn scan_info(&self) -> crate::scan::ScanInfo {

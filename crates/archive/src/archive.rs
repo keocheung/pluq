@@ -312,11 +312,15 @@ impl Archive {
     }
 
     /// Decompress and verify CRC without retaining output.
-    pub async fn test(&self, entry: &ArchiveEntry) -> Result<(), ArchiveError> {
+    pub async fn test(
+        &self,
+        entry: &ArchiveEntry,
+        progress: Arc<Mutex<dyn ProgressReporter>>,
+    ) -> Result<(), ArchiveError> {
         match &self.inner {
-            ArchiveInner::Zip(z) => z.test(entry).await,
-            ArchiveInner::Rar(r) => r.test(entry).await,
-            ArchiveInner::Rar4(r) => r.test(entry).await,
+            ArchiveInner::Zip(z) => z.test(entry, progress).await,
+            ArchiveInner::Rar(r) => r.test(entry, progress).await,
+            ArchiveInner::Rar4(r) => r.test(entry, progress).await,
         }
         .map_err(translate_core_error)
     }

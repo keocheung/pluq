@@ -62,6 +62,7 @@ pub trait ArchiveReader {
     fn test(
         &self,
         entry: &ArchiveEntry,
+        progress: Arc<Mutex<dyn ProgressReporter>>,
     ) -> impl std::future::Future<Output = Result<(), CoreError>> + Send;
 
     /// Whether this archive's entry list is ready or requires a scan first.

@@ -269,15 +269,33 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
                 archive.entries_clean()
             };
 
+            let file_count = entries.iter().filter(|e| !e.is_directory).count();
+            let mut reporter = cli_progress::CliProgressReporter::new(cancel.clone());
+            reporter.set_total_entries(file_count as u64);
+            let progress: Arc<Mutex<dyn archive::ProgressReporter>> =
+                Arc::new(Mutex::new(reporter));
+
             let mut failures: usize = 0;
 
             for entry in &entries {
                 if entry.is_directory {
                     continue;
                 }
-                match archive.test(entry).await {
-                    Ok(()) => println!("  OK  {}", entry.name),
+
+                {
+                    let mut p = progress.lock().unwrap();
+                    p.on_entry_start(&entry.name, entry.uncompressed_size);
+                }
+
+                match archive.test(entry, progress.clone()).await {
+                    Ok(()) => {
+                        let mut p = progress.lock().unwrap();
+                        p.on_entry_complete(&entry.name, true);
+                    }
                     Err(e) => {
+                        let mut p = progress.lock().unwrap();
+                        p.on_entry_complete(&entry.name, false);
+                        drop(p);
                         eprintln!("  FAIL {} — {e}", entry.name);
                         failures += 1;
                     }

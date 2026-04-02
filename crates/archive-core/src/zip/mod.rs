@@ -391,8 +391,11 @@ impl<R: ReadAt> ZipArchive<R> {
     ///
     /// Equivalent to [`extract`](Self::extract) to a no-op async sink.
     /// Used for archive integrity checking.
-    pub async fn test(&self, entry: &ArchiveEntry) -> Result<(), CoreError> {
-        let progress = Arc::new(Mutex::new(()));
+    pub async fn test(
+        &self,
+        entry: &ArchiveEntry,
+        progress: Arc<Mutex<dyn ProgressReporter>>,
+    ) -> Result<(), CoreError> {
         self.extract(entry, &mut tokio::io::sink(), progress, None)
             .await
             .map(|_| ())
@@ -553,8 +556,8 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for ZipArchive<R> {
         ZipArchive::extract(self, entry, sink, progress, password).await
     }
 
-    async fn test(&self, entry: &ArchiveEntry) -> Result<(), CoreError> {
-        ZipArchive::test(self, entry).await
+    async fn test(&self, entry: &ArchiveEntry, progress: Arc<Mutex<dyn ProgressReporter>>) -> Result<(), CoreError> {
+        ZipArchive::test(self, entry, progress).await
     }
 }
 
@@ -911,7 +914,7 @@ mod tests {
         let content = b"integrity check content";
         let (_tmp, reader) = create_test_zip(&[("file.txt", content, ZipCrateMethod::Deflated)]);
         let zip = ZipArchive::open(reader).await.unwrap();
-        zip.test(&zip.entries()[0]).await.unwrap();
+        zip.test(&zip.entries()[0], Arc::new(Mutex::new(()))).await.unwrap();
     }
 
     #[tokio::test]

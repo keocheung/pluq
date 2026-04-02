@@ -144,7 +144,7 @@ async fn rar5_test_integrity_passes() {
     let archive = open_rar(&fixture("rar5_unicode_entry.rar")).await;
     let entry = &archive.entries()[0];
     archive
-        .test(entry)
+        .test(entry, Arc::new(Mutex::new(())))
         .await
         .expect("test integrity check should pass");
 }

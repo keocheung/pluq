@@ -291,14 +291,14 @@ async fn test_integrity_unencrypted_ok_encrypted_requires_password() {
         .iter()
         .find(|e| e.name == "plain_large.txt")
         .unwrap();
-    archive.test(plain_large).await.unwrap();
+    archive.test(plain_large, Arc::new(Mutex::new(()))).await.unwrap();
 
     let plain_small = archive
         .entries()
         .iter()
         .find(|e| e.name == "plain_small.bin")
         .unwrap();
-    archive.test(plain_small).await.unwrap();
+    archive.test(plain_small, Arc::new(Mutex::new(()))).await.unwrap();
 
     // Encrypted entries without password → PasswordRequired
     let zipcrypto = archive
@@ -306,7 +306,7 @@ async fn test_integrity_unencrypted_ok_encrypted_requires_password() {
         .iter()
         .find(|e| e.name == "zipcrypto_deflated.txt")
         .unwrap();
-    let result = archive.test(zipcrypto).await;
+    let result = archive.test(zipcrypto, Arc::new(Mutex::new(()))).await;
     assert!(
         matches!(result, Err(CoreError::PasswordRequired)),
         "expected PasswordRequired for ZipCrypto test(), got: {result:?}"
@@ -317,7 +317,7 @@ async fn test_integrity_unencrypted_ok_encrypted_requires_password() {
         .iter()
         .find(|e| e.name == "aes256_stored.bin")
         .unwrap();
-    let result = archive.test(aes).await;
+    let result = archive.test(aes, Arc::new(Mutex::new(()))).await;
     assert!(
         matches!(result, Err(CoreError::PasswordRequired)),
         "expected PasswordRequired for AES test(), got: {result:?}"
