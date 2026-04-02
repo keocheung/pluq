@@ -154,8 +154,6 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
                 .find(|e| e.name == entry)
                 .ok_or_else(|| format!("entry '{}' not found in archive", entry))?;
 
-            let data = archive.extract_to_bytes(found, None).await?;
-
             let out_path = if output.is_dir() {
                 let file_name = std::path::Path::new(&entry).file_name().unwrap_or_default();
                 output.join(file_name)
@@ -163,12 +161,35 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
                 output
             };
 
-            tokio::fs::write(&out_path, &data).await?;
+            // Ensure parent directory exists.
+            if let Some(parent) = out_path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    tokio::fs::create_dir_all(parent).await?;
+                }
+            }
+
+            let reporter = cli_progress::CliProgressReporter::new(cancel.clone());
+            let progress: Arc<Mutex<dyn archive::ProgressReporter>> =
+                Arc::new(Mutex::new(reporter));
+
+            {
+                let mut p = progress.lock().unwrap();
+                p.on_entry_start(&found.name, found.uncompressed_size);
+            }
+
+            let mut file = tokio::fs::File::create(&out_path).await?;
+            let bytes_written = archive.extract(found, &mut file, progress.clone(), None).await?;
+
+            {
+                let mut p = progress.lock().unwrap();
+                p.on_entry_complete(&found.name, true);
+            }
+
             println!(
                 "  Extracted '{}' → {} ({})",
                 entry,
                 out_path.display(),
-                format_size(data.len() as u64)
+                format_size(bytes_written)
             );
         }
         Command::ExtractAll { source, output, all } => {
