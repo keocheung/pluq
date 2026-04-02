@@ -33,7 +33,19 @@ use crate::archive_reader::ArchiveReader;
 use crate::codec::{build_decoder, CompressionMethod};
 use crate::junk;
 use crate::progress::ProgressReporter;
-use crate::{ArchiveEntry, CoreError, PasswordDetectionMethod, ReadAt};
+use crate::{ArchiveEntry, CoreError, ReadAt};
+
+struct DecompressParams<'a> {
+    entry_name: &'a str,
+    compressed_size: u64,
+    uncompressed_size: u64,
+    method_id: u16,
+    aes_info: Option<AesExtraInfo>,
+    expected_crc: u32,
+    is_encrypted: bool,
+    password: Option<&'a [u8]>,
+    progress: &'a Arc<Mutex<dyn ProgressReporter>>,
+}
 
 /// A parsed ZIP archive backed by any [`ReadAt`] source.
 ///
@@ -187,188 +199,23 @@ impl<R: ReadAt> ZipArchive<R> {
         let is_encrypted = entry.is_encrypted;
         let password_bytes: Option<Vec<u8>> = password.map(|p| p.to_vec());
         let handle = tokio::runtime::Handle::current();
-        let mut sync_reader = SyncIoBridge::new_with_handle(compressed_stream, handle);
+        let sync_reader = SyncIoBridge::new_with_handle(compressed_stream, handle);
 
         let verified: Vec<u8> = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, CoreError> {
-            // ── Determine decryption strategy ─────────────────────────────
-            let is_aes = location_aes_info.is_some() && is_encrypted;
-            // AES entries use HMAC for integrity. For AE-2 the CRC field is 0,
-            // so we skip the post-decompression CRC check for all AES entries.
-            let skip_crc_check = is_aes;
-
-            // ── Decryption + decoder setup ─────────────────────────────────
-            let mut decoder = if is_aes {
-                // ── WinZip AES path ────────────────────────────────────────
-                let aes = location_aes_info.as_ref().unwrap();
-                let pwd = password_bytes.as_deref().unwrap(); // safe: checked above
-
-                let decrypted =
-                    aes::decrypt_winzip_aes(&mut sync_reader, pwd, aes.strength, compressed_size)?;
-
-                let method = parse::zip_method_to_codec(aes.actual_method_id).ok_or_else(|| {
-                    CoreError::UnsupportedCompression {
-                        algorithm: format!(
-                            "ZIP AES actual method id {}",
-                            aes.actual_method_id
-                        ),
-                    }
-                })?;
-                let mut aes_stream = std::io::Cursor::new(decrypted);
-                let properties = if method == CompressionMethod::Lzma {
-                    read_zip_lzma_header(&mut aes_stream)?
-                } else {
-                    vec![]
-                };
-                build_decoder(method, aes_stream, &properties)?
-            } else if is_encrypted {
-                // ── ZipCrypto (PKWARE traditional) path ────────────────────
-                let pwd = password_bytes.as_deref().unwrap(); // safe: checked above
-
-                // Read and decrypt the 12-byte encryption header.
-                let mut enc_header = [0u8; 12];
-                sync_reader.read_exact(&mut enc_header).map_err(|io_err| {
-                    if let Some(inner) = io_err.into_inner()
-                        && let Ok(read_error) = inner.downcast::<crate::io::ReadError>()
-                    {
-                        return CoreError::Io(*read_error);
-                    }
-                    CoreError::InvalidFormat {
-                        message: format!("truncated encryption header for '{entry_name}'"),
-                    }
-                })?;
-
-                let mut decryptor = ZipCryptoDecryptor::new(pwd);
-                decryptor.decrypt(&mut enc_header);
-
-                // Early wrong-password check: byte 11 must match the high byte of the CRC.
-                if enc_header[11] != (expected_crc >> 24) as u8 {
-                    return Err(CoreError::WrongPassword {
-                        method: PasswordDetectionMethod::EarlyHeaderValidation,
-                    });
-                }
-
-                let method =
-                    parse::zip_method_to_codec(location_method_id).ok_or_else(|| {
-                        CoreError::UnsupportedCompression {
-                            algorithm: format!("ZIP method id {location_method_id}"),
-                        }
-                    })?;
-                let mut crypto_reader = ZipCryptoReader::new(sync_reader, decryptor);
-                let properties = if method == CompressionMethod::Lzma {
-                    read_zip_lzma_header(&mut crypto_reader)?
-                } else {
-                    vec![]
-                };
-                build_decoder(method, crypto_reader, &properties)?
-            } else {
-                // ── Plain (unencrypted) path ───────────────────────────────
-                let method =
-                    parse::zip_method_to_codec(location_method_id).ok_or_else(|| {
-                        CoreError::UnsupportedCompression {
-                            algorithm: format!("ZIP method id {location_method_id}"),
-                        }
-                    })?;
-                let properties = if method == CompressionMethod::Lzma {
-                    read_zip_lzma_header(&mut sync_reader)?
-                } else {
-                    vec![]
-                };
-                build_decoder(method, sync_reader, &properties)?
-            };
-
-            const CHUNK_SIZE: usize = 64 * 1024; // 64 KB
-
-            // DoS protection: cap decompressed output to 1000× the compressed size,
-            // with a floor of 10 MB for small compressed inputs.
-            let max_output = if compressed_size > 0 {
-                compressed_size.saturating_mul(1000).max(10 * 1024 * 1024)
-            } else {
-                uncompressed_size.max(10 * 1024 * 1024)
-            };
-
-            let mut hasher = crc32fast::Hasher::new();
-            let mut total_written: u64 = 0;
-            let mut chunk_buf = vec![0u8; CHUNK_SIZE];
-            let mut verified_buf = Vec::with_capacity(uncompressed_size as usize);
-
-            {
-                let mut p = progress.lock().unwrap();
-                p.on_entry_start(&entry_name, uncompressed_size);
-            }
-
-            loop {
-                let n = decoder.read(&mut chunk_buf).map_err(|io_err| {
-                    // Try to recover a structured ReadError embedded by read_stream impls.
-                    // If the io::Error wraps a ReadError (from mid-stream failure), extract it.
-                    // Otherwise, it's a decompressor error — classify as BitstreamError.
-                    if let Some(inner) = io_err.into_inner()
-                        && let Ok(read_error) = inner.downcast::<crate::io::ReadError>()
-                    {
-                        return CoreError::Io(*read_error);
-                    }
-                    CoreError::BitstreamError {
-                        detail: format!("decompression failed for '{entry_name}'"),
-                    }
-                })?;
-                if n == 0 {
-                    break;
-                }
-                hasher.update(&chunk_buf[..n]);
-                verified_buf.extend_from_slice(&chunk_buf[..n]);
-                total_written += n as u64;
-
-                if total_written > max_output {
-                    return Err(CoreError::ResourceLimitExceeded {
-                        message: format!(
-                            "decompression ratio exceeded for '{}': {} bytes from {} compressed",
-                            entry_name, total_written, compressed_size
-                        ),
-                    });
-                }
-
-                {
-                    let mut p = progress.lock().unwrap();
-                    p.on_bytes_progress(total_written);
-                    if p.should_cancel() {
-                        p.on_entry_complete(&entry_name, false);
-                        return Err(CoreError::Cancelled);
-                    }
-                }
-            }
-
-            // CRC32 verification — skipped for AES entries (HMAC was already
-            // verified in decrypt_winzip_aes; AE-2 entries have CRC == 0).
-            if !skip_crc_check {
-                let actual_crc = hasher.finalize();
-                trace!(
-                    entry = %entry_name,
-                    expected = format_args!("{expected_crc:#010x}"),
-                    actual = format_args!("{actual_crc:#010x}"),
-                    "CRC32 verification"
-                );
-                if actual_crc != expected_crc {
-                    warn!(
-                        entry = %entry_name,
-                        expected = format_args!("{expected_crc:#010x}"),
-                        actual = format_args!("{actual_crc:#010x}"),
-                        "CRC32 mismatch"
-                    );
-                    let mut p = progress.lock().unwrap();
-                    p.on_entry_complete(&entry_name, false);
-                    return Err(CoreError::CrcMismatch {
-                        entry: entry_name,
-                        expected: expected_crc,
-                        actual: actual_crc,
-                    });
-                }
-            }
-
-            {
-                let mut p = progress.lock().unwrap();
-                p.on_entry_complete(&entry_name, true);
-            }
-
-            Ok(verified_buf)
+            decompress_and_verify(
+                sync_reader,
+                DecompressParams {
+                    entry_name: &entry_name,
+                    compressed_size,
+                    uncompressed_size,
+                    method_id: location_method_id,
+                    aes_info: location_aes_info,
+                    expected_crc,
+                    is_encrypted,
+                    password: password_bytes.as_deref(),
+                    progress: &progress,
+                },
+            )
         })
         .await
         .map_err(|e| CoreError::BitstreamError {
@@ -506,15 +353,17 @@ impl<R: ReadAt> ZipArchive<R> {
 
                     let verified = decompress_and_verify(
                         std::io::Cursor::new(compressed),
-                        &entry.name,
-                        compressed_size,
-                        entry.uncompressed_size,
-                        location.method_id,
-                        location.aes_info.clone(),
-                        location.crc32,
-                        entry.is_encrypted,
-                        password_bytes.as_deref(),
-                        &progress,
+                        DecompressParams {
+                            entry_name: &entry.name,
+                            compressed_size,
+                            uncompressed_size: entry.uncompressed_size,
+                            method_id: location.method_id,
+                            aes_info: location.aes_info.clone(),
+                            expected_crc: location.crc32,
+                            is_encrypted: entry.is_encrypted,
+                            password: password_bytes.as_deref(),
+                            progress: &progress,
+                        },
                     )?;
 
                     sink.write_all(&verified).map_err(|e| CoreError::BitstreamError {
@@ -622,25 +471,21 @@ fn stream_io_err(e: std::io::Error, offset: u64) -> CoreError {
 /// encrypted+compressed) data and contain exactly `compressed_size` bytes.
 fn decompress_and_verify<R: Read + Send>(
     mut reader: R,
-    entry_name: &str,
-    compressed_size: u64,
-    uncompressed_size: u64,
-    method_id: u16,
-    aes_info: Option<AesExtraInfo>,
-    expected_crc: u32,
-    is_encrypted: bool,
-    password: Option<&[u8]>,
-    progress: &Arc<Mutex<dyn ProgressReporter>>,
+    params: DecompressParams<'_>,
 ) -> Result<Vec<u8>, CoreError> {
-    let is_aes = aes_info.is_some() && is_encrypted;
+    let is_aes = params.aes_info.is_some() && params.is_encrypted;
     let skip_crc_check = is_aes;
 
     // ── Decryption + decoder setup ───────────────────────────────────────
     let mut decoder: Box<dyn crate::codec::Decoder + '_> = if is_aes {
-        let aes_extra = aes_info.as_ref().unwrap();
-        let pwd = password.ok_or(CoreError::PasswordRequired)?;
-        let decrypted =
-            aes::decrypt_winzip_aes(&mut reader, pwd, aes_extra.strength, compressed_size)?;
+        let aes_extra = params.aes_info.as_ref().unwrap();
+        let pwd = params.password.ok_or(CoreError::PasswordRequired)?;
+        let decrypted = aes::decrypt_winzip_aes(
+            &mut reader,
+            pwd,
+            aes_extra.strength,
+            params.compressed_size,
+        )?;
         let method = parse::zip_method_to_codec(aes_extra.actual_method_id).ok_or_else(|| {
             CoreError::UnsupportedCompression {
                 algorithm: format!("ZIP AES actual method id {}", aes_extra.actual_method_id),
@@ -653,8 +498,8 @@ fn decompress_and_verify<R: Read + Send>(
             vec![]
         };
         build_decoder(method, aes_stream, &properties)?
-    } else if is_encrypted {
-        let pwd = password.ok_or(CoreError::PasswordRequired)?;
+    } else if params.is_encrypted {
+        let pwd = params.password.ok_or(CoreError::PasswordRequired)?;
         let mut enc_header = [0u8; 12];
         reader.read_exact(&mut enc_header).map_err(|io_err| {
             if let Some(inner) = io_err.into_inner()
@@ -663,19 +508,19 @@ fn decompress_and_verify<R: Read + Send>(
                 return CoreError::Io(*read_error);
             }
             CoreError::InvalidFormat {
-                message: format!("truncated encryption header for '{entry_name}'"),
+                message: format!("truncated encryption header for '{}'", params.entry_name),
             }
         })?;
         let mut decryptor = ZipCryptoDecryptor::new(pwd);
         decryptor.decrypt(&mut enc_header);
-        if enc_header[11] != (expected_crc >> 24) as u8 {
+        if enc_header[11] != (params.expected_crc >> 24) as u8 {
             return Err(CoreError::WrongPassword {
                 method: crate::PasswordDetectionMethod::EarlyHeaderValidation,
             });
         }
-        let method = parse::zip_method_to_codec(method_id).ok_or_else(|| {
+        let method = parse::zip_method_to_codec(params.method_id).ok_or_else(|| {
             CoreError::UnsupportedCompression {
-                algorithm: format!("ZIP method id {method_id}"),
+                algorithm: format!("ZIP method id {}", params.method_id),
             }
         })?;
         let mut crypto_reader = ZipCryptoReader::new(reader, decryptor);
@@ -686,9 +531,9 @@ fn decompress_and_verify<R: Read + Send>(
         };
         build_decoder(method, crypto_reader, &properties)?
     } else {
-        let method = parse::zip_method_to_codec(method_id).ok_or_else(|| {
+        let method = parse::zip_method_to_codec(params.method_id).ok_or_else(|| {
             CoreError::UnsupportedCompression {
-                algorithm: format!("ZIP method id {method_id}"),
+                algorithm: format!("ZIP method id {}", params.method_id),
             }
         })?;
         let properties = if method == CompressionMethod::Lzma {
@@ -701,20 +546,23 @@ fn decompress_and_verify<R: Read + Send>(
 
     // ── Decompress + CRC verify ──────────────────────────────────────────
     const CHUNK_SIZE: usize = 64 * 1024;
-    let max_output = if compressed_size > 0 {
-        compressed_size.saturating_mul(1000).max(10 * 1024 * 1024)
+    let max_output = if params.compressed_size > 0 {
+        params
+            .compressed_size
+            .saturating_mul(1000)
+            .max(10 * 1024 * 1024)
     } else {
-        uncompressed_size.max(10 * 1024 * 1024)
+        params.uncompressed_size.max(10 * 1024 * 1024)
     };
 
     let mut hasher = crc32fast::Hasher::new();
     let mut total_written: u64 = 0;
     let mut chunk_buf = vec![0u8; CHUNK_SIZE];
-    let mut verified_buf = Vec::with_capacity(uncompressed_size as usize);
+    let mut verified_buf = Vec::with_capacity(params.uncompressed_size as usize);
 
     {
-        let mut p = progress.lock().unwrap();
-        p.on_entry_start(entry_name, uncompressed_size);
+        let mut p = params.progress.lock().unwrap();
+        p.on_entry_start(params.entry_name, params.uncompressed_size);
     }
 
     loop {
@@ -725,7 +573,7 @@ fn decompress_and_verify<R: Read + Send>(
                 return CoreError::Io(*read_error);
             }
             CoreError::BitstreamError {
-                detail: format!("decompression failed for '{entry_name}'"),
+                detail: format!("decompression failed for '{}'", params.entry_name),
             }
         })?;
         if n == 0 {
@@ -739,16 +587,16 @@ fn decompress_and_verify<R: Read + Send>(
             return Err(CoreError::ResourceLimitExceeded {
                 message: format!(
                     "decompression ratio exceeded for '{}': {} bytes from {} compressed",
-                    entry_name, total_written, compressed_size
+                    params.entry_name, total_written, params.compressed_size
                 ),
             });
         }
 
         {
-            let mut p = progress.lock().unwrap();
+            let mut p = params.progress.lock().unwrap();
             p.on_bytes_progress(total_written);
             if p.should_cancel() {
-                p.on_entry_complete(entry_name, false);
+                p.on_entry_complete(params.entry_name, false);
                 return Err(CoreError::Cancelled);
             }
         }
@@ -757,31 +605,31 @@ fn decompress_and_verify<R: Read + Send>(
     if !skip_crc_check {
         let actual_crc = hasher.finalize();
         trace!(
-            entry = %entry_name,
-            expected = format_args!("{expected_crc:#010x}"),
+            entry = %params.entry_name,
+            expected = format_args!("{:#010x}", params.expected_crc),
             actual = format_args!("{actual_crc:#010x}"),
             "CRC32 verification"
         );
-        if actual_crc != expected_crc {
+        if actual_crc != params.expected_crc {
             warn!(
-                entry = %entry_name,
-                expected = format_args!("{expected_crc:#010x}"),
+                entry = %params.entry_name,
+                expected = format_args!("{:#010x}", params.expected_crc),
                 actual = format_args!("{actual_crc:#010x}"),
                 "CRC32 mismatch"
             );
-            let mut p = progress.lock().unwrap();
-            p.on_entry_complete(entry_name, false);
+            let mut p = params.progress.lock().unwrap();
+            p.on_entry_complete(params.entry_name, false);
             return Err(CoreError::CrcMismatch {
-                entry: entry_name.to_owned(),
-                expected: expected_crc,
+                entry: params.entry_name.to_owned(),
+                expected: params.expected_crc,
                 actual: actual_crc,
             });
         }
     }
 
     {
-        let mut p = progress.lock().unwrap();
-        p.on_entry_complete(entry_name, true);
+        let mut p = params.progress.lock().unwrap();
+        p.on_entry_complete(params.entry_name, true);
     }
 
     Ok(verified_buf)
@@ -798,6 +646,7 @@ mod tests {
 
     use crate::codec::CompressionMethod;
     use crate::io::LocalReadAt;
+    use crate::PasswordDetectionMethod;
 
     use super::*;
 

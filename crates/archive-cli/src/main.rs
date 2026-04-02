@@ -174,10 +174,10 @@ async fn run(command: Command, cancel: Arc<AtomicBool>) -> Result<(), Box<dyn st
             };
 
             // Ensure parent directory exists.
-            if let Some(parent) = out_path.parent() {
-                if !parent.as_os_str().is_empty() {
-                    tokio::fs::create_dir_all(parent).await?;
-                }
+            if let Some(parent) = out_path.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                tokio::fs::create_dir_all(parent).await?;
             }
 
             let reporter = cli_progress::CliProgressReporter::new(cancel.clone());
@@ -375,18 +375,18 @@ async fn open_archive(source: &str) -> Result<archive::Opened, Box<dyn std::erro
 pub fn default_output_folder(source: &str) -> Option<PathBuf> {
     // For Google Drive "view" links, the last segment is just "view".
     // Try to extract the file ID instead.
-    if archive_gdrive::is_gdrive_url(source) {
-        if let Some(id) = archive_gdrive::extract_file_id(source) {
-            // If the URL ends in "view", "uc", or "open" (ignoring query), use the ID.
-            let filename = source
-                .split('?')
-                .next()?
-                .rsplit('/')
-                .next()
-                .or_else(|| source.rsplit('\\').next())?;
-            if filename == "view" || filename == "uc" || filename == "open" {
-                return Some(PathBuf::from(id));
-            }
+    if archive_gdrive::is_gdrive_url(source)
+        && let Some(id) = archive_gdrive::extract_file_id(source)
+    {
+        // If the URL ends in "view", "uc", or "open" (ignoring query), use the ID.
+        let filename = source
+            .split('?')
+            .next()?
+            .rsplit('/')
+            .next()
+            .or_else(|| source.rsplit('\\').next())?;
+        if filename == "view" || filename == "uc" || filename == "open" {
+            return Some(PathBuf::from(id));
         }
     }
 

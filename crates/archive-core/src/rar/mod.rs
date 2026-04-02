@@ -443,10 +443,11 @@ impl<R: ReadAt> RarArchive<R> {
                         locations.push(location);
 
                         // Snippet branch: produce a mini-archive for this entry.
-                        if let Some(ref config) = snippet_config {
-                            if (config.filter)(&entry) {
-                                let hdr_bytes_owned =
-                                    buf[buf_pos..buf_pos + hdr_bytes].to_vec();
+                        if let Some(ref config) = snippet_config
+                            && (config.filter)(&entry)
+                        {
+                            let hdr_bytes_owned =
+                                buf[buf_pos..buf_pos + hdr_bytes].to_vec();
 
                                 let temp_file = tokio::task::spawn_blocking(
                                     tempfile::NamedTempFile::new,
@@ -542,7 +543,6 @@ impl<R: ReadAt> RarArchive<R> {
                                 continue;
                             }
                         }
-                    }
 
                     buf_pos += hdr_bytes; // advance past header
 

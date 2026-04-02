@@ -360,10 +360,11 @@ impl<R: ReadAt> Rar4Archive<R> {
                         locations.push(location);
 
                         // Snippet branch: produce a mini-archive for this entry.
-                        if let Some(ref config) = snippet_config {
-                            if (config.filter)(&entry) {
-                                let head_bytes_owned =
-                                    buf[buf_pos..buf_pos + head_size].to_vec();
+                        if let Some(ref config) = snippet_config
+                            && (config.filter)(&entry)
+                        {
+                            let head_bytes_owned =
+                                buf[buf_pos..buf_pos + head_size].to_vec();
 
                                 let temp_file = tokio::task::spawn_blocking(
                                     tempfile::NamedTempFile::new,
@@ -462,7 +463,6 @@ impl<R: ReadAt> Rar4Archive<R> {
                                     .unwrap()
                                     .on_scan_progress(offset, entries.len());
                                 continue;
-                            }
                         }
                     }
 
