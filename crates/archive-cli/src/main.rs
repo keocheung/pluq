@@ -1,3 +1,4 @@
+mod cli_progress;
 mod provider;
 mod tui;
 
