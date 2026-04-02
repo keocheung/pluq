@@ -3,6 +3,8 @@ mod provider;
 mod tui;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use clap::{Parser, Subcommand};
 use tracing::info;
@@ -102,7 +104,8 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             tui::run(source, reader).await?;
         }
         Command::List { source, all } => {
-            let archive = open_archive(&source).await?.ready().await?;
+            let cancel = Arc::new(AtomicBool::new(false));
+            let archive = open_with_progress(&source, &cancel).await?;
 
             let entries: Vec<_> = if all {
                 archive.entries().iter().collect()
@@ -142,7 +145,8 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             entry,
             output,
         } => {
-            let archive = open_archive(&source).await?.ready().await?;
+            let cancel = Arc::new(AtomicBool::new(false));
+            let archive = open_with_progress(&source, &cancel).await?;
 
             let found = archive
                 .entries()
@@ -168,7 +172,8 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         Command::ExtractAll { source, output, all } => {
-            let archive = open_archive(&source).await?.ready().await?;
+            let cancel = Arc::new(AtomicBool::new(false));
+            let archive = open_with_progress(&source, &cancel).await?;
 
             let entries: Vec<_> = if all {
                 archive.entries().iter().collect()
@@ -226,7 +231,8 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         Command::Test { source, all } => {
-            let archive = open_archive(&source).await?.ready().await?;
+            let cancel = Arc::new(AtomicBool::new(false));
+            let archive = open_with_progress(&source, &cancel).await?;
 
             let entries: Vec<_> = if all {
                 archive.entries().iter().collect()
@@ -260,6 +266,36 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Open an archive with scan progress reporting.
+///
+/// If the archive needs scanning (cloud RAR without Quick Open), displays
+/// a progress bar on stderr. Otherwise returns immediately.
+async fn open_with_progress(
+    source: &str,
+    cancel: &Arc<AtomicBool>,
+) -> Result<Archive, Box<dyn std::error::Error>> {
+    eprintln!("  Opening {source}...");
+    let opened = open_archive(source).await?;
+    match opened {
+        archive::Opened::Ready(a) => Ok(a),
+        archive::Opened::NeedsScan(pending) => {
+            let info = pending.scan_info().clone();
+            eprintln!(
+                "  Archive requires scanning{}",
+                match &info {
+                    archive::ScanInfo::Required { estimated_bytes, .. } =>
+                        format!(" (~{})", format_size(*estimated_bytes)),
+                    _ => String::new(),
+                }
+            );
+            let reporter = cli_progress::CliProgressReporter::new(cancel.clone());
+            let progress: std::sync::Arc<std::sync::Mutex<dyn archive::ProgressReporter>> =
+                std::sync::Arc::new(std::sync::Mutex::new(reporter));
+            Ok(pending.scan(progress).await?)
+        }
+    }
 }
 
 /// Open an archive, using the provider dispatch for cloud URLs.

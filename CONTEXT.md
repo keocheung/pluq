@@ -3,11 +3,12 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 3 — Interactive TUI + Google Drive Provider.
-* **Current Active Task:** SESSION_PLAN.md Step 2 — Wire scan progress into all CLI commands.
+* **Current Active Task:** SESSION_PLAN.md Step 3 — Wire extraction progress for CLI `ExtractAll`.
 * **Baseline:** 214 tests pass, 11 ignored. (archive-core: 118 unit + 46 integration [21 rar + 13 zip + 12 rar4]; archive: 42 unit + 11 cloud_e2e ignored; archive-cli: 1 unit; archive-gdrive: 7 unit). 3 pre-existing clippy warnings (collapsible_if in run_elastic_scan, let_and_return in extract_all, too_many_arguments in zip/mod.rs).
 * **Pre-existing:** `extract_all_via_unrar` free function already in `crates/archive-core/src/rar/mod.rs` (kept from prior work).
 * **Completed:** Pipelined Streaming Splitter (RAR5 + RAR4) — all 6 steps done. `Archive::extract_all_streaming` and `PendingArchive::scan_and_extract` wired in `archive` crate.
 * **Completed (Step 1):** `CliProgressReporter` + `indicatif` dep. Baseline unchanged.
+* **Completed (Step 2):** `open_with_progress` helper wired into all 4 CLI commands (`List`, `Extract`, `ExtractAll`, `Test`). Prints `Opening …` on stderr; shows scan progress bar for cloud RAR without Quick Open. 1 pre-existing warning (`set_total_entries` unused — resolved in step 3).
 
 
 ---
