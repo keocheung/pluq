@@ -18,4 +18,4 @@ serde_json = "1"
 bytes = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-zip = { version = "2", features = ["aes-crypto"] }
+zip = { version = "8", features = ["aes-crypto"] }

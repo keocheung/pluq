@@ -42,6 +42,7 @@ struct DecompressParams<'a> {
     method_id: u16,
     aes_info: Option<AesExtraInfo>,
     expected_crc: u32,
+    mod_time: u16,
     is_encrypted: bool,
     password: Option<&'a [u8]>,
     progress: &'a Arc<Mutex<dyn ProgressReporter>>,
@@ -166,6 +167,7 @@ impl<R: ReadAt> ZipArchive<R> {
         // Extract ZIP-specific fields before the async boundary so the
         // spawn_blocking closure can own them without borrowing `self`.
         let location_method_id = location.method_id;
+        let location_mod_time = location.mod_time;
         let location_aes_info: Option<AesExtraInfo> = location.aes_info.clone();
 
         // ── Step 1 (async): resolve data offset via Local File Header ─────
@@ -209,6 +211,7 @@ impl<R: ReadAt> ZipArchive<R> {
                     compressed_size,
                     uncompressed_size,
                     method_id: location_method_id,
+                    mod_time: location_mod_time,
                     aes_info: location_aes_info,
                     expected_crc,
                     is_encrypted,
@@ -358,6 +361,7 @@ impl<R: ReadAt> ZipArchive<R> {
                             compressed_size,
                             uncompressed_size: entry.uncompressed_size,
                             method_id: location.method_id,
+                            mod_time: location.mod_time,
                             aes_info: location.aes_info.clone(),
                             expected_crc: location.crc32,
                             is_encrypted: entry.is_encrypted,
@@ -513,7 +517,21 @@ fn decompress_and_verify<R: Read + Send>(
         })?;
         let mut decryptor = ZipCryptoDecryptor::new(pwd);
         decryptor.decrypt(&mut enc_header);
-        if enc_header[11] != (params.expected_crc >> 24) as u8 {
+
+        // Verification byte check (the 12th byte of the header).
+        // Traditionally, this is the high byte of the CRC32.
+        // However, if the archive uses a Data Descriptor (Bit 3 set), the CRC isn't
+        // known at write time, so the high byte of the DOS last-mod-time is used instead.
+        // Some modern writers (like zip-rs v8) seem to prefer the time even when
+        // the CRC is known.
+        let crc_hi = (params.expected_crc >> 24) as u8;
+        let time_hi = (params.mod_time >> 8) as u8;
+
+        if enc_header[11] != crc_hi && enc_header[11] != time_hi {
+            debug!(
+                "ZipCrypto verification failed for '{}': header[11]={:02x}, crc_hi={:02x}, time_hi={:02x}",
+                params.entry_name, enc_header[11], crc_hi, time_hi
+            );
             return Err(CoreError::WrongPassword {
                 method: crate::PasswordDetectionMethod::EarlyHeaderValidation,
             });
@@ -1227,7 +1245,7 @@ mod tests {
             for (name, data, method) in files {
                 let options = SimpleFileOptions::default()
                     .compression_method(*method)
-                    .with_deprecated_encryption(password);
+                    .with_deprecated_encryption(password).unwrap();
                 writer.start_file(*name, options).unwrap();
                 writer.write_all(data).unwrap();
             }

@@ -87,6 +87,8 @@ pub struct ZipEntryLocation {
     /// CRC-32 of the uncompressed data, as stored in the Central Directory.
     /// For AE-2 entries this is 0; rely on HMAC instead.
     pub crc32: u32,
+    /// MS-DOS modification time (2 bytes) from the CD entry.
+    pub mod_time: u16,
     /// Populated when method_id == 99 (WinZip AES marker).
     pub aes_info: Option<AesExtraInfo>,
 }
@@ -397,6 +399,7 @@ pub async fn parse_central_directory(
             offset: local_header_offset,
             method_id,
             crc32,
+            mod_time: last_mod_time,
             aes_info,
         });
 

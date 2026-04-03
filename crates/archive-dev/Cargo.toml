@@ -9,6 +9,6 @@ publish = false
 
 [dependencies]
 archive-core = { path = "../archive-core" }
-reqwest = { version = "0.12", features = ["blocking"] }
+reqwest = { version = "0.13", features = ["blocking"] }
 serde_json = "1"
 base64 = "0.22"

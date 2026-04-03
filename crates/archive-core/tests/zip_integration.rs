@@ -93,7 +93,7 @@ fn build_integration_zip() -> (tempfile::NamedTempFile, String) {
                 "zipcrypto_deflated.txt",
                 SimpleFileOptions::default()
                     .compression_method(ZipMethod::Deflated)
-                    .with_deprecated_encryption(ZIP_CRYPTO_PASSWORD),
+                    .with_deprecated_encryption(ZIP_CRYPTO_PASSWORD).unwrap(),
             )
             .unwrap();
         writer.write_all(&zipcrypto_content()).unwrap();
