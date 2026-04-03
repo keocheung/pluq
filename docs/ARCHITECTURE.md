@@ -157,8 +157,6 @@ pub struct ReadFailure {
 
 **HTTP/2 with persistent connection pool.** `HttpReadAt` MUST use a `reqwest::Client` configured with HTTP/2 strictly enabled and a persistent connection pool. This avoids a TLS handshake (50–150 ms) per range request — critical when listing a 7z archive header requires 3+ sequential round trips.
 
-**Request coalescing.** If the format parser requests two ranges within 64 KB of each other, merge them into one HTTP Range request. Downloading 64 KB of intermediate "gap" bytes is faster than paying 150 ms of latency for a second request.
-
 **Core's `HttpReadAt` is stateless and dumb.** It accepts optional static headers (for pre-authenticated requests), makes one Range request, returns either buffered `Bytes` (`read_range`) or the response body as a streaming `AsyncRead` (`read_stream`). It does NOT handle auth refresh, retries, or rate limits — those are product-level concerns handled via `ReadAt` decorators from horizontal crates (see `ERRORS.md`). Errors are returned as structured `ReadError` variants (`HttpStatus`, `NetworkTimeout`, `RangeNotSupported`, etc.) — never as raw `reqwest::Error`.
 
 **Auth, retry, and rate-limit handling** are implemented as `ReadAt` decorators from horizontal crates (e.g., `archive-auth`, `archive-retry`), assembled by the product (Layer 4) and passed down through the state layer into core. Core receives a composed `ReadAt` and is unaware of the decorator stack. See `ERRORS.md` § Decorator Construction.

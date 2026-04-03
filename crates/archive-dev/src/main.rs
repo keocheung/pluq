@@ -20,7 +20,7 @@ use std::process::Command;
 /// Stefan's Dropbox ZIP (~7.5 GB, ZIP64, ~13 000 PDFs).
 /// `dl=1` is required for direct byte access (HTTP Range requests).
 const DROPBOX_ZIP: &str = "https://www.dropbox.com/scl/fi/REDACTED/\
-    archive.zip?rlkey=REDACTED&st=2m90hlwz&dl=1";
+    archive.zip?rlkey=REDACTED&st=xkx9j6il&dl=1";
 
 /// Stefan's Google Drive RAR (RAR5, very large).
 /// `uc?export=download&id=<id>` is the direct-download endpoint;
@@ -40,14 +40,95 @@ fn main() {
     println!("=== archive-dev: Cloud Sniping Smoke Tests ===\n");
     println!("  1) Dropbox ZIP  — list & extract  (~7.5 GB, ~13 000 PDFs)");
     println!("  2) Google Drive RAR — list only   (very large RAR5)");
+    println!("  3) Phase 4 Gap — Dropbox range support (quick check)");
     println!("  q) Quit\n");
 
     let choice = prompt("Choose scenario: ");
     match choice.trim() {
         "1" => run_zip_scenario(),
         "2" => run_rar_scenario(),
+        "3" => run_dropbox_gap_check(),
         _ => println!("Bye!"),
     }
+}
+
+// ── Scenario 3: Phase 4 Gap Check ─────────────────────────────────────────────
+
+fn run_dropbox_gap_check() {
+    println!("\n=== Scenario 3: Phase 4 Gap Check (Dropbox API) ===\n");
+    println!("Verifying if the stable Dropbox API endpoint supports HTTP Range requests");
+    println!("using App Credentials (Basic Auth) for publicly shared files.\n");
+
+    let app_key = match std::env::var("ARCHIVE_SNIPER_DROPBOX_APP_KEY") {
+        Ok(k) => k,
+        Err(_) => {
+            println!("❌ Error: ARCHIVE_SNIPER_DROPBOX_APP_KEY not set.");
+            println!("   Please set it to your Dropbox App Key.");
+            return;
+        }
+    };
+    let app_secret = match std::env::var("ARCHIVE_SNIPER_DROPBOX_APP_SECRET") {
+        Ok(s) => s,
+        Err(_) => {
+            println!("❌ Error: ARCHIVE_SNIPER_DROPBOX_APP_SECRET not set.");
+            println!("   Please set it to your Dropbox App Secret.");
+            return;
+        }
+    };
+
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("archive-sniper-dev")
+        .build()
+        .expect("failed to build client");
+
+    let url = "https://content.dropboxapi.com/2/sharing/get_shared_link_file";
+    let arg = serde_json::json!({ "url": DROPBOX_ZIP });
+    let arg_header = serde_json::to_string(&arg).expect("failed to serialize arg");
+
+    use base64::prelude::*;
+    let basic_auth = BASE64_STANDARD.encode(format!("{app_key}:{app_secret}"));
+
+    println!("→ Sending POST to {url}…");
+    println!("  Headers:");
+    println!("    Authorization: Basic [REDACTED]");
+    println!("    Dropbox-API-Arg: {arg_header}");
+    println!("    Range: bytes=0-15");
+    println!();
+
+    let resp = client.post(url)
+        .header("Authorization", format!("Basic {basic_auth}"))
+        .header("Dropbox-API-Arg", &arg_header)
+        .header("Range", "bytes=0-15")
+        .body("")
+        .send()
+        .expect("POST request failed");
+
+    println!("  Status: {}", resp.status());
+    println!("  Content-Range: {:?}", resp.headers().get("content-range"));
+    println!("  Content-Length: {:?}", resp.headers().get("content-length"));
+    println!("  Dropbox-API-Result: {:?}", resp.headers().get("dropbox-api-result"));
+
+    if resp.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+        let body = resp.bytes().expect("failed to read body");
+        println!("\n  Received {} bytes of body content.", body.len());
+        
+        let hex = body.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+        println!("  Body hex: {hex}");
+
+        if body.starts_with(b"PK\x03\x04") {
+            println!("\n  ✅ SUCCESS! Received correct ZIP magic bytes (PK\\x03\\x04).");
+            println!("     The stable Dropbox API endpoint supports surgical extraction via Range");
+            println!("     using App Credentials without OAuth.");
+        } else {
+            println!("\n  ❌ FAILED! Body does not start with ZIP magic bytes.");
+        }
+    } else {
+        println!("\n  ❌ FAILED! Expected 206 Partial Content, got {}", resp.status());
+        if let Ok(text) = resp.text() {
+            println!("  Response body: {text}");
+        }
+    }
+    println!();
 }
 
 // ── Scenario 1: Dropbox ZIP ───────────────────────────────────────────────────
