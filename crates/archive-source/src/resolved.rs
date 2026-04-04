@@ -12,19 +12,29 @@ use tokio::io::AsyncRead;
 ///
 /// Created by [`resolve()`](crate::resolve).
 pub enum ResolvedSource {
-    /// A file on the local filesystem.
-    Local(LocalReadAt),
-    /// A file accessible via HTTP(S) range requests.
-    Http(CachingReadAt<HttpReadAt>),
-    /// A Google Drive file accessed via the Drive API.
-    GDrive(CachingReadAt<GoogleDriveReadAt>),
-    // Phase 4: Dropbox(CachingReadAt<DropboxReadAt>),
+    /// A file on the local filesystem. (Reader, Original Path)
+    Local(LocalReadAt, String),
+    /// A file accessible via HTTP(S) range requests. (Reader, Original URL)
+    Http(CachingReadAt<HttpReadAt>, String),
+    /// A Google Drive file accessed via the Drive API. (Reader, Original URL, File ID)
+    GDrive(CachingReadAt<GoogleDriveReadAt>, String, String),
+}
+
+impl ResolvedSource {
+    /// Suggest a folder name for extraction based on the source metadata.
+    pub fn suggested_name(&self) -> Option<String> {
+        match self {
+            Self::Local(_, path) => crate::suggest_name_from_str(path),
+            Self::Http(_, url) => crate::suggest_name_from_str(url),
+            Self::GDrive(_, url, _) => crate::suggest_name_from_str(url),
+        }
+    }
 }
 
 impl LocalPath for ResolvedSource {
     fn local_path(&self) -> Option<&Path> {
         match self {
-            Self::Local(r) => Some(r.path()),
+            Self::Local(r, _) => Some(r.path()),
             _ => None,
         }
     }
@@ -33,9 +43,9 @@ impl LocalPath for ResolvedSource {
 impl ReadAt for ResolvedSource {
     async fn read_range(&self, offset: u64, len: u64) -> Result<Bytes, ReadError> {
         match self {
-            Self::Local(r) => r.read_range(offset, len).await,
-            Self::Http(r) => r.read_range(offset, len).await,
-            Self::GDrive(r) => r.read_range(offset, len).await,
+            Self::Local(r, _) => r.read_range(offset, len).await,
+            Self::Http(r, _) => r.read_range(offset, len).await,
+            Self::GDrive(r, _, _) => r.read_range(offset, len).await,
         }
     }
 
@@ -45,17 +55,17 @@ impl ReadAt for ResolvedSource {
         len: u64,
     ) -> Result<Box<dyn AsyncRead + Send + Unpin>, ReadError> {
         match self {
-            Self::Local(r) => r.read_stream(offset, len).await,
-            Self::Http(r) => r.read_stream(offset, len).await,
-            Self::GDrive(r) => r.read_stream(offset, len).await,
+            Self::Local(r, _) => r.read_stream(offset, len).await,
+            Self::Http(r, _) => r.read_stream(offset, len).await,
+            Self::GDrive(r, _, _) => r.read_stream(offset, len).await,
         }
     }
 
     async fn size(&self) -> Result<u64, ReadError> {
         match self {
-            Self::Local(r) => r.size().await,
-            Self::Http(r) => r.size().await,
-            Self::GDrive(r) => r.size().await,
+            Self::Local(r, _) => r.size().await,
+            Self::Http(r, _) => r.size().await,
+            Self::GDrive(r, _, _) => r.size().await,
         }
     }
 }

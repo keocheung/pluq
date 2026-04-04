@@ -3,9 +3,9 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 3 — Interactive TUI + Google Drive Provider.
-* **Current Active Task:** [HANDOVER] — SESSION_PLAN_PART2 complete. Source enum + DynReadAt + provider.rs deleted. archive-source refactor fully done.
-* **Baseline:** 229 tests pass, 11 ignored. (archive-core: 116 unit + 46 integration [21 rar + 13 zip + 12 rar4]; archive: 42 unit + 11 cloud_e2e ignored; archive-cli: 1 unit; archive-gdrive: 7 unit; archive-source: 17 integration [8 resolve + 9 classify]). Clippy clean.
-  Note: 229 = prior 231 minus 2 Source unit tests removed with io/source.rs deletion.
+* **Current Active Task:** [HANDOVER] — SESSION_PLAN_PART2 complete. Source enum + DynReadAt + provider.rs deleted. archive-source refactor fully done. naming intelligence centralized.
+* **Baseline:** 230 tests pass, 14 ignored. (archive-core: 116 unit + 46 integration [21 rar + 13 zip + 12 rar4] + 2 ignored doc; archive: 42 unit + 11 cloud_e2e ignored; archive_cli: 1 unit; archive-gdrive: 7 unit; archive-source: 18 integration [9 resolve + 9 classify] + 1 ignored doc). Clippy clean.
+  Note: 230 = prior 229 plus 1 new naming test in archive-source.
 
 
 ---

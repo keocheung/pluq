@@ -66,7 +66,7 @@ fn classify_gdrive_api_error() {
 
 #[test]
 fn classify_unknown_error_returns_none() {
-    let err = std::io::Error::new(std::io::ErrorKind::Other, "random error");
+    let err = std::io::Error::other( "random error");
     let result = classify_transport(&err);
     assert!(result.is_none());
 }

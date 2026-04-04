@@ -1,7 +1,7 @@
 mod cli_progress;
 mod tui;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -206,6 +206,8 @@ async fn run(command: Command, cancel: Arc<AtomicBool>) -> Result<(), Box<dyn st
             );
         }
         Command::ExtractAll { source, output, all } => {
+            let config = SourceConfig::new();
+            let reader = resolve(&source, &config)?;
             let archive = open_with_progress(&source, &cancel).await?;
 
             let entries: Vec<_> = if all {
@@ -215,7 +217,11 @@ async fn run(command: Command, cancel: Arc<AtomicBool>) -> Result<(), Box<dyn st
             };
 
             let output_dir = output
-                .unwrap_or_else(|| default_output_folder(&source).unwrap_or_else(|| PathBuf::from(".")));
+                .unwrap_or_else(|| {
+                    reader.suggested_name()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| PathBuf::from("."))
+                });
 
             tokio::fs::create_dir_all(&output_dir).await?;
 
@@ -368,35 +374,7 @@ async fn open_with_progress(
 ///
 /// Returns `None` if no meaningful stem can be extracted.
 pub fn default_output_folder(source: &str) -> Option<PathBuf> {
-    // For Google Drive "view" links, the last segment is just "view".
-    // Try to extract the file ID instead.
-    if archive_gdrive::is_gdrive_url(source)
-        && let Some(id) = archive_gdrive::extract_file_id(source)
-    {
-        // If the URL ends in "view", "uc", or "open" (ignoring query), use the ID.
-        let filename = source
-            .split('?')
-            .next()?
-            .rsplit('/')
-            .next()
-            .or_else(|| source.rsplit('\\').next())?;
-        if filename == "view" || filename == "uc" || filename == "open" {
-            return Some(PathBuf::from(id));
-        }
-    }
-
-    // Extract filename from URL path or filesystem path.
-    let filename = source
-        .rsplit('/')
-        .next()
-        .or_else(|| source.rsplit('\\').next())?;
-    // Strip query string if URL.
-    let filename = filename.split('?').next()?;
-    let stem = Path::new(filename).file_stem()?;
-    if stem.is_empty() {
-        return None;
-    }
-    Some(PathBuf::from(stem))
+    archive_source::suggest_name_from_str(source).map(PathBuf::from)
 }
 
 pub(crate) fn format_size(bytes: u64) -> String {

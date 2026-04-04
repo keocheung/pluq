@@ -29,8 +29,12 @@ pub fn resolve(input: &str, _config: &SourceConfig) -> Result<ResolvedSource, So
                 reason: "could not extract Google Drive file ID".into(),
             })?;
 
-        let reader = CachingReadAt::new(GoogleDriveReadAt::new(file_id, api_key));
-        return Ok(ResolvedSource::GDrive(reader));
+        let reader = CachingReadAt::new(GoogleDriveReadAt::new(file_id.clone(), api_key));
+        return Ok(ResolvedSource::GDrive(
+            reader,
+            input.to_string(),
+            file_id,
+        ));
     }
 
     // ── Phase 4: Dropbox check would go here ─────────────────────────────
@@ -43,10 +47,13 @@ pub fn resolve(input: &str, _config: &SourceConfig) -> Result<ResolvedSource, So
             .build()
             .expect("failed to create HTTP client");
         let reader = CachingReadAt::new(HttpReadAt::new(input, client));
-        return Ok(ResolvedSource::Http(reader));
+        return Ok(ResolvedSource::Http(reader, input.to_string()));
     }
 
     // ── Local file ───────────────────────────────────────────────────────
     info!(path = %input, "local file path detected");
-    Ok(ResolvedSource::Local(LocalReadAt::new(input)))
+    Ok(ResolvedSource::Local(
+        LocalReadAt::new(input),
+        input.to_string(),
+    ))
 }
