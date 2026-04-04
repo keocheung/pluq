@@ -3,8 +3,9 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 3 — Interactive TUI + Google Drive Provider.
-* **Current Active Task:** SESSION_PLAN Step 3 — resolve() + classify_transport()
-* **Baseline:** 214 tests pass, 11 ignored. (archive-core: 118 unit + 46 integration [21 rar + 13 zip + 12 rar4]; archive: 42 unit + 11 cloud_e2e ignored; archive-cli: 1 unit; archive-gdrive: 7 unit). Clippy clean.
+* **Current Active Task:** [HANDOVER] — Part 1 complete. archive-source crate created.
+  Next: SESSION_PLAN_PART2.md (migration).
+* **Baseline:** 231 tests pass, 11 ignored. (archive-core: 118 unit + 46 integration [21 rar + 13 zip + 12 rar4]; archive: 42 unit + 11 cloud_e2e ignored; archive-cli: 1 unit; archive-gdrive: 7 unit; archive-source: 17 integration [8 resolve + 9 classify]). Clippy clean.
 
 
 ---
