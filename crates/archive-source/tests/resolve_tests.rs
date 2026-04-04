@@ -1,3 +1,4 @@
+use archive_core::LocalPath;
 use archive_source::{resolve, ResolvedSource, SourceConfig};
 
 #[test]

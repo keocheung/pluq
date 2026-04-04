@@ -149,10 +149,6 @@ impl<R: ReadAt> RarArchive<R> {
     ///
     /// Returns [`CoreError::InvalidFormat`] if the RAR5 signature is absent.
     /// Returns [`CoreError::UnsupportedFormat`] if a RAR4 signature is detected.
-    // The `LocalPath` bound is `pub(crate)` while `open` is `pub`, but `RarArchive`
-    // is only constructed from within this crate (via `Source`), so external
-    // callers cannot reach this method in practice.
-    #[allow(private_bounds)]
     pub async fn open(reader: R) -> Result<Self, CoreError>
     where
         R: LocalPath,

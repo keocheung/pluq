@@ -8,7 +8,7 @@ use tokio::io::AsyncRead;
 use tokio::sync::{Mutex, OnceCell};
 use tracing::{debug, trace};
 
-use super::{ReadAt, ReadError};
+use super::{LocalPath, ReadAt, ReadError};
 
 /// Minimum fetch size: every read to the inner reader is at least this large.
 const MIN_FETCH: u64 = 64 * 1024;
@@ -30,6 +30,8 @@ pub struct CachingReadAt<T> {
     cache: Mutex<BlockCache>,
     file_size: OnceCell<u64>,
 }
+
+impl<T: ReadAt> LocalPath for CachingReadAt<T> {}
 
 impl<T: ReadAt> CachingReadAt<T> {
     pub fn new(inner: T) -> Self {

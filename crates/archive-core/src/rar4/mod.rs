@@ -110,7 +110,6 @@ impl<R: ReadAt> Rar4Archive<R> {
     ///
     /// Returns [`CoreError::InvalidFormat`] if the RAR4 signature is absent.
     /// Returns [`CoreError::UnsupportedFeature`] for solid archives.
-    #[allow(private_bounds)]
     pub async fn open(reader: R) -> Result<Self, CoreError>
     where
         R: LocalPath,

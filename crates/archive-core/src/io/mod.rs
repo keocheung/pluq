@@ -22,8 +22,10 @@ use std::path::Path;
 /// Used by [`RarArchive::open`](crate::rar::RarArchive::open) to capture the local
 /// path at construction time, enabling the extraction shortcut that passes the path
 /// directly to `unrar` instead of building a synthetic in-memory archive.
-pub(crate) trait LocalPath {
-    fn local_path(&self) -> Option<&Path>;
+pub trait LocalPath {
+    fn local_path(&self) -> Option<&Path> {
+        None
+    }
 }
 
 impl LocalPath for LocalReadAt {
@@ -32,11 +34,7 @@ impl LocalPath for LocalReadAt {
     }
 }
 
-impl LocalPath for HttpReadAt {
-    fn local_path(&self) -> Option<&Path> {
-        None
-    }
-}
+impl LocalPath for HttpReadAt {}
 
 impl LocalPath for Source {
     fn local_path(&self) -> Option<&Path> {

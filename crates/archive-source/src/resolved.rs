@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use archive_core::{CachingReadAt, HttpReadAt, LocalReadAt, ReadAt, ReadError};
+use archive_core::{CachingReadAt, HttpReadAt, LocalPath, LocalReadAt, ReadAt, ReadError};
 use archive_gdrive::GoogleDriveReadAt;
 use bytes::Bytes;
 use tokio::io::AsyncRead;
@@ -21,13 +21,8 @@ pub enum ResolvedSource {
     // Phase 4: Dropbox(CachingReadAt<DropboxReadAt>),
 }
 
-impl ResolvedSource {
-    /// Returns the local file path if this is a local source, `None` otherwise.
-    ///
-    /// Used by the RAR extraction pipeline to decide between the local-file
-    /// shortcut (pass path directly to `unrar`) and the cloud synthetic-archive
-    /// approach.
-    pub fn local_path(&self) -> Option<&Path> {
+impl LocalPath for ResolvedSource {
+    fn local_path(&self) -> Option<&Path> {
         match self {
             Self::Local(r) => Some(r.path()),
             _ => None,
