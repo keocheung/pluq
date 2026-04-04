@@ -6,7 +6,9 @@ edition = "2024"
 [dependencies]
 archive-core = { path = "../archive-core" }
 archive-gdrive = { path = "../archive-gdrive" }
+bytes = "1"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+tokio = { version = "1", features = ["io-util"] }
 tracing = "0.1"
 
 [dev-dependencies]

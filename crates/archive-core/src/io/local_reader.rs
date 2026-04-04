@@ -23,6 +23,11 @@ impl LocalReadAt {
             path: path.as_ref().to_path_buf(),
         }
     }
+
+    /// The filesystem path this reader was opened with.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
 }
 
 /// Convert a `std::io::Error` from a local file operation into a [`ReadError`].
