@@ -1,8 +1,8 @@
 use std::sync::{Arc, Mutex};
 
 use archive_core::{
-    ArchiveEntry, ArchiveReader, CoreError, ProgressReporter, Rar4Archive, RarArchive, ReadAt,
-    ScanInfo, Source, ZipArchive, RAR4_SIGNATURE, RAR5_SIGNATURE,
+    ArchiveEntry, ArchiveReader, CoreError, LocalPath, ProgressReporter, Rar4Archive, RarArchive,
+    ReadAt, ScanInfo, Source, ZipArchive, RAR4_SIGNATURE, RAR5_SIGNATURE,
 };
 use bytes::Bytes;
 use tokio::io::AsyncWrite;
@@ -17,10 +17,10 @@ use crate::opened::{Opened, PendingArchive};
 
 /// Internal enum for format-specific archive implementations.
 /// Hidden from consumers — they only see `Archive`.
-pub(crate) enum ArchiveInner {
-    Zip(ZipArchive<Source>),
-    Rar(RarArchive<Source>),
-    Rar4(Rar4Archive<Source>),
+pub(crate) enum ArchiveInner<R: ReadAt + LocalPath + 'static> {
+    Zip(ZipArchive<R>),
+    Rar(RarArchive<R>),
+    Rar4(Rar4Archive<R>),
 }
 
 /// Product-facing handle to an open archive.
@@ -30,11 +30,11 @@ pub(crate) enum ArchiveInner {
 ///
 /// `open()` returns [`Opened`] — either immediately usable ([`Opened::Ready`])
 /// or requiring a metadata scan first ([`Opened::NeedsScan`]).
-pub struct Archive {
-    pub(crate) inner: ArchiveInner,
+pub struct Archive<R: ReadAt + LocalPath + 'static> {
+    pub(crate) inner: ArchiveInner<R>,
 }
 
-impl std::fmt::Debug for Archive {
+impl<R: ReadAt + LocalPath + 'static> std::fmt::Debug for Archive<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let format = match &self.inner {
             ArchiveInner::Zip(_) => "Zip",
@@ -47,33 +47,20 @@ impl std::fmt::Debug for Archive {
     }
 }
 
-impl Archive {
-    /// Open an archive from a local path or URL.
-    ///
-    /// Returns [`Opened::Ready`] if the archive is immediately usable, or
-    /// [`Opened::NeedsScan`] if a metadata scan is required first (e.g. RAR over HTTP
-    /// without a Quick Open block).
-    ///
-    /// Transparently checks the cache before invoking any format parser. On a valid
-    /// cache hit, returns [`Opened::Ready`] immediately without any I/O scan.
-    pub async fn open(source: &str) -> Result<Opened, ArchiveError> {
-        let reader = Source::detect(source);
-        Self::open_inner(source, reader).await
-    }
-
-    /// Open an archive from an externally-built [`Source`].
+impl<R: ReadAt + LocalPath + 'static> Archive<R> {
+    /// Open an archive from an externally-built reader.
     ///
     /// Use this when a product layer needs to inject a decorated reader (e.g. a
     /// progress-reporting wrapper, Google Drive, Dropbox) via [`Source::provider`].
     ///
     /// `source_label` is the user-facing string used for cache keying and tracing —
     /// it is **not** resolved as a filesystem path.
-    pub async fn open_reader(source_label: &str, reader: Source) -> Result<Opened, ArchiveError> {
+    pub async fn open_reader(source_label: &str, reader: R) -> Result<Opened<R>, ArchiveError> {
         Self::open_inner(source_label, reader).await
     }
 
-    /// Shared implementation for [`open`](Self::open) and [`open_reader`](Self::open_reader).
-    async fn open_inner(source: &str, reader: Source) -> Result<Opened, ArchiveError> {
+    /// Shared implementation for [`open_reader`](Self::open_reader).
+    async fn open_inner(source: &str, reader: R) -> Result<Opened<R>, ArchiveError> {
         info!(source = %source, "Archive::open");
 
         // Sniff the first 8 bytes to select the right parser.
@@ -170,7 +157,7 @@ impl Archive {
     }
 
     /// Reconstruct an archive from a cache hit without any I/O scan.
-    fn from_cache(cache: ArchiveCache, reader: Source) -> Self {
+    fn from_cache(cache: ArchiveCache, reader: R) -> Self {
         let local_path = reader.local_path().map(|p| p.to_path_buf());
         match cache.format_state {
             FormatCacheState::Zip { locations } => {
@@ -352,6 +339,21 @@ impl Archive {
             ArchiveInner::Rar4(r) => r.extract_all_streaming(filter, sink_factory, progress, password)
                 .await.map_err(translate_core_error),
         }
+    }
+}
+
+impl Archive<Source> {
+    /// Open an archive from a local path or URL.
+    ///
+    /// Returns [`Opened::Ready`] if the archive is immediately usable, or
+    /// [`Opened::NeedsScan`] if a metadata scan is required first (e.g. RAR over HTTP
+    /// without a Quick Open block).
+    ///
+    /// Transparently checks the cache before invoking any format parser. On a valid
+    /// cache hit, returns [`Opened::Ready`] immediately without any I/O scan.
+    pub async fn open(source: &str) -> Result<Opened<Source>, ArchiveError> {
+        let reader = Source::detect(source);
+        Self::open_inner(source, reader).await
     }
 }
 

@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use archive_core::{ArchiveEntry, ArchiveReader, CoreError, ProgressReporter, ScanInfo};
+use archive_core::{ArchiveEntry, ArchiveReader, CoreError, LocalPath, ProgressReporter, ReadAt, ScanInfo};
 use tracing::{debug, info};
 
 use crate::archive::{Archive, ArchiveInner};
@@ -8,31 +8,31 @@ use crate::cache::{cache_path_for, ArchiveFingerprint};
 use crate::error::{translate_core_error, ArchiveError};
 
 /// Result of opening an archive. Either ready to use or requires a metadata scan.
-pub enum Opened {
+pub enum Opened<R: ReadAt + LocalPath + 'static> {
     /// Archive metadata is available. Use `Archive` immediately.
-    Ready(Archive),
+    Ready(Archive<R>),
     /// Archive requires a metadata scan before entries are available.
     /// Call `scan_info()` to learn the cost, then `scan()` to execute.
-    NeedsScan(PendingArchive),
+    NeedsScan(PendingArchive<R>),
 }
 
 /// An archive that needs a metadata scan before it can be used.
 ///
 /// Created by `Archive::open()` when the format requires an expensive
 /// scan phase (e.g., RAR over HTTP without Quick Open).
-pub struct PendingArchive {
-    pub(crate) inner: ArchiveInner,
+pub struct PendingArchive<R: ReadAt + LocalPath + 'static> {
+    pub(crate) inner: ArchiveInner<R>,
     info: ScanInfo,
     pub(crate) fingerprint: ArchiveFingerprint,
     pub(crate) source: String,
 }
 
-impl Opened {
+impl<R: ReadAt + LocalPath + 'static> Opened<R> {
     /// Convenience: resolve to a ready `Archive`.
     ///
     /// If the archive needs scanning, scans with no-op progress (no UI feedback).
     /// Use this in tests or non-interactive contexts.
-    pub async fn ready(self) -> Result<Archive, ArchiveError> {
+    pub async fn ready(self) -> Result<Archive<R>, ArchiveError> {
         match self {
             Opened::Ready(a) => Ok(a),
             Opened::NeedsScan(p) => p.scan(Arc::new(Mutex::new(()))).await,
@@ -40,9 +40,9 @@ impl Opened {
     }
 }
 
-impl PendingArchive {
+impl<R: ReadAt + LocalPath + 'static> PendingArchive<R> {
     pub(crate) fn new(
-        inner: ArchiveInner,
+        inner: ArchiveInner<R>,
         info: ScanInfo,
         fingerprint: ArchiveFingerprint,
         source: String,
@@ -60,7 +60,7 @@ impl PendingArchive {
     pub async fn scan(
         mut self,
         progress: Arc<Mutex<dyn ProgressReporter>>,
-    ) -> Result<Archive, ArchiveError> {
+    ) -> Result<Archive<R>, ArchiveError> {
         info!(scan_info = ?self.info, "PendingArchive::scan starting");
         match &mut self.inner {
             ArchiveInner::Zip(_) => {
@@ -100,7 +100,7 @@ impl PendingArchive {
         sink_factory: SinkFn,
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
-    ) -> Result<(Archive, u64), ArchiveError>
+    ) -> Result<(Archive<R>, u64), ArchiveError>
     where
         Filter: Fn(&ArchiveEntry) -> bool + Send + Sync + 'static,
         SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn std::io::Write + Send>> + Send + 'static,
@@ -133,7 +133,7 @@ impl PendingArchive {
     }
 }
 
-impl std::fmt::Debug for Opened {
+impl<R: ReadAt + LocalPath + 'static> std::fmt::Debug for Opened<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Ready(a) => f.debug_tuple("Ready").field(a).finish(),
@@ -142,7 +142,7 @@ impl std::fmt::Debug for Opened {
     }
 }
 
-impl std::fmt::Debug for PendingArchive {
+impl<R: ReadAt + LocalPath + 'static> std::fmt::Debug for PendingArchive<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PendingArchive")
             .field("info", &self.info)

@@ -3,8 +3,8 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 3 — Interactive TUI + Google Drive Provider.
-* **Current Active Task:** SESSION_PLAN_PART2 Step 1 complete — LocalPath is now pub.
-  Next: SESSION_PLAN_PART2_STEP_2.md (make Archive/ArchiveInner/Opened/PendingArchive generic).
+* **Current Active Task:** SESSION_PLAN_PART2 Step 2 complete — Archive/ArchiveInner/Opened/PendingArchive are now generic over R: ReadAt + LocalPath + 'static.
+  Next: SESSION_PLAN_PART2_STEP_3.md (wire archive-cli to archive-source).
 * **Baseline:** 231 tests pass, 11 ignored. (archive-core: 118 unit + 46 integration [21 rar + 13 zip + 12 rar4]; archive: 42 unit + 11 cloud_e2e ignored; archive-cli: 1 unit; archive-gdrive: 7 unit; archive-source: 17 integration [8 resolve + 9 classify]). Clippy clean.
 
 

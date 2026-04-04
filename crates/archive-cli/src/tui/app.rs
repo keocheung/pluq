@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use archive::{Archive, ArchiveEntry, ArchiveError, Opened, ProgressReporter, ScanInfo};
+use archive::{Archive, ArchiveEntry, ArchiveError, Opened, ProgressReporter, ScanInfo, Source};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::TableState;
 use tokio::sync::mpsc;
@@ -11,11 +11,11 @@ use tracing::{debug, error, info, warn};
 /// Messages sent from background tasks to the main loop.
 pub enum AppMessage {
     /// Archive::open() completed.
-    ArchiveOpened(Result<Opened, ArchiveError>),
+    ArchiveOpened(Result<Opened<Source>, ArchiveError>),
     /// Scan progress update (from ProgressReporter).
     ScanProgress { bytes_scanned: u64, entries_found: usize },
     /// PendingArchive::scan() completed.
-    ScanComplete(Result<Archive, ArchiveError>),
+    ScanComplete(Result<Archive<Source>, ArchiveError>),
     /// Extraction byte progress (from ProgressReporter).
     ExtractionProgress { bytes_so_far: u64 },
     /// Archive::extract() completed.
@@ -42,7 +42,7 @@ pub enum AppPhase {
 pub struct App {
     pub phase: AppPhase,
     pub source: String,
-    pub archive: Option<Arc<Archive>>,
+    pub archive: Option<Arc<Archive<Source>>>,
     pub entries: Vec<ArchiveEntry>,
     pub selected: usize,
     pub should_quit: bool,

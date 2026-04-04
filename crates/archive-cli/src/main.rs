@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use clap::{Parser, Subcommand};
 use tracing::info;
 
-use archive::Archive;
+use archive::{Archive, Source};
 
 /// Archive Sniper — surgical archive extraction from local or cloud storage.
 #[derive(Parser)]
@@ -332,7 +332,7 @@ async fn run(command: Command, cancel: Arc<AtomicBool>) -> Result<(), Box<dyn st
 async fn open_with_progress(
     source: &str,
     cancel: &Arc<AtomicBool>,
-) -> Result<Archive, Box<dyn std::error::Error>> {
+) -> Result<Archive<Source>, Box<dyn std::error::Error>> {
     eprintln!("  Opening {source}...");
     let opened = open_archive(source).await?;
     match opened {
@@ -356,7 +356,7 @@ async fn open_with_progress(
 }
 
 /// Open an archive, using the provider dispatch for cloud URLs.
-async fn open_archive(source: &str) -> Result<archive::Opened, Box<dyn std::error::Error>> {
+async fn open_archive(source: &str) -> Result<archive::Opened<archive::Source>, Box<dyn std::error::Error>> {
     match provider::build_reader(source)? {
         Some(reader) => Ok(Archive::open_reader(source, reader).await?),
         None => Ok(Archive::open(source).await?),
