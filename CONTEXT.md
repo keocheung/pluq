@@ -3,7 +3,7 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 3 — Interactive TUI + Google Drive Provider.
-* **Current Active Task:** [HANDOVER] — Session complete. All 7 steps done.
+* **Current Active Task:** SESSION_PLAN Step 1 — archive-source crate skeleton
 * **Baseline:** 214 tests pass, 11 ignored. (archive-core: 118 unit + 46 integration [21 rar + 13 zip + 12 rar4]; archive: 42 unit + 11 cloud_e2e ignored; archive-cli: 1 unit; archive-gdrive: 7 unit). Clippy clean.
 
 
