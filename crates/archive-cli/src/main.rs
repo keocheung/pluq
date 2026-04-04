@@ -1,5 +1,4 @@
 mod cli_progress;
-mod provider;
 mod tui;
 
 use std::path::{Path, PathBuf};
@@ -9,7 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use clap::{Parser, Subcommand};
 use tracing::info;
 
-use archive::{Archive, Source};
+use archive::Archive;
+use archive_source::{ResolvedSource, SourceConfig, classify_transport, resolve};
 
 /// Archive Sniper — surgical archive extraction from local or cloud storage.
 #[derive(Parser)]
@@ -101,9 +101,9 @@ async fn main() {
         }
         if let Some(archive::ArchiveError::Transport(inner)) =
             e.downcast_ref::<archive::ArchiveError>()
-            && let Some(msg) = provider::format_transport_error(inner.as_ref())
+            && let Some(pe) = classify_transport(inner.as_ref())
         {
-            eprintln!("  Error: {msg}");
+            eprintln!("  Error: {pe}");
             std::process::exit(1);
         }
         eprintln!("  Error: {e}");
@@ -114,7 +114,8 @@ async fn main() {
 async fn run(command: Command, cancel: Arc<AtomicBool>) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         Command::Browse { source } => {
-            let reader = provider::build_reader(&source)?;
+            let config = SourceConfig::new();
+            let reader = resolve(&source, &config)?;
             tui::run(source, reader).await?;
         }
         Command::List { source, all } => {
@@ -332,9 +333,11 @@ async fn run(command: Command, cancel: Arc<AtomicBool>) -> Result<(), Box<dyn st
 async fn open_with_progress(
     source: &str,
     cancel: &Arc<AtomicBool>,
-) -> Result<Archive<Source>, Box<dyn std::error::Error>> {
+) -> Result<Archive<ResolvedSource>, Box<dyn std::error::Error>> {
     eprintln!("  Opening {source}...");
-    let opened = open_archive(source).await?;
+    let config = SourceConfig::new();
+    let reader = resolve(source, &config)?;
+    let opened = Archive::open_reader(source, reader).await?;
     match opened {
         archive::Opened::Ready(a) => Ok(a),
         archive::Opened::NeedsScan(pending) => {
@@ -352,14 +355,6 @@ async fn open_with_progress(
                 std::sync::Arc::new(std::sync::Mutex::new(reporter));
             Ok(pending.scan(progress).await?)
         }
-    }
-}
-
-/// Open an archive, using the provider dispatch for cloud URLs.
-async fn open_archive(source: &str) -> Result<archive::Opened<archive::Source>, Box<dyn std::error::Error>> {
-    match provider::build_reader(source)? {
-        Some(reader) => Ok(Archive::open_reader(source, reader).await?),
-        None => Ok(Archive::open(source).await?),
     }
 }
 
