@@ -3,9 +3,9 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 3 — Interactive TUI + Google Drive Provider.
-* **Current Active Task:** SESSION_PLAN_PART2 Step 3 complete — archive-cli wired to archive-source; provider.rs deleted.
-  Next: SESSION_PLAN_PART2_STEP_4.md (delete Source/DynReadAt + update tests).
-* **Baseline:** 231 tests pass, 11 ignored. (archive-core: 118 unit + 46 integration [21 rar + 13 zip + 12 rar4]; archive: 42 unit + 11 cloud_e2e ignored; archive-cli: 1 unit; archive-gdrive: 7 unit; archive-source: 17 integration [8 resolve + 9 classify]). Clippy clean.
+* **Current Active Task:** [HANDOVER] — SESSION_PLAN_PART2 complete. Source enum + DynReadAt + provider.rs deleted. archive-source refactor fully done.
+* **Baseline:** 229 tests pass, 11 ignored. (archive-core: 116 unit + 46 integration [21 rar + 13 zip + 12 rar4]; archive: 42 unit + 11 cloud_e2e ignored; archive-cli: 1 unit; archive-gdrive: 7 unit; archive-source: 17 integration [8 resolve + 9 classify]). Clippy clean.
+  Note: 229 = prior 231 minus 2 Source unit tests removed with io/source.rs deletion.
 
 
 ---
@@ -37,9 +37,11 @@
 *   **Scope:** Extraction only (v1). No creation/compression. See `docs/ROADMAP.md`.
 
 ### Crate Manifest
-*   **`archive-core`**: Stateless logic, Parsers, Codecs, and `ReadAt`.
-*   **`archive`**: State Layer. Caching, Entry Tree, Error Translation.
+*   **`archive-core`**: Stateless logic, Parsers, Codecs, `ReadAt`, `LocalPath`.
+*   **`archive-source`**: Source resolution — URL detection, credential discovery, `ResolvedSource`.
+*   **`archive`**: State Layer. Caching, Entry Tree, Error Translation. Generic over `R: ReadAt + LocalPath`.
 *   **`archive-cli`**: The TUI product (`ratatui`).
+*   **`archive-gdrive`**: Google Drive `ReadAt` implementation.
 *   **`archive-dev`**: Experimental scratchpad.
 
 ### Technical Pillars (The Gist)
@@ -47,10 +49,11 @@
 #### Mental Model: 5 Layers
 ```
 Layer 4: Products (CLI, Apps, Server)
-  |--- Layer 3: Archive (Facade + State + Format Detection)
-    |--- Layer 2: Format Parsers (ZIP, RAR)
-      |--- Layer 1: Codecs (Deflate, Unrar) & I/O Traits
-        |--- Layer 0: Raw bytes (Local, HTTP)
+  |--- Layer 3.5: Source Resolution (archive-source)
+    |--- Layer 3: Archive (Facade + State + Format Detection)
+      |--- Layer 2: Format Parsers (ZIP, RAR)
+        |--- Layer 1: Codecs (Deflate, Unrar) & I/O Traits
+          |--- Layer 0: Raw bytes (Local, HTTP, GDrive)
 ```
 
 #### The Golden Rules

@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use archive_core::{
     ArchiveEntry, ArchiveReader, CoreError, LocalPath, ProgressReporter, Rar4Archive, RarArchive,
-    ReadAt, ScanInfo, Source, ZipArchive, RAR4_SIGNATURE, RAR5_SIGNATURE,
+    ReadAt, ScanInfo, ZipArchive, RAR4_SIGNATURE, RAR5_SIGNATURE,
 };
 use bytes::Bytes;
 use tokio::io::AsyncWrite;
@@ -51,7 +51,7 @@ impl<R: ReadAt + LocalPath + 'static> Archive<R> {
     /// Open an archive from an externally-built reader.
     ///
     /// Use this when a product layer needs to inject a decorated reader (e.g. a
-    /// progress-reporting wrapper, Google Drive, Dropbox) via [`Source::provider`].
+    /// progress-reporting wrapper, Google Drive, Dropbox).
     ///
     /// `source_label` is the user-facing string used for cache keying and tracing —
     /// it is **not** resolved as a filesystem path.
@@ -342,27 +342,14 @@ impl<R: ReadAt + LocalPath + 'static> Archive<R> {
     }
 }
 
-impl Archive<Source> {
-    /// Open an archive from a local path or URL.
-    ///
-    /// Returns [`Opened::Ready`] if the archive is immediately usable, or
-    /// [`Opened::NeedsScan`] if a metadata scan is required first (e.g. RAR over HTTP
-    /// without a Quick Open block).
-    ///
-    /// Transparently checks the cache before invoking any format parser. On a valid
-    /// cache hit, returns [`Opened::Ready`] immediately without any I/O scan.
-    pub async fn open(source: &str) -> Result<Opened<Source>, ArchiveError> {
-        let reader = Source::detect(source);
-        Self::open_inner(source, reader).await
-    }
-}
-
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use std::io::Write as _;
     use std::path::PathBuf;
+
+    use archive_core::LocalReadAt;
 
     use super::*;
 
@@ -398,7 +385,8 @@ mod tests {
 
     #[tokio::test]
     async fn open_rar5_detects_rar_format() {
-        let archive = Archive::open(&rar_fixture("rar5_store.rar"))
+        let path = rar_fixture("rar5_store.rar");
+        let archive = Archive::open_reader(&path, LocalReadAt::new(&path))
             .await
             .unwrap()
             .ready()
@@ -410,7 +398,8 @@ mod tests {
 
     #[tokio::test]
     async fn open_rar4_detects_rar4_format() {
-        let archive = Archive::open(&rar_fixture("rar4_sample.rar"))
+        let path = rar_fixture("rar4_sample.rar");
+        let archive = Archive::open_reader(&path, LocalReadAt::new(&path))
             .await
             .unwrap()
             .ready()
@@ -423,7 +412,8 @@ mod tests {
     async fn open_zip_still_works_after_rar_added() {
         let buf = build_zip(&[("hello.txt", b"hello")]);
         let (_f, path) = write_temp(&buf);
-        let archive = Archive::open(&path).await.unwrap().ready().await.unwrap();
+        let archive = Archive::open_reader(&path, LocalReadAt::new(&path))
+            .await.unwrap().ready().await.unwrap();
         assert!(!archive.entries().is_empty());
         assert_eq!(archive.entries()[0].name, "hello.txt");
     }
@@ -433,7 +423,7 @@ mod tests {
         // Zero bytes are not a valid archive — must fail without panicking.
         let bytes = vec![0u8; 64];
         let (_f, path) = write_temp(&bytes);
-        let result = Archive::open(&path).await;
+        let result = Archive::open_reader(&path, LocalReadAt::new(&path)).await;
         assert!(result.is_err(), "unknown bytes should produce an error");
     }
 
@@ -443,20 +433,22 @@ mod tests {
     async fn open_zip_returns_ready() {
         let buf = build_zip(&[("hello.txt", b"hello")]);
         let (_f, path) = write_temp(&buf);
-        let opened = Archive::open(&path).await.unwrap();
+        let opened = Archive::open_reader(&path, LocalReadAt::new(&path)).await.unwrap();
         assert!(matches!(opened, Opened::Ready(_)));
     }
 
     #[tokio::test]
     async fn open_rar5_local_returns_ready() {
         // Local RAR5: sequential scan runs during open → always Ready.
-        let opened = Archive::open(&rar_fixture("rar5_store.rar")).await.unwrap();
+        let path = rar_fixture("rar5_store.rar");
+        let opened = Archive::open_reader(&path, LocalReadAt::new(&path)).await.unwrap();
         assert!(matches!(opened, Opened::Ready(_)));
     }
 
     #[tokio::test]
     async fn opened_ready_convenience_works() {
-        let archive = Archive::open(&rar_fixture("rar5_store.rar"))
+        let path = rar_fixture("rar5_store.rar");
+        let archive = Archive::open_reader(&path, LocalReadAt::new(&path))
             .await
             .unwrap()
             .ready()
@@ -470,7 +462,8 @@ mod tests {
     #[tokio::test]
     async fn open_rar4_returns_ready() {
         // RAR4 always scans during open — never NeedsScan.
-        let opened = Archive::open(&rar_fixture("rar4_sample.rar")).await.unwrap();
+        let path = rar_fixture("rar4_sample.rar");
+        let opened = Archive::open_reader(&path, LocalReadAt::new(&path)).await.unwrap();
         assert!(matches!(opened, Opened::Ready(_)));
     }
 
@@ -486,7 +479,8 @@ mod tests {
         let cache_file = tempfile::NamedTempFile::new().unwrap();
 
         // Open and get the archive.
-        let archive = Archive::open(&path).await.unwrap().ready().await.unwrap();
+        let archive = Archive::open_reader(&path, LocalReadAt::new(&path))
+            .await.unwrap().ready().await.unwrap();
         let entry_count = archive.entries().len();
         assert!(entry_count > 0);
 
@@ -512,7 +506,8 @@ mod tests {
         let fixture_path = rar_fixture("rar5_store.rar");
 
         // First open: scans and saves cache.
-        let archive = Archive::open(&fixture_path).await.unwrap().ready().await.unwrap();
+        let archive = Archive::open_reader(&fixture_path, LocalReadAt::new(&fixture_path))
+            .await.unwrap().ready().await.unwrap();
         let expected_entries: Vec<String> = archive.entries().iter().map(|e| e.name.clone()).collect();
         assert!(!expected_entries.is_empty());
 
@@ -535,8 +530,7 @@ mod tests {
         let cached = crate::cache::ArchiveCache::load(&cache_path).unwrap();
         assert!(cached.is_valid(&fingerprint));
 
-        let reader = Source::detect(&fixture_path);
-        let restored = Archive::from_cache(cached, reader);
+        let restored = Archive::from_cache(cached, LocalReadAt::new(&fixture_path));
 
         let restored_entries: Vec<String> = restored.entries().iter().map(|e| e.name.clone()).collect();
         assert_eq!(restored_entries, expected_entries);
@@ -546,7 +540,8 @@ mod tests {
     async fn rar4_implicit_cache_open_reopen() {
         let fixture_path = rar_fixture("rar4_sample.rar");
 
-        let archive = Archive::open(&fixture_path).await.unwrap().ready().await.unwrap();
+        let archive = Archive::open_reader(&fixture_path, LocalReadAt::new(&fixture_path))
+            .await.unwrap().ready().await.unwrap();
         let expected_entries: Vec<String> = archive.entries().iter().map(|e| e.name.clone()).collect();
         assert!(!expected_entries.is_empty());
 
@@ -567,8 +562,7 @@ mod tests {
         let cached = crate::cache::ArchiveCache::load(cache_file.path()).unwrap();
         assert!(cached.is_valid(&fingerprint));
 
-        let reader = Source::detect(&fixture_path);
-        let restored = Archive::from_cache(cached, reader);
+        let restored = Archive::from_cache(cached, LocalReadAt::new(&fixture_path));
 
         let restored_entries: Vec<String> = restored.entries().iter().map(|e| e.name.clone()).collect();
         assert_eq!(restored_entries, expected_entries);

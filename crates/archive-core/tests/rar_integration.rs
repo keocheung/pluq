@@ -8,14 +8,14 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use archive_core::{ArchiveEntry, ArchiveReader, CoreError, ProgressReporter, RarArchive, Source};
+use archive_core::{ArchiveEntry, ArchiveReader, CoreError, LocalReadAt, ProgressReporter, RarArchive};
 
-async fn open_rar(path: &str) -> RarArchive<Source> {
-    RarArchive::open(Source::detect(path)).await.expect("open RAR")
+async fn open_rar(path: &str) -> RarArchive<LocalReadAt> {
+    RarArchive::open(LocalReadAt::new(path)).await.expect("open RAR")
 }
 
 async fn extract_bytes(
-    archive: &RarArchive<Source>,
+    archive: &RarArchive<LocalReadAt>,
     entry: &ArchiveEntry,
     password: Option<&[u8]>,
 ) -> Result<Bytes, CoreError> {
@@ -46,7 +46,7 @@ async fn rar5_format_detection() {
 #[tokio::test]
 async fn rar4_gives_unsupported_format_error() {
     // rar4_sample.rar carries the 7-byte RAR4 magic — must return UnsupportedFormat.
-    let result = RarArchive::open(Source::detect(&fixture("rar4_sample.rar"))).await;
+    let result = RarArchive::open(LocalReadAt::new(&fixture("rar4_sample.rar"))).await;
     assert!(
         matches!(result, Err(CoreError::UnsupportedFormat { .. })),
         "expected UnsupportedFormat for RAR4 archive, got an unexpected result"
@@ -408,7 +408,7 @@ async fn rar5_elastic_scan_parity_compressed() {
 #[tokio::test]
 async fn rar5_extract_all_streaming_local_byte_count() {
     // rar5_store.rar: file1.txt (20 B) + file2.txt (20 B)
-    let mut archive = RarArchive::open(Source::detect(&fixture("rar5_store.rar")))
+    let mut archive = RarArchive::open(LocalReadAt::new(&fixture("rar5_store.rar")))
         .await
         .expect("open");
 
@@ -434,7 +434,7 @@ async fn rar5_extract_all_streaming_local_byte_count() {
 #[tokio::test]
 async fn rar5_extract_all_streaming_local_content() {
     // Verify the bytes written to memory sinks match the expected file contents.
-    let mut archive = RarArchive::open(Source::detect(&fixture("rar5_store.rar")))
+    let mut archive = RarArchive::open(LocalReadAt::new(&fixture("rar5_store.rar")))
         .await
         .expect("open");
 
@@ -512,7 +512,7 @@ impl ProgressReporter for ScanRecorder {
 async fn rar5_elastic_scan_progress_callbacks() {
     // Open local RAR5 fixture. scan_metadata can be called even on an already-scanned
     // archive — it just re-scans (safe, idempotent).
-    let mut archive = RarArchive::open(Source::detect(&fixture("rar5_store.rar")))
+    let mut archive = RarArchive::open(LocalReadAt::new(&fixture("rar5_store.rar")))
         .await
         .expect("open");
 

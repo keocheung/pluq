@@ -30,7 +30,7 @@ Six layers. Each has one job. Nothing leaks between them.
                        │  decorated ReadAt passed down
 ┌──────────────────────────────────────────────────────────────────┐
 │  Layer 3: Archive (Facade + State + Format Detection)             │
-│  Archive::open(source) → Result<Opened, ArchiveError>            │
+│  Archive::open_reader(label, reader) → Result<Opened, ArchiveError> │
 │  Opened::Ready(Archive) | Opened::NeedsScan(PendingArchive)      │
 │  Holds ArchiveInner enum directly (Zip | Rar | Rar4)              │
 │  Translates CoreError → ArchiveError                              │
@@ -102,10 +102,11 @@ pub trait ReadAt: Send + Sync {
 
 Format parsers use `read_range()` for headers and `read_stream()` for entry data extraction.
 
+**`LocalPath` trait** — companion to `ReadAt`. Optional marker that returns `Option<&Path>` for local-file shortcuts. Default impl returns `None`. `LocalReadAt` overrides to return the file path. Used by the RAR extraction pipeline to decide between the local shortcut (pass the path directly to `unrar`) and the cloud synthetic-archive approach.
+
 **Implementations (both methods required, no defaults):**
 - `LocalReadAt` — `read_range`: opens file, seeks, reads into buffer. `read_stream`: opens file, seeks, returns `file.take(len)` (bounded `AsyncRead` over the file handle).
 - `HttpReadAt` — `read_range`: HTTP Range request, collects response via `.bytes()`. `read_stream`: HTTP Range request, returns the response body stream directly via `StreamReader` (zero copy).
-- `Source` enum — static dispatch over Local/Http (no vtables), delegates both methods.
 - `MultiVolumeReadAt` [future] — joins multiple files into one virtual ReadAt
   - User passes first volume (e.g., `archive.7z.001`)
   - I/O layer discovers siblings by naming convention (`.002`, `.003`, ...)
@@ -524,14 +525,14 @@ fn decode_zip_filename(bytes: &[u8], general_purpose_flags: u16) -> String {
 
 ## Layer 3 — Archive (Facade + State + Format Detection)
 
-Single entry point for products. `Archive::open(source)` auto-detects source type (local vs HTTP) and format (ZIP, RAR5), returning `Opened::Ready(Archive)` or `Opened::NeedsScan(PendingArchive)`. Holds the format-specific parser directly via an internal `ArchiveInner` enum. Translates `CoreError` → `ArchiveError`. Tunnels `ReadError::Transport` blindly as `ArchiveError::Transport`.
+Single entry point for products. `Archive::open_reader(label, reader)` receives a pre-constructed `R: ReadAt + LocalPath` reader and auto-detects the archive format (ZIP, RAR5, RAR4), returning `Opened::Ready(Archive)` or `Opened::NeedsScan(PendingArchive)`. Source resolution (local vs HTTP vs cloud provider) is handled upstream by `archive-source`. Holds the format-specific parser directly via an internal `ArchiveInner` enum. Translates `CoreError` → `ArchiveError`. Tunnels `ReadError::Transport` blindly as `ArchiveError::Transport`.
 
 **What Layer 3 IS:** format detection, error translation, universal state (cache, entry tree, scan lifecycle). All products (CLI, server, KMP apps) get this for free.
 
 **What Layer 3 is NOT:** it is not the place for auth, billing, quotas, OAuth, or retry policies. Those are product-specific concerns that live in horizontal crates, assembled at the product level (Layer 4).
 
 **Responsibilities:**
-- Receives a source string (local path or URL) from the product above
+- Receives a pre-constructed `R: ReadAt + LocalPath` reader from `archive-source` (or directly from tests)
 - Auto-detects format via magic bytes and opens the correct parser
 - Returns `Opened::Ready` (metadata available) or `Opened::NeedsScan` (deferred scan required, e.g. RAR over HTTP without QO)
 - Manages `ArchiveCache` (on-disk cross-session metadata cache with invalidation)
@@ -540,7 +541,7 @@ Single entry point for products. `Archive::open(source)` auto-detects source typ
 - Tunnels `ReadError::Transport` (inside `CoreError::Io`) blindly as `ArchiveError::Transport` — does not inspect or downcast
 
 **Key types:**
-- `Archive` — product-facing handle to an open archive (holds `ArchiveInner` enum: `Zip(ZipArchive<Source>)` | `Rar(RarArchive<Source>)` | `Rar4(Rar4Archive<Source>)`)
+- `Archive<R>` — product-facing handle to an open archive (holds `ArchiveInner<R>` enum: `Zip(ZipArchive<R>)` | `Rar(RarArchive<R>)` | `Rar4(Rar4Archive<R>)`); generic over `R: ReadAt + LocalPath`
 - `Opened` — result of `Archive::open()`: `Ready(Archive)` or `NeedsScan(PendingArchive)`
 - `PendingArchive` — archive needing a metadata scan; call `scan_info()` for cost, then `scan()` to produce an `Archive`
 - `ScanInfo` — `Ready` or `Required { estimated_bytes, reason }` — tells callers whether and how expensive the scan is
@@ -604,10 +605,17 @@ Each product is an actual binary (or library consumed via FFI). It assembles the
 - Full local archive management (read + write) plus direct cloud sniping
 - No dependency on the server for core functionality
 
+**`archive-source`** — source resolution layer between products (Layer 4) and `archive` (Layer 3). Centralizes URL detection, credential discovery, and reader construction.
+- Detects source type: local file path, Google Drive URL, generic HTTP URL
+- Looks up credentials (e.g. `ARCHIVE_SNIPER_GDRIVE_KEY`)
+- Returns `ResolvedSource` enum (`Local(LocalReadAt)` | `Http(CachingReadAt<HttpReadAt>)` | `GDrive(CachingReadAt<GoogleDriveReadAt>)`)
+- Products call `resolve(input, &config)` then pass the reader to `Archive::open_reader()`
+
 **CLI (`snipe`)** — the v1 product. Interactive TUI archive browser + cloud sniping from the terminal. Handles OAuth externally (browser flow → static bearer token via `HttpReadAt::with_headers()`), no `ReadAt` decorators needed.
-- Assembles: `archive-core` + `archive`, no decorators
+- Assembles: `archive-core` + `archive` + `archive-source`, no decorators
 - Defines `CliError`
-- Owns: TUI (`ratatui`), CLI parsing (`clap`), OAuth flows, cloud provider URL routing
+- Owns: TUI (`ratatui`), CLI parsing (`clap`), OAuth flows
+- Delegates cloud provider URL routing to `archive-source::resolve()`
 
 **Web site** — not a Rust product. Consumes the server's HTTP API. Metered/freemium.
 

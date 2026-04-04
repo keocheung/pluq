@@ -9,14 +9,14 @@ use std::io::{Cursor, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use archive_core::{ArchiveEntry, CompressionMethod, CoreError, ProgressReporter, Source, ZipArchive};
+use archive_core::{ArchiveEntry, CompressionMethod, CoreError, LocalReadAt, ProgressReporter, ZipArchive};
 
-async fn open_zip(path: &str) -> ZipArchive<Source> {
-    ZipArchive::open(Source::detect(path)).await.expect("open ZIP")
+async fn open_zip(path: &str) -> ZipArchive<LocalReadAt> {
+    ZipArchive::open(LocalReadAt::new(path)).await.expect("open ZIP")
 }
 
 async fn extract_bytes(
-    archive: &ZipArchive<Source>,
+    archive: &ZipArchive<LocalReadAt>,
     entry: &ArchiveEntry,
     password: Option<&[u8]>,
 ) -> Result<bytes::Bytes, CoreError> {
