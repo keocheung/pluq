@@ -19,7 +19,7 @@ use crate::codec::CompressionMethod;
 use crate::io::LocalPath;
 use crate::junk;
 use crate::progress::ProgressReporter;
-use crate::rar::{consume_snippets, map_unrar_error, verify_and_write, SnippetConfig, SnippetMsg, RAR4_SIGNATURE};
+use crate::rar::{build_unrar_progress_hooks, consume_snippets, map_unrar_error, verify_and_write, SnippetConfig, SnippetMsg, RAR4_SIGNATURE};
 use crate::rar4::parse::{
     build_rar4_end_block, parse_block_header, parse_file_header, parse_main_header, BLOCK_END,
     BLOCK_FILE,
@@ -720,6 +720,7 @@ impl<R: ReadAt> Rar4Archive<R> {
             p.on_entry_start(&entry_name, uncompressed_size);
         }
 
+        let (cancel, on_progress) = build_unrar_progress_hooks(&progress);
         let data =
             tokio::task::spawn_blocking(move || -> Result<Vec<u8>, CoreError> {
                 let mut archive = match &password_bytes {
@@ -747,7 +748,9 @@ impl<R: ReadAt> Rar4Archive<R> {
                     let name =
                         header.entry().filename.to_string_lossy().replace('\\', "/");
                     if name == target_name {
-                        let (data, _) = header.read().map_err(map_unrar_error)?;
+                        let (data, _) = header
+                            .read_with_progress(Some(cancel), Some(on_progress))
+                            .map_err(map_unrar_error)?;
                         return Ok(data);
                     }
                     archive = header.skip().map_err(map_unrar_error)?;
@@ -800,6 +803,8 @@ impl<R: ReadAt> Rar4Archive<R> {
         let archive_preamble = self.archive_preamble.clone();
         let end_block = self.end_block.clone();
 
+        let (cancel, on_progress) = build_unrar_progress_hooks(&progress);
+
         // 3. Assemble synthetic RAR4 archive and extract with unrar.
         let data =
             tokio::task::spawn_blocking(move || -> Result<Vec<u8>, CoreError> {
@@ -841,7 +846,9 @@ impl<R: ReadAt> Rar4Archive<R> {
                 let header = header.ok_or_else(|| CoreError::BitstreamError {
                     detail: "synthetic RAR4 archive produced no entries".into(),
                 })?;
-                let (data, _) = header.read().map_err(map_unrar_error)?;
+                let (data, _) = header
+                    .read_with_progress(Some(cancel), Some(on_progress))
+                    .map_err(map_unrar_error)?;
 
                 // temp_file dropped here — temp file deleted automatically.
                 Ok(data)

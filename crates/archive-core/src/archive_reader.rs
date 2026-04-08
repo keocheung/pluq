@@ -41,6 +41,15 @@ pub trait ArchiveReader {
     ///   the target entry in the same folder, plus the target's size
     fn extraction_cost(&self, entry: &ArchiveEntry) -> u64;
 
+    /// Compression dictionary size in bytes for this entry, if known.
+    ///
+    /// RAR 7.x supports dictionaries up to 64 GB — the decompressor allocates
+    /// this much RAM. Returns `Some(bytes)` for RAR5, `None` for formats
+    /// where the dictionary is fixed/small (ZIP, RAR4).
+    fn dict_size(&self, _entry: &ArchiveEntry) -> Option<u64> {
+        None
+    }
+
     /// Extract a single entry, streaming decompressed bytes to `sink`.
     ///
     /// Returns the number of bytes written to `sink`.

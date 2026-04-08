@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use std::io::Read;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -673,6 +674,11 @@ impl<R: ReadAt> RarArchive<R> {
         self.locations[entry.index].data_size
     }
 
+    /// Compression dictionary size in bytes for this entry.
+    pub fn dict_size(&self, entry: &ArchiveEntry) -> Option<u64> {
+        Some(self.locations[entry.index].dict_size)
+    }
+
     /// Extract a single entry, streaming decompressed bytes to `sink`.
     ///
     /// Returns the number of bytes written.  CRC32 and BLAKE2sp (when present)
@@ -779,6 +785,10 @@ impl<R: ReadAt> RarArchive<R> {
         let handle = tokio::runtime::Handle::current();
         let mut sync_reader = SyncIoBridge::new_with_handle(stream, handle);
 
+        // Keep a handle to check cancel after spawn_blocking returns — the
+        // blocking loop can finish faster than the event loop processes Esc.
+        let progress_post = progress.clone();
+
         let verified: Vec<u8> =
             tokio::task::spawn_blocking(move || -> Result<Vec<u8>, CoreError> {
                 const CHUNK_SIZE: usize = 64 * 1024;
@@ -869,15 +879,29 @@ impl<R: ReadAt> RarArchive<R> {
                 detail: format!("extraction task panicked: {e}"),
             })??;
 
-        // Step 3 (async): write verified bytes to the sink.
-        let bytes_written = verified.len() as u64;
-        sink.write_all(&verified)
-            .await
-            .map_err(|e| CoreError::BitstreamError {
-                detail: format!("write to sink failed: {e}"),
-            })?;
+        // Step 3 (async): write verified bytes to the sink in chunks,
+        // checking for cancellation between each chunk.  On fast SSDs the
+        // blocking read loop above finishes in <200ms — too fast for a
+        // human to press Esc — so the write phase is where cancellation
+        // actually needs to land.
+        const WRITE_CHUNK: usize = 256 * 1024;
+        let mut written: u64 = 0;
+        for chunk in verified.chunks(WRITE_CHUNK) {
+            {
+                let p = progress_post.lock().unwrap();
+                if p.should_cancel() {
+                    return Err(CoreError::Cancelled);
+                }
+            }
+            sink.write_all(chunk)
+                .await
+                .map_err(|e| CoreError::BitstreamError {
+                    detail: format!("write to sink failed: {e}"),
+                })?;
+            written += chunk.len() as u64;
+        }
 
-        Ok(bytes_written)
+        Ok(written)
     }
 
     /// Dispatch compressed extraction (methods 1–5, or any encrypted entry) to `unrar`.
@@ -931,6 +955,7 @@ impl<R: ReadAt> RarArchive<R> {
             p.on_entry_start(&entry_name, uncompressed_size);
         }
 
+        let (cancel, on_progress) = build_unrar_progress_hooks(&progress);
         let data =
             tokio::task::spawn_blocking(move || -> Result<Vec<u8>, CoreError> {
                 let mut archive = match &password_bytes {
@@ -958,7 +983,9 @@ impl<R: ReadAt> RarArchive<R> {
                     let name =
                         header.entry().filename.to_string_lossy().replace('\\', "/");
                     if name == target_name {
-                        let (data, _) = header.read().map_err(map_unrar_error)?;
+                        let (data, _) = header
+                            .read_with_progress(Some(cancel), Some(on_progress))
+                            .map_err(map_unrar_error)?;
                         return Ok(data);
                     }
                     archive = header.skip().map_err(map_unrar_error)?;
@@ -1022,6 +1049,8 @@ impl<R: ReadAt> RarArchive<R> {
         let archive_preamble = self.archive_preamble.clone();
         let end_block = self.end_block.clone();
 
+        let (cancel, on_progress) = build_unrar_progress_hooks(&progress);
+
         // 3. Assemble synthetic archive, extract with unrar — all in spawn_blocking.
         let data =
             tokio::task::spawn_blocking(move || -> Result<Vec<u8>, CoreError> {
@@ -1068,7 +1097,9 @@ impl<R: ReadAt> RarArchive<R> {
                 let header = header.ok_or_else(|| CoreError::BitstreamError {
                     detail: "synthetic archive produced no entries".into(),
                 })?;
-                let (data, _) = header.read().map_err(map_unrar_error)?;
+                let (data, _) = header
+                    .read_with_progress(Some(cancel), Some(on_progress))
+                    .map_err(map_unrar_error)?;
 
                 // temp_file is dropped here → temp file deleted automatically.
                 Ok(data)
@@ -1212,6 +1243,10 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for RarArchive<R> {
 
     fn extraction_cost(&self, entry: &ArchiveEntry) -> u64 {
         RarArchive::extraction_cost(self, entry)
+    }
+
+    fn dict_size(&self, entry: &ArchiveEntry) -> Option<u64> {
+        RarArchive::dict_size(self, entry)
     }
 
     async fn extract<W: AsyncWrite + Send + Unpin>(
@@ -1400,6 +1435,32 @@ fn build_end_of_archive_block() -> Bytes {
     Bytes::from(buf)
 }
 
+/// Build the cancel flag and progress closure for `read_with_progress`.
+///
+/// The closure accumulates chunk bytes and reports cumulative progress.
+/// It also bridges `ProgressReporter::should_cancel()` into the `AtomicBool`.
+pub(crate) fn build_unrar_progress_hooks(
+    progress: &Arc<Mutex<dyn ProgressReporter>>,
+) -> (Arc<AtomicBool>, Box<dyn Fn(usize) + Send>) {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_cb = cancel.clone();
+    let progress_cb = progress.clone();
+    let bytes_so_far = AtomicU64::new(0);
+
+    let on_progress: Box<dyn Fn(usize) + Send> = Box::new(move |chunk_bytes| {
+        let cumulative =
+            bytes_so_far.fetch_add(chunk_bytes as u64, Ordering::Relaxed) + chunk_bytes as u64;
+
+        let mut p = progress_cb.lock().unwrap();
+        p.on_bytes_progress(cumulative);
+        if p.should_cancel() {
+            cancel_cb.store(true, Ordering::Relaxed);
+        }
+    });
+
+    (cancel, on_progress)
+}
+
 /// Map a `unrar` error to the appropriate [`CoreError`] variant.
 ///
 /// `unrar` reports errors via `code` + `when` pairs.  We translate the
@@ -1412,6 +1473,7 @@ pub(crate) fn map_unrar_error(e: unrar::error::UnrarError) -> CoreError {
         Code::BadPassword => CoreError::WrongPassword {
             method: crate::PasswordDetectionMethod::CrcMismatch,
         },
+        Code::UserAbort => CoreError::Cancelled,
         Code::BadData | Code::BadArchive => CoreError::BitstreamError {
             detail: format!("corrupt RAR data: {e}"),
         },
@@ -1466,10 +1528,6 @@ pub(crate) async fn verify_and_write<W: AsyncWrite + Send + Unpin>(
     }
 
     let bytes_written = data.len() as u64;
-    {
-        let mut p = progress.lock().unwrap();
-        p.on_bytes_progress(bytes_written);
-    }
     sink.write_all(data)
         .await
         .map_err(|e| CoreError::BitstreamError {
@@ -1538,7 +1596,10 @@ where
                         .unwrap()
                         .on_entry_start(&name, entry.uncompressed_size);
 
-                    let (data, next_archive) = header.read().map_err(map_unrar_error)?;
+                    let (cancel, on_progress) = build_unrar_progress_hooks(&progress);
+                    let (data, next_archive) = header
+                        .read_with_progress(Some(cancel), Some(on_progress))
+                        .map_err(map_unrar_error)?;
                     archive = next_archive;
 
                     // CRC32 verification.
@@ -1571,7 +1632,6 @@ where
                     })?;
 
                     total_bytes += data.len() as u64;
-                    progress.lock().unwrap().on_bytes_progress(data.len() as u64);
                     progress.lock().unwrap().on_entry_complete(&name, true);
                 } else {
                     // Sink factory returned None — skip this entry.
@@ -1643,6 +1703,8 @@ where
 
     { progress.lock().unwrap().on_entry_start(&entry_name, uncompressed_size); }
 
+    let (cancel, on_progress) = build_unrar_progress_hooks(progress);
+
     // Extract via unrar in blocking task.
     let data = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, CoreError> {
         let archive = match &password_bytes {
@@ -1658,7 +1720,9 @@ where
         let header = header.ok_or_else(|| CoreError::BitstreamError {
             detail: "snippet archive produced no entries".into(),
         })?;
-        let (data, _) = header.read().map_err(map_unrar_error)?;
+        let (data, _) = header
+            .read_with_progress(Some(cancel), Some(on_progress))
+            .map_err(map_unrar_error)?;
         Ok(data)
     })
     .await
@@ -1693,7 +1757,6 @@ where
         detail: format!("write failed for '{entry_name}': {e}"),
     })?;
 
-    progress.lock().unwrap().on_bytes_progress(data.len() as u64);
     progress.lock().unwrap().on_entry_complete(&entry_name, true);
 
     Ok(data.len() as u64)

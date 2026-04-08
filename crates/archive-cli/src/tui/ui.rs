@@ -167,6 +167,61 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 .block(Block::default().borders(Borders::ALL));
             frame.render_widget(footer, chunks[2]);
         }
+        AppPhase::ConfirmExtract {
+            entry_name,
+            dict_size,
+            ..
+        } => {
+            let (entry_name, dict_size) = (entry_name.clone(), *dict_size);
+
+            let outer = Block::default()
+                .borders(Borders::ALL)
+                .title("Large Dictionary Warning")
+                .border_style(Style::default().fg(Color::Yellow));
+            let inner = outer.inner(area);
+            frame.render_widget(outer, area);
+
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1), // top padding
+                    Constraint::Length(1), // entry name
+                    Constraint::Length(1), // spacing
+                    Constraint::Length(1), // warning line 1
+                    Constraint::Length(1), // warning line 2
+                    Constraint::Length(1), // spacing
+                    Constraint::Length(1), // dict size
+                    Constraint::Min(1),    // fill
+                    Constraint::Length(1), // action hints
+                ])
+                .split(inner);
+
+            frame.render_widget(
+                Paragraph::new(format!("  {}", entry_name)),
+                chunks[1],
+            );
+            frame.render_widget(
+                Paragraph::new("  This file uses a large compression dictionary.")
+                    .style(Style::default().fg(Color::Yellow)),
+                chunks[3],
+            );
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "  The decompressor will allocate ~{} of RAM.",
+                    crate::format_size(dict_size)
+                ))
+                .style(Style::default().fg(Color::Yellow)),
+                chunks[4],
+            );
+            frame.render_widget(
+                Paragraph::new(format!("  Dictionary size: {}", crate::format_size(dict_size))),
+                chunks[6],
+            );
+            frame.render_widget(
+                Paragraph::new("  Enter to proceed  ·  Esc to cancel"),
+                chunks[8],
+            );
+        }
         AppPhase::Extracting {
             entry_name,
             total_bytes,
@@ -216,7 +271,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 format!("  Extracted:  {}", crate::format_size(bytes_extracted))
             };
             frame.render_widget(Paragraph::new(counter_text), chunks[5]);
-            frame.render_widget(Paragraph::new("  Press q to cancel"), chunks[7]);
+            frame.render_widget(Paragraph::new("  Esc to cancel  ·  q to quit"), chunks[7]);
         }
         AppPhase::Error(msg) => {
             let msg = msg.clone();

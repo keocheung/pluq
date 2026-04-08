@@ -51,7 +51,8 @@ These commands define the CLI's public API. The TUI is the default entry point.
 - [x] `ratatui` integration in `archive-cli`.
 - [x] Single-file extraction with progress UI (Scanning + Extracting phases).
 - [x] **`archive-source` refactor** — Create `archive-source` crate; centralize URL detection, credential discovery, and reader construction. Delete `Source` enum + `DynReadAt` from `archive-core`. Make `Archive` generic over `R: ReadAt`. Move CLI `provider.rs` logic into `archive-source`. See `docs/SOURCE.md` for full spec.
-- [ ] **Esc to cancel extraction** — Cancel in-progress extraction and return to browse (Ctrl-C already wired for CLI; TUI needs its own cancellation path).
+- [x] **Esc to cancel extraction** — Cancel in-progress extraction and return to browse (Ctrl-C already wired for CLI; TUI now uses Esc for surgical cancellation).
+- [x] **Large dictionary safety gate** — Detect RAR5 archives requiring >4GB RAM and warn the user before extraction.
 - [ ] **Multi-select extraction** — Space to toggle entries, bulk extract. Requires a new `extract_selected(&self, entries, sink_factory, ...)` method on `ArchiveReader` (archive-core) that sorts entries by physical offset and coalesces adjacent entries into minimal `read_stream` calls — reducing N HTTP requests to a small number of clustered reads. Default trait impl falls back to a loop of `extract()` (correct for local files). Format parsers (ZIP, RAR5, RAR4) provide optimized overrides using their private `FormatLocation` offset data.
 - [ ] **`extract-all` loop fix** — currently loops `archive.extract()` per entry (N HTTP requests for cloud RAR). Once `extract_selected` exists, route `ExtractAll` through it instead.
 - [ ] **Selection summary** — Footer updates live as entries are toggled: "12 files selected — 48.3 MB".

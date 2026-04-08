@@ -298,6 +298,17 @@ impl<R: ReadAt + LocalPath + 'static> Archive<R> {
         }
     }
 
+    /// Compression dictionary size in bytes for this entry, if known.
+    ///
+    /// Returns `Some(bytes)` for RAR5, `None` for ZIP/RAR4.
+    pub fn dict_size(&self, entry: &ArchiveEntry) -> Option<u64> {
+        match &self.inner {
+            ArchiveInner::Zip(z) => z.dict_size(entry),
+            ArchiveInner::Rar(r) => r.dict_size(entry),
+            ArchiveInner::Rar4(r) => r.dict_size(entry),
+        }
+    }
+
     /// Decompress and verify CRC without retaining output.
     pub async fn test(
         &self,

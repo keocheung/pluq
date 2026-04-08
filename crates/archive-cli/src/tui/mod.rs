@@ -54,23 +54,60 @@ pub async fn run(
         let _ = tx_open.send(app::AppMessage::ArchiveOpened(result));
     });
 
-    let mut event_stream = crossterm::event::EventStream::new();
-    let mut tick = tokio::time::interval(std::time::Duration::from_millis(50));
+    // Dedicated event reader task (ratatui recommended pattern).
+    // Runs independently so key events are captured immediately,
+    // even when the main loop is busy drawing or processing messages.
+    let (event_tx, mut event_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crossterm::event::KeyEvent>();
+    let cancel_flag_reader = app.cancel_flag.clone();
+    tokio::spawn(async move {
+        let mut event_stream = crossterm::event::EventStream::new();
+        while let Some(Ok(event)) = event_stream.next().await {
+            if let crossterm::event::Event::Key(key) = event
+                && key.kind == crossterm::event::KeyEventKind::Press
+            {
+                // Fast-path: set the cancel flag directly from this
+                // task so spawn_blocking sees it without waiting for
+                // the main loop to process the key event.
+                if key.code == crossterm::event::KeyCode::Esc
+                    || key.code == crossterm::event::KeyCode::Char('q')
+                {
+                    cancel_flag_reader.store(
+                        true,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                }
+                if event_tx.send(key).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    const FPS: u64 = 20;
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(1000 / FPS));
 
     loop {
-        terminal.draw(|frame| ui::draw(frame, &mut app))?;
-
         tokio::select! {
-            _ = tick.tick() => {}
-            event = event_stream.next() => {
-                if let Some(Ok(crossterm::event::Event::Key(key))) = event {
+            biased;
+
+            // 1. Process Key Events instantly (State update only)
+            key = event_rx.recv() => {
+                if let Some(key) = key {
                     app.handle_key(key, &tx);
                 }
             }
+            // 2. Process System Messages instantly (State update only)
             msg = rx.recv() => {
                 if let Some(msg) = msg {
                     app.handle_message(msg, &tx);
                 }
+            }
+            // 3. ONLY DRAW when the tick fires (Rendering)
+            _ = tick.tick() => {
+                // Read latest progress from shared atomics for the draw.
+                app.poll_progress();
+                terminal.draw(|frame| ui::draw(frame, &mut app))?;
             }
         }
 
