@@ -18,6 +18,7 @@ Cargo.lock
 # Environment files (never commit secrets)
 .env
 .env.*
+dev_links.json
 
 # Test / scratch ZIPs
 *.zip

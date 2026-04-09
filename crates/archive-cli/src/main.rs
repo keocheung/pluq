@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::{Parser, Subcommand};
-use tracing::info;
+use tracing::{info, warn};
 
 use archive::Archive;
 use archive_source::{ResolvedSource, SourceConfig, classify_transport, resolve};
@@ -18,6 +18,9 @@ struct Cli {
     /// Enable debug logging to archive-sniper.log (or set ARCHIVE_SNIPER_LOG=debug).
     #[arg(long, global = true)]
     debug: bool,
+    /// Delete the persistent cache directory before starting the operation.
+    #[arg(long, global = true)]
+    clean_cache: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -83,6 +86,28 @@ async fn main() {
     let _log_guard = init_logging(cli.debug);
 
     info!(command = ?std::env::args().collect::<Vec<_>>(), "snipe starting");
+
+    // ── Cache cleaning ───────────────────────────────────────────────────
+    if cli.clean_cache {
+        match archive::cache_dir() {
+            Some(dir) if dir.exists() => {
+                info!(path = %dir.display(), "clearing cache directory");
+                match std::fs::remove_dir_all(&dir) {
+                    Ok(_) => {
+                        eprintln!("  Cache cleared: {}", dir.display());
+                    }
+                    Err(e) => {
+                        warn!(path = %dir.display(), error = %e, "failed to clear cache");
+                        eprintln!("  Warning: Failed to clear cache: {e}");
+                    }
+                }
+            }
+            Some(_) => {
+                eprintln!("  Cache directory does not exist, nothing to clear.");
+            }
+            None => {}
+        }
+    }
 
     // ── Ctrl-C cancellation ───────────────────────────────────────────────
     // Shared flag: set by the signal handler, polled by scan/extraction loops.

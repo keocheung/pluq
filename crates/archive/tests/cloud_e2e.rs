@@ -82,18 +82,24 @@ fn unrar(filename: &str) -> String {
     format!("{UNRAR_BASE}/{filename}")
 }
 
-// ── Tier 2 URLs — Stefan's large personal archives ───────────────────────────
+fn dev_link(key: &str) -> Option<String> {
+    // 1. Try env var
+    let env_key = format!("ARCHIVE_SNIPER_{}", key.to_uppercase());
+    if let Ok(val) = std::env::var(&env_key) {
+        return Some(val);
+    }
 
-/// Stefan's Dropbox ZIP (~7.5 GB, ZIP64, ~13 000 PDFs).
-/// `dl=1` forces a direct byte-stream URL that supports HTTP Range requests.
-const DROPBOX_ZIP: &str = "https://www.dropbox.com/scl/fi/REDACTED/\
-    archive.zip?rlkey=REDACTED&st=2m90hlwz&dl=1";
-
-/// Stefan's Google Drive RAR (RAR5, very large).
-/// `uc?export=download` is Google's direct-download endpoint; Range requests
-/// for header-only fetches (listing) work without a confirmation cookie.
-const GOOGLE_DRIVE_RAR: &str =
-    "https://drive.google.com/uc?export=download&id=1ExampleGDriveFileId000000000000";
+    // 2. Try dev_links.json (workspace root or crate root)
+    let paths = ["dev_links.json", "../../dev_links.json"];
+    for path in paths {
+        let Ok(content) = std::fs::read_to_string(path) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) else { continue };
+        if let Some(val) = v.get(key).and_then(|v| v.as_str()) {
+            return Some(val.to_string());
+        }
+    }
+    None
+}
 
 // ── Tier 1 tests ──────────────────────────────────────────────────────────────
 
@@ -372,7 +378,14 @@ async fn cloud_rar5_unrar_encrypted_headers_graceful() {
 #[tokio::test]
 #[ignore = "requires network; run: cargo test -p archive --test cloud_e2e cloud_zip_dropbox -- --ignored --nocapture"]
 async fn cloud_zip_dropbox_listing() {
-    let archive = Archive::open_reader(DROPBOX_ZIP, open_url(DROPBOX_ZIP).unwrap())
+    let url = match dev_link("dropbox_zip") {
+        Some(u) => u,
+        None => {
+            println!("⏩ Skipping Dropbox ZIP test: dev_links.json missing or incomplete");
+            return;
+        }
+    };
+    let archive = Archive::open_reader(&url, open_url(&url).unwrap())
         .await
         .expect("should open Dropbox ZIP via HTTP range requests")
         .ready()
@@ -414,14 +427,21 @@ async fn cloud_zip_dropbox_listing() {
 #[tokio::test]
 #[ignore = "requires network; run: cargo test -p archive --test cloud_e2e cloud_rar_google_drive -- --ignored --nocapture"]
 async fn cloud_rar_google_drive_listing() {
-    let reader = match open_url(GOOGLE_DRIVE_RAR) {
+    let url = match dev_link("gdrive_rar") {
+        Some(u) => u,
+        None => {
+            println!("⏩ Skipping Google Drive RAR test: dev_links.json missing or incomplete");
+            return;
+        }
+    };
+    let reader = match open_url(&url) {
         Ok(r) => r,
         Err(e) => {
             println!("ℹ️  Could not resolve Google Drive URL (expected — needs credentials): {e:?}");
             return;
         }
     };
-    let result = Archive::open_reader(GOOGLE_DRIVE_RAR, reader).await;
+    let result = Archive::open_reader(&url, reader).await;
 
     match result {
         Ok(opened) => {
