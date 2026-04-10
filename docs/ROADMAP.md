@@ -57,16 +57,19 @@ These commands define the CLI's public API. The TUI is the default entry point.
 - [x] **`extract-all` loop fix** — CLI `ExtractAll` now routes through `extract_selected` instead of looping `archive.extract()` per entry.
 - [x] **Selection summary** — Footer updates live as entries are toggled: "12 files selected — 48.3 MB".
 
-### Phase 3b: TUI Polish
-> Items in this phase are independent and can be tackled in any order.
+### Phase 3b: TUI Polish & Zen Sniper
+> Items in this phase focus on the "Drill-Down" navigation and minimalist aesthetic.
+> Design Reference: `docs/superpowers/specs/2026-04-10-zen-sniper-tui-design.md`
 
-- [ ] **Search / filter** — Type to filter the entry list in real time (fuzzy or substring).
-- [ ] **Tree-based navigation** — Collapse/expand directory nodes; select/deselect entire subtrees.
-- [ ] **Sort by columns** — Key to cycle sort order (name / size / compressed size) in the browse table.
-- [ ] **Extraction cost display** — Show estimated download cost per entry before extracting (`extraction_cost()` already implemented in `ArchiveReader`). Critical UX for cloud archives where extracting one small file may require downloading a large block.
-- [ ] **Speed + ETA during extraction** — Show MB/s and estimated time remaining in the extraction progress screen.
-- [ ] **`?` help popup** — Overlay showing all keybindings, toggled with `?`.
-- [ ] **Password-protected archive support** — `extract()` already accepts `Option<&[u8]>`; TUI detects the password error and shows an inline prompt.
+- [ ] **Drill-down navigation** — `Right`/`l` to dive into folders, `Left`/`h`/`Backspace` to return to parent.
+- [ ] **Full-path selection** — Refactor `app.toggled` to use `HashSet<String>` (paths) instead of indices.
+- [ ] **Zen Sniper aesthetic** — Minimalist Cyan/Black theme, Size + Name columns only, strip borders.
+- [ ] **Tab Review mode** — `Tab` to see/prune selected files; `Esc` to return to browsing.
+- [ ] **Extraction cost display** — Show estimated download cost for the highlighted entry.
+- [ ] **Search / filter** — `/` to filter the current folder's entry list.
+- [ ] **`?` help popup** — Overlay showing all keybindings.
+- [ ] **Speed + ETA during extraction** — MB/s and estimated time remaining.
+- [ ] **Password-protected archive support** — Inline TUI prompt for encrypted archives.
 
 ### Phase 3c: Home Screen
 - [ ] **Home screen** — Entry point with URL/path input, saved bookmarks, and recents (see `TUI_VISION.md`).

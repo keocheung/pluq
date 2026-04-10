@@ -86,16 +86,18 @@ extended with upcoming features.
 
 ### Planned features (from roadmap)
 
-- **Search/filter:** type to filter entries by name
-- **Multi-select:** space to toggle, bulk extract
-- **Sort:** by name, size, date
-- **Tree view:** expand/collapse directories (toggle between flat and tree)
+- **Search/filter:** `/` to filter the current folder's entry list.
+- **Drill-down navigation:** `Right` to enter, `Left` to exit.
+- **Full-path selection:** Multi-select across different folders.
+- **Selection Review:** `Tab` to see a review of all staged files before extraction.
+- **Zen Aesthetic:** Stripping boxes and borders for a minimalist, content-focused view.
 
 ### Navigation
 
-- `esc` from browse returns to home screen (not quit)
-- `q` quits the app entirely
-- `s` saves the current archive as a bookmark
+- `Left` or `Backspace` to move up to the parent directory.
+- `Tab` or `Esc` to toggle/close the selection review screen.
+- `q` quits the app entirely.
+- `s` saves the current archive as a bookmark.
 
 ---
 
