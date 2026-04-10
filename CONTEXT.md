@@ -3,7 +3,7 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 3 — Interactive TUI + Google Drive Provider.
-* **Current Active Task:** [HANDOVER] — Multi-select extraction (TUI/CLI) and optimized batch API complete.
+* **Current Active Task:** [HANDOVER] — Drill-down navigation, full-path selection, and Zen Sniper aesthetic complete.
 * **Baseline:** 236 tests pass, 14 ignored. Clippy clean.
 
 

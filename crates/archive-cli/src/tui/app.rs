@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use archive::{Archive, ArchiveEntry, ArchiveError, BatchResult, Opened, ProgressReporter, ScanInfo};
+use archive::{Archive, ArchiveEntry, ArchiveError, BatchResult, EntryTree, Opened, ProgressReporter, ScanInfo};
 use archive_source::ResolvedSource;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::TableState;
@@ -71,6 +71,19 @@ pub enum AppPhase {
     Error(String),
 }
 
+/// A single item visible in the current directory view.
+pub struct DisplayItem {
+    /// Segment name for display (e.g. "cat.jpg" or "photos").
+    pub name: String,
+    /// Full archive path for selection tracking (e.g. "photos/cat.jpg").
+    pub full_path: String,
+    pub is_directory: bool,
+    /// Index into `App::entries`, if this is a real archive entry.
+    pub entry_index: Option<usize>,
+    pub uncompressed_size: u64,
+    pub compressed_size: u64,
+}
+
 pub struct App {
     pub phase: AppPhase,
     pub source: String,
@@ -80,12 +93,20 @@ pub struct App {
     pub should_quit: bool,
     pub status_message: Option<String>,
     pub table_state: TableState,
-    /// Entry indices toggled for batch extraction (by index into `self.entries`).
-    pub toggled: HashSet<usize>,
+    /// Full archive paths toggled for batch extraction.
+    pub toggled: HashSet<String>,
     /// Shared cancel flag — set by Esc during extraction, read by ProgressReporter.
     pub cancel_flag: Arc<AtomicBool>,
     /// Shared progress counters — written by ProgressReporter, read on tick.
     pub progress: Arc<SharedProgress>,
+    /// Virtual folder tree built once from entries.
+    pub entry_tree: Option<EntryTree>,
+    /// Breadcrumb path segments (e.g. ["photos", "vacation"]).
+    pub current_path: Vec<String>,
+    /// Items visible in the current directory.
+    pub visible_items: Vec<DisplayItem>,
+    /// Last selected index for each visited path (e.g. "" -> 2, "photos" -> 5).
+    pub selection_history: std::collections::HashMap<String, usize>,
 }
 
 impl App {
@@ -102,7 +123,88 @@ impl App {
             toggled: HashSet::new(),
             cancel_flag: Arc::new(AtomicBool::new(false)),
             progress: Arc::new(SharedProgress::default()),
+            entry_tree: None,
+            current_path: Vec::new(),
+            visible_items: Vec::new(),
+            selection_history: std::collections::HashMap::new(),
         }
+    }
+
+    /// Rebuild the visible items list from the entry tree at the current path.
+    /// Called after navigation (dive in / back out) and after initial tree build.
+    /// If `target` is provided, attempts to select the item with that name.
+    pub fn rebuild_visible_items(&mut self, target: Option<&str>) {
+        // Phase 1: collect lightweight node data from the tree (borrows self.entry_tree).
+        let node_data: Vec<(String, String, bool, Option<usize>)> = {
+            let Some(tree) = &self.entry_tree else { return };
+            let path_str = self.current_path.join("/");
+            let children = tree.children_at(&path_str);
+            children
+                .iter()
+                .map(|node| {
+                    let full_path = if path_str.is_empty() {
+                        node.name.clone()
+                    } else {
+                        format!("{}/{}", path_str, node.name)
+                    };
+                    let is_directory = !node.children.is_empty();
+                    (node.name.clone(), full_path, is_directory, node.entry_index)
+                })
+                .collect()
+        };
+        // Tree borrow dropped here.
+
+        // Phase 2: enrich with entry data (borrows self.entries).
+        let mut items: Vec<DisplayItem> = node_data
+            .into_iter()
+            .map(|(name, full_path, is_directory, entry_index)| {
+                let (uncompressed_size, compressed_size) = if !is_directory {
+                    entry_index
+                        .map(|idx| {
+                            let e = &self.entries[idx];
+                            (e.uncompressed_size, e.compressed_size)
+                        })
+                        .unwrap_or((0, 0))
+                } else {
+                    (0, 0)
+                };
+                DisplayItem {
+                    name,
+                    full_path,
+                    is_directory,
+                    entry_index,
+                    uncompressed_size,
+                    compressed_size,
+                }
+            })
+            .collect();
+
+        // Sort: directories first (alphabetical), then files (alphabetical).
+        items.sort_by(|a, b| match (a.is_directory, b.is_directory) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        });
+
+        // If a target was requested (backing out), find its index.
+        // Else, check the history for the current folder.
+        // Otherwise, default to 0.
+        let new_selected = if let Some(t) = target {
+            items.iter().position(|item| item.name == t).unwrap_or(0)
+        } else {
+            let path_str = self.current_path.join("/");
+            self.selection_history.get(&path_str).cloned().unwrap_or(0)
+        };
+
+        self.visible_items = items;
+        self.selected = new_selected;
+        self.table_state.select(
+            if self.visible_items.is_empty() {
+                None
+            } else {
+                Some(new_selected)
+            },
+        );
     }
 
     pub fn handle_message(
@@ -119,6 +221,9 @@ impl App {
                 info!(entries = count, "archive opened → Browsing");
                 self.entries = archive.entries_clean().into_iter().cloned().collect();
                 self.archive = Some(Arc::new(archive));
+                self.entry_tree = Some(EntryTree::build(&self.entries));
+                self.current_path.clear();
+                self.rebuild_visible_items(None);
                 self.phase = AppPhase::Browsing;
             }
             AppMessage::ArchiveOpened(Ok(Opened::NeedsScan(pending))) => {
@@ -152,6 +257,9 @@ impl App {
                 info!(entries = count, "scan complete → Browsing");
                 self.entries = archive.entries_clean().into_iter().cloned().collect();
                 self.archive = Some(Arc::new(archive));
+                self.entry_tree = Some(EntryTree::build(&self.entries));
+                self.current_path.clear();
+                self.rebuild_visible_items(None);
                 self.phase = AppPhase::Browsing;
             }
             AppMessage::ScanComplete(Err(e)) => {
@@ -266,14 +374,20 @@ impl App {
                     self.phase,
                     AppPhase::Extracting { .. } | AppPhase::ExtractingBatch { .. }
                 ) {
-                    debug!("Esc during Extracting/ExtractingBatch → cancelling");
+                    debug!("Esc during extraction → cancelling");
                     self.cancel_flag.store(true, Ordering::SeqCst);
                     self.status_message = Some("Cancelling...".to_string());
                 } else if matches!(self.phase, AppPhase::ConfirmExtract { .. }) {
                     debug!("Esc during ConfirmExtract → Browsing");
                     self.phase = AppPhase::Browsing;
+                } else if matches!(self.phase, AppPhase::Browsing) && !self.current_path.is_empty() {
+                    debug!("Esc in subdirectory → parent");
+                    let old_path = self.current_path.join("/");
+                    self.selection_history.insert(old_path, self.selected);
+                    let target = self.current_path.pop();
+                    self.rebuild_visible_items(target.as_deref());
                 } else {
-                    debug!("Esc outside Extracting → quit");
+                    debug!("Esc at root → quit");
                     self.should_quit = true;
                 }
             }
@@ -284,8 +398,8 @@ impl App {
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if matches!(self.phase, AppPhase::Browsing) && !self.entries.is_empty() {
-                    self.selected = (self.selected + 1).min(self.entries.len() - 1);
+                if matches!(self.phase, AppPhase::Browsing) && !self.visible_items.is_empty() {
+                    self.selected = (self.selected + 1).min(self.visible_items.len() - 1);
                     self.table_state.select(Some(self.selected));
                 }
             }
@@ -296,43 +410,64 @@ impl App {
                 }
             }
             KeyCode::End | KeyCode::Char('G') => {
-                if matches!(self.phase, AppPhase::Browsing) && !self.entries.is_empty() {
-                    self.selected = self.entries.len() - 1;
+                if matches!(self.phase, AppPhase::Browsing) && !self.visible_items.is_empty() {
+                    self.selected = self.visible_items.len() - 1;
                     self.table_state.select(Some(self.selected));
                 }
             }
             KeyCode::Char(' ') => {
-                if matches!(self.phase, AppPhase::Browsing) && !self.entries.is_empty() {
-                    if let Some(entry) = self.entries.get(self.selected)
-                        && !entry.is_directory
-                    {
-                        let idx = self.selected;
-                        if self.toggled.contains(&idx) {
-                            self.toggled.remove(&idx);
+                if matches!(self.phase, AppPhase::Browsing) && !self.visible_items.is_empty() {
+                    let item = &self.visible_items[self.selected];
+                    if !item.is_directory {
+                        let path = item.full_path.clone();
+                        if self.toggled.contains(&path) {
+                            self.toggled.remove(&path);
                         } else {
-                            self.toggled.insert(idx);
+                            self.toggled.insert(path);
                         }
                     }
                     // Advance cursor down (like most file managers).
-                    self.selected = (self.selected + 1).min(self.entries.len() - 1);
+                    self.selected = (self.selected + 1).min(self.visible_items.len() - 1);
                     self.table_state.select(Some(self.selected));
+                }
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                if matches!(self.phase, AppPhase::Browsing) && !self.visible_items.is_empty() {
+                    let item = &self.visible_items[self.selected];
+                    if item.is_directory {
+                        let old_path = self.current_path.join("/");
+                        self.selection_history.insert(old_path, self.selected);
+                        self.current_path.push(item.name.clone());
+                        self.rebuild_visible_items(None);
+                    }
+                }
+            }
+            KeyCode::Left | KeyCode::Char('h') | KeyCode::Backspace => {
+                if matches!(self.phase, AppPhase::Browsing) && !self.current_path.is_empty() {
+                    let old_path = self.current_path.join("/");
+                    self.selection_history.insert(old_path, self.selected);
+                    let target = self.current_path.pop();
+                    self.rebuild_visible_items(target.as_deref());
                 }
             }
             KeyCode::Char('a') => {
                 if matches!(self.phase, AppPhase::Browsing) {
-                    let non_dir_indices: Vec<usize> = self
-                        .entries
+                    let file_paths: Vec<String> = self
+                        .visible_items
                         .iter()
-                        .enumerate()
-                        .filter(|(_, e)| !e.is_directory)
-                        .map(|(i, _)| i)
+                        .filter(|item| !item.is_directory)
+                        .map(|item| item.full_path.clone())
                         .collect();
-                    let all_selected = non_dir_indices.len() == self.toggled.len()
-                        && non_dir_indices.iter().all(|i| self.toggled.contains(i));
+                    let all_selected = !file_paths.is_empty()
+                        && file_paths.iter().all(|p| self.toggled.contains(p));
                     if all_selected {
-                        self.toggled.clear();
+                        for p in &file_paths {
+                            self.toggled.remove(p);
+                        }
                     } else {
-                        self.toggled = non_dir_indices.into_iter().collect();
+                        for p in file_paths {
+                            self.toggled.insert(p);
+                        }
                     }
                 }
             }
@@ -348,29 +483,35 @@ impl App {
                 } else if matches!(self.phase, AppPhase::Browsing) {
                     if !self.toggled.is_empty() {
                         self.start_batch_extraction(tx);
-                    } else if let Some(entry) = self.entries.get(self.selected) {
-                        if entry.is_directory {
+                    } else if let Some(item) = self.visible_items.get(self.selected) {
+                        if item.is_directory {
+                            let old_path = self.current_path.join("/");
+                            self.selection_history.insert(old_path, self.selected);
+                            self.current_path.push(item.name.clone());
+                            self.rebuild_visible_items(None);
                             return;
                         }
-                        // Check dictionary size — warn if > 4 GB.
-                        const DICT_WARN_THRESHOLD: u64 = 4 * 1024 * 1024 * 1024;
-                        let dict = self.archive.as_ref().unwrap().dict_size(entry);
-                        if let Some(ds) = dict
-                            && ds > DICT_WARN_THRESHOLD
-                        {
-                            info!(
-                                name = %entry.name,
-                                dict_size = ds,
-                                "large dictionary → ConfirmExtract"
-                            );
-                            self.phase = AppPhase::ConfirmExtract {
-                                entry_index: self.selected,
-                                entry_name: entry.name.clone(),
-                                dict_size: ds,
-                            };
-                            return;
+                        if let Some(idx) = item.entry_index {
+                            const DICT_WARN_THRESHOLD: u64 = 4 * 1024 * 1024 * 1024;
+                            let dict =
+                                self.archive.as_ref().unwrap().dict_size(&self.entries[idx]);
+                            if let Some(ds) = dict
+                                && ds > DICT_WARN_THRESHOLD
+                            {
+                                info!(
+                                    name = %self.entries[idx].name,
+                                    dict_size = ds,
+                                    "large dictionary → ConfirmExtract"
+                                );
+                                self.phase = AppPhase::ConfirmExtract {
+                                    entry_index: idx,
+                                    entry_name: self.entries[idx].name.clone(),
+                                    dict_size: ds,
+                                };
+                                return;
+                            }
+                            self.start_extraction(idx, tx);
                         }
-                        self.start_extraction(self.selected, tx);
                     }
                 }
             }
@@ -441,10 +582,10 @@ impl App {
     /// Spawn a batch extraction task for all toggled entries.
     fn start_batch_extraction(&mut self, tx: &mpsc::UnboundedSender<AppMessage>) {
         let selected_entries: Vec<ArchiveEntry> = self
-            .toggled
+            .entries
             .iter()
-            .filter_map(|&i| self.entries.get(i).cloned())
-            .filter(|e| !e.is_directory)
+            .filter(|e| !e.is_directory && self.toggled.contains(&e.name))
+            .cloned()
             .collect();
 
         if selected_entries.is_empty() {

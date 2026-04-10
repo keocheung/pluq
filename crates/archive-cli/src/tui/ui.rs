@@ -81,13 +81,15 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
         AppPhase::Browsing => {
             let chunks = Layout::vertical([
-                Constraint::Length(3),
-                Constraint::Min(1),
-                Constraint::Length(3),
+                Constraint::Length(1), // breadcrumb header
+                Constraint::Length(1), // separator
+                Constraint::Min(1),    // file list
+                Constraint::Length(1), // separator
+                Constraint::Length(1), // footer / details bar
             ])
             .split(area);
 
-            // --- Header ---
+            // Build breadcrumb: " archive.zip / photos / vacation /"
             let filename = app
                 .source
                 .rsplit('/')
@@ -95,101 +97,110 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 .or_else(|| app.source.rsplit('\\').next())
                 .unwrap_or(&app.source);
             let filename = filename.split('?').next().unwrap_or(filename);
-            let file_count = app.entries.iter().filter(|e| !e.is_directory).count();
-            let total_size: u64 = app.entries.iter().map(|e| e.uncompressed_size).sum();
-            let header_title = format!(
-                " {} — {} files — {} ",
-                filename,
-                file_count,
-                crate::format_size(total_size)
+
+            let mut breadcrumb = format!(" {}", filename);
+            for segment in &app.current_path {
+                breadcrumb.push_str(" / ");
+                breadcrumb.push_str(segment);
+            }
+            if !app.current_path.is_empty() {
+                breadcrumb.push_str(" /");
+            }
+
+            let header = Paragraph::new(breadcrumb)
+                .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+            frame.render_widget(header, chunks[0]);
+
+            let sep = "─".repeat(area.width as usize);
+            let separator_style = Style::default().fg(Color::DarkGray);
+            frame.render_widget(
+                Paragraph::new(sep.clone()).style(separator_style),
+                chunks[1],
             );
             frame.render_widget(
-                Block::default().borders(Borders::ALL).title(header_title),
-                chunks[0],
+                Paragraph::new(sep).style(separator_style),
+                chunks[3],
             );
 
-            // --- Entry Table ---
-            let col_header = Row::new(["SIZE", "COMPRESSED", "NAME"])
-                .style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED));
-
-            let selected = app.selected;
             let rows: Vec<Row> = app
-                .entries
+                .visible_items
                 .iter()
-                .enumerate()
-                .map(|(i, entry)| {
-                    let is_toggled = app.toggled.contains(&i);
-                    let marker = match (i == selected, is_toggled) {
-                        (true, true) => ">*",
-                        (true, false) => "> ",
-                        (false, true) => " *",
-                        (false, false) => "  ",
-                    };
-                    if entry.is_directory {
-                        Row::new([
-                            Cell::from(format!("{} -", marker)),
-                            Cell::from("-"),
-                            Cell::from(format!("{}/", entry.name)),
-                        ])
+                .map(|item| {
+                    let is_toggled = app.toggled.contains(&item.full_path);
+                    let marker = if is_toggled { "+" } else { " " };
+
+                    let size_str = if item.is_directory {
+                        String::new()
                     } else {
-                        Row::new([
-                            Cell::from(format!(
-                                "{} {}",
-                                marker,
-                                crate::format_size(entry.uncompressed_size)
-                            )),
-                            Cell::from(crate::format_size(entry.compressed_size)),
-                            Cell::from(entry.name.clone()),
-                        ])
-                    }
+                        crate::format_size(item.uncompressed_size)
+                    };
+
+                    let display_name = if item.is_directory {
+                        format!("{}/", item.name)
+                    } else {
+                        item.name.clone()
+                    };
+
+                    let name_style = if item.is_directory {
+                        Style::default().fg(Color::Cyan)
+                    } else {
+                        Style::default().fg(Color::White)
+                    };
+
+                    Row::new([
+                        Cell::from(format!(" {}", size_str))
+                            .style(Style::default().fg(Color::DarkGray)),
+                        Cell::from(format!("{} {}", marker, display_name)).style(name_style),
+                    ])
                 })
                 .collect();
 
             let highlight_style = Style::default()
-                .bg(Color::DarkGray)
-                .fg(Color::White)
+                .bg(Color::Cyan)
+                .fg(Color::Black)
                 .add_modifier(Modifier::BOLD);
 
             let table = Table::new(
                 rows,
-                [
-                    Constraint::Length(14),
-                    Constraint::Length(13),
-                    Constraint::Min(1),
-                ],
+                [Constraint::Length(10), Constraint::Min(1)],
             )
-            .header(col_header)
-            .row_highlight_style(highlight_style)
-            .block(Block::default().borders(Borders::ALL));
+            .row_highlight_style(highlight_style);
 
-            frame.render_stateful_widget(table, chunks[1], &mut app.table_state);
+            frame.render_stateful_widget(table, chunks[2], &mut app.table_state);
 
-            // --- Footer ---
-            let footer_text = match &app.status_message {
-                Some(msg) => msg.clone(),
-                None if app.toggled.is_empty() => {
-                    "  up/down navigate  Space select  a select-all  Enter extract  q quit"
-                        .to_string()
-                }
-                None => {
-                    let n = app.toggled.len();
-                    let total_size: u64 = app
-                        .toggled
-                        .iter()
-                        .filter_map(|&i| app.entries.get(i))
-                        .map(|e| e.uncompressed_size)
-                        .sum();
+            let footer_text = if let Some(msg) = &app.status_message {
+                format!(" {}", msg)
+            } else if !app.toggled.is_empty() {
+                let n = app.toggled.len();
+                let total_size: u64 = app
+                    .entries
+                    .iter()
+                    .filter(|e| app.toggled.contains(&e.name))
+                    .map(|e| e.uncompressed_size)
+                    .sum();
+                format!(
+                    " [ {} file{} — {} ]  Enter extract  q quit",
+                    n,
+                    if n == 1 { "" } else { "s" },
+                    crate::format_size(total_size),
+                )
+            } else if let Some(item) = app.visible_items.get(app.selected) {
+                if item.is_directory {
+                    format!(" {}/", item.full_path)
+                } else {
                     format!(
-                        "  {} file{} selected — {}  |  Enter extract  Space toggle  q quit",
-                        n,
-                        if n == 1 { "" } else { "s" },
-                        crate::format_size(total_size),
+                        " {}  {}",
+                        item.full_path,
+                        crate::format_size(item.uncompressed_size)
                     )
                 }
+            } else {
+                String::new()
             };
+
             let footer = Paragraph::new(footer_text)
-                .block(Block::default().borders(Borders::ALL));
-            frame.render_widget(footer, chunks[2]);
+                .style(Style::default().fg(Color::DarkGray));
+            frame.render_widget(footer, chunks[4]);
         }
         AppPhase::ConfirmExtract {
             entry_name,

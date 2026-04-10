@@ -61,9 +61,9 @@ These commands define the CLI's public API. The TUI is the default entry point.
 > Items in this phase focus on the "Drill-Down" navigation and minimalist aesthetic.
 > Design Reference: `docs/superpowers/specs/2026-04-10-zen-sniper-tui-design.md`
 
-- [ ] **Drill-down navigation** — `Right`/`l` to dive into folders, `Left`/`h`/`Backspace` to return to parent.
-- [ ] **Full-path selection** — Refactor `app.toggled` to use `HashSet<String>` (paths) instead of indices.
-- [ ] **Zen Sniper aesthetic** — Minimalist Cyan/Black theme, Size + Name columns only, strip borders.
+- [x] **Drill-down navigation** — `Right`/`l` to dive into folders, `Left`/`h`/`Backspace` to return to parent.
+- [x] **Full-path selection** — Refactor `app.toggled` to use `HashSet<String>` (paths) instead of indices.
+- [x] **Zen Sniper aesthetic** — Minimalist Cyan/Black theme, Size + Name columns only, strip borders.
 - [ ] **Tab Review mode** — `Tab` to see/prune selected files; `Esc` to return to browsing.
 - [ ] **Extraction cost display** — Show estimated download cost for the highlighted entry.
 - [ ] **Search / filter** — `/` to filter the current folder's entry list.
