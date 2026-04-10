@@ -118,7 +118,13 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 .iter()
                 .enumerate()
                 .map(|(i, entry)| {
-                    let marker = if i == selected { ">" } else { " " };
+                    let is_toggled = app.toggled.contains(&i);
+                    let marker = match (i == selected, is_toggled) {
+                        (true, true) => ">*",
+                        (true, false) => "> ",
+                        (false, true) => " *",
+                        (false, false) => "  ",
+                    };
                     if entry.is_directory {
                         Row::new([
                             Cell::from(format!("{} -", marker)),
@@ -161,7 +167,25 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             // --- Footer ---
             let footer_text = match &app.status_message {
                 Some(msg) => msg.clone(),
-                None => "  up/down navigate  Enter extract  q quit".to_string(),
+                None if app.toggled.is_empty() => {
+                    "  up/down navigate  Space select  a select-all  Enter extract  q quit"
+                        .to_string()
+                }
+                None => {
+                    let n = app.toggled.len();
+                    let total_size: u64 = app
+                        .toggled
+                        .iter()
+                        .filter_map(|&i| app.entries.get(i))
+                        .map(|e| e.uncompressed_size)
+                        .sum();
+                    format!(
+                        "  {} file{} selected — {}  |  Enter extract  Space toggle  q quit",
+                        n,
+                        if n == 1 { "" } else { "s" },
+                        crate::format_size(total_size),
+                    )
+                }
             };
             let footer = Paragraph::new(footer_text)
                 .block(Block::default().borders(Borders::ALL));
@@ -266,6 +290,66 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                     "  Extracted:  {} / {}",
                     crate::format_size(bytes_extracted),
                     crate::format_size(total_bytes)
+                )
+            } else {
+                format!("  Extracted:  {}", crate::format_size(bytes_extracted))
+            };
+            frame.render_widget(Paragraph::new(counter_text), chunks[5]);
+            frame.render_widget(Paragraph::new("  Esc to cancel  ·  q to quit"), chunks[7]);
+        }
+        AppPhase::ExtractingBatch {
+            total_files,
+            files_done,
+            current_entry,
+            total_bytes,
+            bytes_extracted,
+        } => {
+            let (total_files, files_done, total_bytes, bytes_extracted) =
+                (*total_files, *files_done, *total_bytes, *bytes_extracted);
+            let current_entry = current_entry.clone();
+
+            let title = format!("Extracting ({} of {} files)", files_done, total_files);
+            let outer = Block::default().borders(Borders::ALL).title(title);
+            let inner = outer.inner(area);
+            frame.render_widget(outer, area);
+
+            let ratio = if total_bytes > 0 {
+                (bytes_extracted as f64 / total_bytes as f64).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1), // top padding
+                    Constraint::Length(1), // current entry name
+                    Constraint::Length(1), // spacing
+                    Constraint::Length(1), // gauge
+                    Constraint::Length(1), // spacing
+                    Constraint::Length(1), // byte counter
+                    Constraint::Min(1),    // fill
+                    Constraint::Length(1), // cancel hint
+                ])
+                .split(inner);
+
+            let entry_label = if current_entry.is_empty() {
+                "  Preparing...".to_string()
+            } else {
+                format!("  {}", current_entry)
+            };
+            frame.render_widget(Paragraph::new(entry_label), chunks[1]);
+
+            let gauge = Gauge::default()
+                .gauge_style(Style::default().fg(Color::Cyan))
+                .ratio(ratio);
+            frame.render_widget(gauge, chunks[3]);
+
+            let counter_text = if total_bytes > 0 {
+                format!(
+                    "  Extracted:  {} / {}",
+                    crate::format_size(bytes_extracted),
+                    crate::format_size(total_bytes),
                 )
             } else {
                 format!("  Extracted:  {}", crate::format_size(bytes_extracted))

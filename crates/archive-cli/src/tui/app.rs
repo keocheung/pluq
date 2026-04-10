@@ -1,9 +1,10 @@
 #![allow(dead_code)]
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use archive::{Archive, ArchiveEntry, ArchiveError, Opened, ProgressReporter, ScanInfo};
+use archive::{Archive, ArchiveEntry, ArchiveError, BatchResult, Opened, ProgressReporter, ScanInfo};
 use archive_source::ResolvedSource;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::TableState;
@@ -21,6 +22,9 @@ pub enum AppMessage {
     ScanComplete(Result<Archive<ResolvedSource>, ArchiveError>),
     /// Archive::extract() completed.
     ExtractionComplete(Result<u64, ArchiveError>),
+    /// Archive::extract_selected() completed.
+    /// Ok contains the BatchResult. Err is only for unrecoverable errors (cancellation).
+    BatchExtractionComplete(Result<BatchResult, ArchiveError>),
 }
 
 /// Shared atomics for high-frequency progress updates.
@@ -32,6 +36,10 @@ pub struct SharedProgress {
     pub bytes_scanned: AtomicU64,
     pub entries_found: AtomicUsize,
     pub bytes_extracted: AtomicU64,
+    /// Number of entries completed (success or failure) in the current batch.
+    pub files_done: AtomicUsize,
+    /// Name of the entry currently being extracted (batch mode).
+    pub current_entry_name: Mutex<String>,
 }
 
 /// Current phase of the application.
@@ -53,6 +61,13 @@ pub enum AppPhase {
         total_bytes: u64,
         bytes_extracted: u64,
     },
+    ExtractingBatch {
+        total_files: usize,
+        files_done: usize,
+        current_entry: String,
+        total_bytes: u64,
+        bytes_extracted: u64,
+    },
     Error(String),
 }
 
@@ -65,6 +80,8 @@ pub struct App {
     pub should_quit: bool,
     pub status_message: Option<String>,
     pub table_state: TableState,
+    /// Entry indices toggled for batch extraction (by index into `self.entries`).
+    pub toggled: HashSet<usize>,
     /// Shared cancel flag — set by Esc during extraction, read by ProgressReporter.
     pub cancel_flag: Arc<AtomicBool>,
     /// Shared progress counters — written by ProgressReporter, read on tick.
@@ -82,6 +99,7 @@ impl App {
             should_quit: false,
             status_message: None,
             table_state: TableState::default().with_selected(Some(0)),
+            toggled: HashSet::new(),
             cancel_flag: Arc::new(AtomicBool::new(false)),
             progress: Arc::new(SharedProgress::default()),
         }
@@ -161,6 +179,41 @@ impl App {
                 }
                 self.phase = AppPhase::Browsing;
             }
+            AppMessage::BatchExtractionComplete(Ok(batch)) => {
+                let n = batch.succeeded;
+                let bytes = batch.bytes_written;
+                let failed = batch.failed.len();
+                info!(succeeded = n, failed, bytes, "batch extraction complete → Browsing");
+                self.toggled.clear();
+                self.phase = AppPhase::Browsing;
+                self.status_message = Some(if failed == 0 {
+                    format!(
+                        "Extracted {} file{} ({})",
+                        n,
+                        if n == 1 { "" } else { "s" },
+                        crate::format_size(bytes),
+                    )
+                } else {
+                    format!(
+                        "Extracted {} file{} ({}) — {} failed",
+                        n,
+                        if n == 1 { "" } else { "s" },
+                        crate::format_size(bytes),
+                        failed,
+                    )
+                });
+            }
+            AppMessage::BatchExtractionComplete(Err(e)) => {
+                self.toggled.clear();
+                self.phase = AppPhase::Browsing;
+                if matches!(e, ArchiveError::Cancelled) {
+                    info!("batch extraction cancelled → Browsing");
+                    self.status_message = Some("Batch extraction cancelled.".to_string());
+                } else {
+                    warn!(error = %e, "batch extraction failed → Browsing");
+                    self.status_message = Some(format!("Extraction failed: {e}"));
+                }
+            }
         }
     }
 
@@ -174,6 +227,16 @@ impl App {
             }
             AppPhase::Extracting { ref mut bytes_extracted, .. } => {
                 *bytes_extracted = self.progress.bytes_extracted.load(Ordering::Relaxed);
+            }
+            AppPhase::ExtractingBatch {
+                ref mut bytes_extracted,
+                ref mut files_done,
+                ref mut current_entry,
+                ..
+            } => {
+                *bytes_extracted = self.progress.bytes_extracted.load(Ordering::Relaxed);
+                *files_done = self.progress.files_done.load(Ordering::Relaxed);
+                *current_entry = self.progress.current_entry_name.lock().unwrap().clone();
             }
             _ => {}
         }
@@ -189,15 +252,21 @@ impl App {
 
         match key.code {
             KeyCode::Char('q') => {
-                if matches!(self.phase, AppPhase::Extracting { .. }) {
-                    // Signal cancel so the background task cleans up the partial file.
+                if matches!(
+                    self.phase,
+                    AppPhase::Extracting { .. } | AppPhase::ExtractingBatch { .. }
+                ) {
+                    // Signal cancel so the background task cleans up the partial file(s).
                     self.cancel_flag.store(true, Ordering::SeqCst);
                 }
                 self.should_quit = true;
             }
             KeyCode::Esc => {
-                if matches!(self.phase, AppPhase::Extracting { .. }) {
-                    debug!("Esc during Extracting → cancelling");
+                if matches!(
+                    self.phase,
+                    AppPhase::Extracting { .. } | AppPhase::ExtractingBatch { .. }
+                ) {
+                    debug!("Esc during Extracting/ExtractingBatch → cancelling");
                     self.cancel_flag.store(true, Ordering::SeqCst);
                     self.status_message = Some("Cancelling...".to_string());
                 } else if matches!(self.phase, AppPhase::ConfirmExtract { .. }) {
@@ -232,6 +301,41 @@ impl App {
                     self.table_state.select(Some(self.selected));
                 }
             }
+            KeyCode::Char(' ') => {
+                if matches!(self.phase, AppPhase::Browsing) && !self.entries.is_empty() {
+                    if let Some(entry) = self.entries.get(self.selected)
+                        && !entry.is_directory
+                    {
+                        let idx = self.selected;
+                        if self.toggled.contains(&idx) {
+                            self.toggled.remove(&idx);
+                        } else {
+                            self.toggled.insert(idx);
+                        }
+                    }
+                    // Advance cursor down (like most file managers).
+                    self.selected = (self.selected + 1).min(self.entries.len() - 1);
+                    self.table_state.select(Some(self.selected));
+                }
+            }
+            KeyCode::Char('a') => {
+                if matches!(self.phase, AppPhase::Browsing) {
+                    let non_dir_indices: Vec<usize> = self
+                        .entries
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, e)| !e.is_directory)
+                        .map(|(i, _)| i)
+                        .collect();
+                    let all_selected = non_dir_indices.len() == self.toggled.len()
+                        && non_dir_indices.iter().all(|i| self.toggled.contains(i));
+                    if all_selected {
+                        self.toggled.clear();
+                    } else {
+                        self.toggled = non_dir_indices.into_iter().collect();
+                    }
+                }
+            }
             KeyCode::Enter => {
                 if matches!(self.phase, AppPhase::ConfirmExtract { .. }) {
                     // User confirmed — proceed with extraction.
@@ -241,31 +345,33 @@ impl App {
                         unreachable!()
                     };
                     self.start_extraction(idx, tx);
-                } else if matches!(self.phase, AppPhase::Browsing)
-                    && let Some(entry) = self.entries.get(self.selected)
-                {
-                    if entry.is_directory {
-                        return;
+                } else if matches!(self.phase, AppPhase::Browsing) {
+                    if !self.toggled.is_empty() {
+                        self.start_batch_extraction(tx);
+                    } else if let Some(entry) = self.entries.get(self.selected) {
+                        if entry.is_directory {
+                            return;
+                        }
+                        // Check dictionary size — warn if > 4 GB.
+                        const DICT_WARN_THRESHOLD: u64 = 4 * 1024 * 1024 * 1024;
+                        let dict = self.archive.as_ref().unwrap().dict_size(entry);
+                        if let Some(ds) = dict
+                            && ds > DICT_WARN_THRESHOLD
+                        {
+                            info!(
+                                name = %entry.name,
+                                dict_size = ds,
+                                "large dictionary → ConfirmExtract"
+                            );
+                            self.phase = AppPhase::ConfirmExtract {
+                                entry_index: self.selected,
+                                entry_name: entry.name.clone(),
+                                dict_size: ds,
+                            };
+                            return;
+                        }
+                        self.start_extraction(self.selected, tx);
                     }
-                    // Check dictionary size — warn if > 4 GB.
-                    const DICT_WARN_THRESHOLD: u64 = 4 * 1024 * 1024 * 1024;
-                    let dict = self.archive.as_ref().unwrap().dict_size(entry);
-                    if let Some(ds) = dict
-                        && ds > DICT_WARN_THRESHOLD
-                    {
-                        info!(
-                            name = %entry.name,
-                            dict_size = ds,
-                            "large dictionary → ConfirmExtract"
-                        );
-                        self.phase = AppPhase::ConfirmExtract {
-                            entry_index: self.selected,
-                            entry_name: entry.name.clone(),
-                            dict_size: ds,
-                        };
-                        return;
-                    }
-                    self.start_extraction(self.selected, tx);
                 }
             }
             _ => {}
@@ -331,6 +437,98 @@ impl App {
             }
         });
     }
+
+    /// Spawn a batch extraction task for all toggled entries.
+    fn start_batch_extraction(&mut self, tx: &mpsc::UnboundedSender<AppMessage>) {
+        let selected_entries: Vec<ArchiveEntry> = self
+            .toggled
+            .iter()
+            .filter_map(|&i| self.entries.get(i).cloned())
+            .filter(|e| !e.is_directory)
+            .collect();
+
+        if selected_entries.is_empty() {
+            self.status_message = Some("No files selected.".to_string());
+            return;
+        }
+
+        let total_bytes: u64 = selected_entries.iter().map(|e| e.uncompressed_size).sum();
+        let total_files = selected_entries.len();
+
+        info!(total_files, total_bytes, "starting batch extraction → ExtractingBatch");
+
+        self.phase = AppPhase::ExtractingBatch {
+            total_files,
+            files_done: 0,
+            current_entry: String::new(),
+            total_bytes,
+            bytes_extracted: 0,
+        };
+
+        let output_dir = crate::default_output_folder(&self.source)
+            .unwrap_or_else(|| std::path::PathBuf::from("extracted"));
+
+        let archive = self.archive.as_ref().unwrap().clone();
+        let tx_extract = tx.clone();
+        self.cancel_flag.store(false, Ordering::SeqCst);
+        self.progress.bytes_extracted.store(0, Ordering::Relaxed);
+        self.progress.files_done.store(0, Ordering::Relaxed);
+        *self.progress.current_entry_name.lock().unwrap() = String::new();
+
+        let progress = Arc::new(Mutex::new(TuiProgressReporter::new(
+            self.progress.clone(),
+            self.cancel_flag.clone(),
+        )));
+
+        tokio::spawn(async move {
+            tokio::fs::create_dir_all(&output_dir).await.ok();
+
+            let entry_refs: Vec<&ArchiveEntry> = selected_entries.iter().collect();
+
+            let sink_factory = {
+                let output_dir = output_dir.clone();
+                move |entry: &ArchiveEntry| -> Option<Box<dyn tokio::io::AsyncWrite + Send + Unpin>> {
+                    // Path traversal guard: reject absolute paths and `..` components.
+                    let entry_path = std::path::Path::new(&entry.name);
+                    if entry_path.is_absolute()
+                        || entry_path
+                            .components()
+                            .any(|c| c == std::path::Component::ParentDir)
+                    {
+                        return None;
+                    }
+                    let dest = output_dir.join(&entry.name);
+                    if let Some(parent) = dest.parent() {
+                        std::fs::create_dir_all(parent).ok();
+                    }
+                    let file = std::fs::File::create(&dest).ok()?;
+                    Some(Box::new(tokio::fs::File::from_std(file)))
+                }
+            };
+
+            let result =
+                archive.extract_selected(&entry_refs, sink_factory, progress, None).await;
+
+            // Clean up output files on cancel or per-entry failures.
+            match &result {
+                Err(ArchiveError::Cancelled) => {
+                    for entry in &selected_entries {
+                        let dest = output_dir.join(&entry.name);
+                        let _ = tokio::fs::remove_file(&dest).await;
+                    }
+                }
+                Ok(batch) => {
+                    for (name, _) in &batch.failed {
+                        let dest = output_dir.join(name);
+                        let _ = tokio::fs::remove_file(&dest).await;
+                    }
+                }
+                Err(_) => {}
+            }
+
+            let _ = tx_extract.send(AppMessage::BatchExtractionComplete(result));
+        });
+    }
 }
 
 /// Progress reporter that writes to shared atomics.
@@ -340,11 +538,15 @@ impl App {
 pub struct TuiProgressReporter {
     shared: Arc<SharedProgress>,
     cancel: Arc<AtomicBool>,
+    /// Bytes from all previously completed entries (used for cumulative progress in batch mode).
+    cumulative_bytes: u64,
+    /// Bytes written for the current entry so far (updated by on_bytes_progress).
+    current_entry_bytes: u64,
 }
 
 impl TuiProgressReporter {
     pub fn new(shared: Arc<SharedProgress>, cancel: Arc<AtomicBool>) -> Self {
-        Self { shared, cancel }
+        Self { shared, cancel, cumulative_bytes: 0, current_entry_bytes: 0 }
     }
 }
 
@@ -354,8 +556,24 @@ impl ProgressReporter for TuiProgressReporter {
         self.shared.entries_found.store(entries_found, Ordering::Relaxed);
     }
 
+    fn on_entry_start(&mut self, name: &str, _size: u64) {
+        self.current_entry_bytes = 0;
+        *self.shared.current_entry_name.lock().unwrap() = name.to_string();
+    }
+
     fn on_bytes_progress(&mut self, bytes_so_far: u64) {
-        self.shared.bytes_extracted.store(bytes_so_far, Ordering::Relaxed);
+        self.current_entry_bytes = bytes_so_far;
+        self.shared
+            .bytes_extracted
+            .store(self.cumulative_bytes + bytes_so_far, Ordering::Relaxed);
+    }
+
+    fn on_entry_complete(&mut self, _name: &str, _success: bool) {
+        // Accumulate bytes from this entry into the running total for batch progress.
+        self.cumulative_bytes += self.current_entry_bytes;
+        self.current_entry_bytes = 0;
+        // Increment regardless of success — the progress bar tracks completions, not successes.
+        self.shared.files_done.fetch_add(1, Ordering::Relaxed);
     }
 
     fn should_cancel(&self) -> bool {

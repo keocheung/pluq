@@ -13,6 +13,24 @@ use crate::progress::ProgressReporter;
 use crate::scan::ScanInfo;
 use crate::{ArchiveEntry, CoreError};
 
+/// Result of a batch extraction operation.
+///
+/// Unlike single `extract()` which returns `Result<u64, CoreError>`,
+/// batch extraction continues past per-entry failures (CRC mismatch,
+/// decompression errors) and collects them here. Only unrecoverable
+/// errors (cancellation, I/O transport) cause an `Err` return.
+#[derive(Debug)]
+pub struct BatchResult {
+    /// Total uncompressed bytes successfully written.
+    pub bytes_written: u64,
+    /// Number of entries successfully extracted.
+    pub succeeded: usize,
+    /// Entries that failed extraction: (entry_name, error_message).
+    /// Error is stringified at collection time — failures are informational
+    /// for display, not for programmatic routing (see ERRORS.md).
+    pub failed: Vec<(String, String)>,
+}
+
 /// Unified read interface implemented by every format parser.
 ///
 /// Consumers (CLI, UI, server) use only this trait. Format-specific types
@@ -90,6 +108,34 @@ pub trait ArchiveReader {
         async { Ok(()) }
     }
 
+    /// Extract multiple entries in a single batch operation.
+    ///
+    /// Sorts entries by physical offset and coalesces nearby entries into
+    /// clustered I/O operations to minimize HTTP requests for cloud archives.
+    ///
+    /// `sink_factory` is called once per non-directory entry — return
+    /// `Some(writer)` to extract, `None` to skip.
+    ///
+    /// Per-entry failures are collected in `BatchResult.failed` — the loop
+    /// continues. Returns `Err` only for unrecoverable errors (cancellation).
+    ///
+    /// Default: loops `extract()` per entry (correct for local files).
+    /// Format parsers override with optimized coalescing.
+    fn extract_selected<SinkFn>(
+        &self,
+        entries: &[&ArchiveEntry],
+        sink_factory: SinkFn,
+        progress: Arc<Mutex<dyn ProgressReporter>>,
+        password: Option<&[u8]>,
+    ) -> impl std::future::Future<Output = Result<BatchResult, CoreError>> + Send
+    where
+        SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn tokio::io::AsyncWrite + Send + Unpin>>
+            + Send,
+        Self: Send + Sync + Sized,
+    {
+        extract_selected_default(self, entries, sink_factory, progress, password)
+    }
+
     /// Extract entries in a single streaming pass.
     ///
     /// Scans the archive linearly, populating `entries()` as a side effect
@@ -121,4 +167,71 @@ pub trait ArchiveReader {
             })
         }
     }
+}
+
+/// Default `extract_selected` implementation — loop of `extract()` calls.
+///
+/// Public so format parsers can delegate to it when they don't need
+/// optimization (e.g., local file extraction).
+pub async fn extract_selected_default<R, SinkFn>(
+    reader: &R,
+    entries: &[&ArchiveEntry],
+    mut sink_factory: SinkFn,
+    progress: Arc<Mutex<dyn ProgressReporter>>,
+    password: Option<&[u8]>,
+) -> Result<BatchResult, CoreError>
+where
+    R: ArchiveReader + Send + Sync,
+    SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn tokio::io::AsyncWrite + Send + Unpin>> + Send,
+{
+    let mut bytes_written = 0u64;
+    let mut succeeded = 0usize;
+    let mut failed = Vec::new();
+
+    for &entry in entries {
+        if entry.is_directory {
+            continue;
+        }
+
+        // Check cancellation between entries.
+        {
+            let p = progress.lock().unwrap();
+            if p.should_cancel() {
+                return Err(CoreError::Cancelled);
+            }
+        }
+
+        let mut sink = match sink_factory(entry) {
+            Some(s) => s,
+            None => continue,
+        };
+
+        {
+            let mut p = progress.lock().unwrap();
+            p.on_entry_start(&entry.name, entry.uncompressed_size);
+        }
+
+        match reader.extract(entry, &mut sink, progress.clone(), password).await {
+            Ok(bytes) => {
+                bytes_written += bytes;
+                succeeded += 1;
+                let mut p = progress.lock().unwrap();
+                p.on_entry_complete(&entry.name, true);
+            }
+            Err(CoreError::Cancelled) => {
+                // Cancellation is unrecoverable — propagate immediately.
+                return Err(CoreError::Cancelled);
+            }
+            Err(e) => {
+                // Per-entry failure — log, report, continue.
+                {
+                    let mut p = progress.lock().unwrap();
+                    p.on_entry_complete(&entry.name, false);
+                }
+                failed.push((entry.name.clone(), e.to_string()));
+            }
+        }
+    }
+
+    Ok(BatchResult { bytes_written, succeeded, failed })
 }

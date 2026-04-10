@@ -6,6 +6,7 @@ mod opened;
 
 pub use archive::Archive;
 pub use archive_core::ArchiveEntry;
+pub use archive_core::BatchResult;
 pub use archive_core::ProgressReporter;
 pub use archive_core::ScanInfo;
 pub use archive_core::{CachingReadAt, LocalPath, LocalReadAt, ReadAt};

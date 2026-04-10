@@ -8,7 +8,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use clap::{Parser, Subcommand};
 use tracing::{info, warn};
 
-use archive::Archive;
+use tokio::io::AsyncWrite;
+
+use archive::{Archive, ArchiveEntry};
 use archive_source::{ResolvedSource, SourceConfig, classify_transport, resolve};
 
 /// Archive Sniper — surgical archive extraction from local or cloud storage.
@@ -250,55 +252,57 @@ async fn run(command: Command, cancel: Arc<AtomicBool>) -> Result<(), Box<dyn st
 
             tokio::fs::create_dir_all(&output_dir).await?;
 
-            let file_count = entries.iter().filter(|e| !e.is_directory).count();
+            // Pre-filter: skip directories and unsafe paths before calling extract_selected.
+            // CLI-local path traversal guard (core-level sanitization is a future phase).
+            let safe_entries: Vec<&ArchiveEntry> = entries
+                .iter()
+                .copied()
+                .filter(|e| !e.is_directory)
+                .filter(|e| {
+                    let safe = !e.name.split('/').any(|seg| seg == "..")
+                        && !e.name.starts_with('/')
+                        && !e.name.starts_with('\\');
+                    if !safe {
+                        eprintln!("  SKIP {} (unsafe path)", e.name);
+                    }
+                    safe
+                })
+                .collect();
+
+            let skipped = entries.iter().filter(|e| !e.is_directory).count() - safe_entries.len();
+
             let mut reporter = cli_progress::CliProgressReporter::new(cancel.clone());
-            reporter.set_total_entries(file_count as u64);
+            reporter.set_total_entries(safe_entries.len() as u64);
             let progress: Arc<Mutex<dyn archive::ProgressReporter>> =
                 Arc::new(Mutex::new(reporter));
 
-            let mut extracted: usize = 0;
-            let mut skipped: usize = 0;
-
-            for entry in &entries {
-                if entry.is_directory {
-                    continue;
-                }
-
-                // CLI-local path traversal guard (core-level sanitization is a future phase).
-                if entry.name.split('/').any(|seg| seg == "..")
-                    || entry.name.starts_with('/')
-                    || entry.name.starts_with('\\')
-                {
-                    eprintln!("  SKIP {} (unsafe path)", entry.name);
-                    skipped += 1;
-                    continue;
-                }
-
-                let dest = output_dir.join(&entry.name);
+            let output_dir_ref = &output_dir;
+            let sink_factory = |entry: &ArchiveEntry| -> Option<Box<dyn AsyncWrite + Send + Unpin>> {
+                let dest = output_dir_ref.join(&entry.name);
                 if let Some(parent) = dest.parent() {
-                    tokio::fs::create_dir_all(parent).await?;
+                    std::fs::create_dir_all(parent).ok();
                 }
+                let file = std::fs::File::create(&dest).ok()?;
+                Some(Box::new(tokio::fs::File::from_std(file)))
+            };
 
-                {
-                    let mut p = progress.lock().unwrap();
-                    p.on_entry_start(&entry.name, entry.uncompressed_size);
-                }
-
-                let mut file = tokio::fs::File::create(&dest).await?;
-                archive.extract(entry, &mut file, progress.clone(), None).await?;
-
-                {
-                    let mut p = progress.lock().unwrap();
-                    p.on_entry_complete(&entry.name, true);
-                }
-                extracted += 1;
-            }
+            let batch = archive
+                .extract_selected(&safe_entries, sink_factory, progress, None)
+                .await?;
 
             if skipped > 0 {
                 eprintln!("\n  {skipped} file(s) skipped (unsafe paths)");
             }
+            if !batch.failed.is_empty() {
+                eprintln!("  {} file(s) failed:", batch.failed.len());
+                for (name, err) in &batch.failed {
+                    eprintln!("    {} — {}", name, err);
+                }
+            }
             println!(
-                "\n  Extracted {extracted} file(s) to {}/",
+                "\n  {} file(s) extracted ({}) to {}/",
+                batch.succeeded,
+                format_size(batch.bytes_written),
                 output_dir.display()
             );
         }

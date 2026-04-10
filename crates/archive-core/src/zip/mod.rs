@@ -29,7 +29,7 @@ use tokio_util::io::SyncIoBridge;
 
 use tracing::{debug, info, trace, warn};
 
-use crate::archive_reader::ArchiveReader;
+use crate::archive_reader::{ArchiveReader, BatchResult};
 use crate::codec::{build_decoder, CompressionMethod};
 use crate::junk;
 use crate::progress::ProgressReporter;
@@ -388,6 +388,144 @@ impl<R: ReadAt> ZipArchive<R> {
             detail: format!("extract_all task panicked: {e}"),
         })?
     }
+
+    /// Extract multiple entries using stream coalescing for efficiency.
+    ///
+    /// Sorts entries by physical offset, clusters nearby entries within
+    /// [`COALESCE_GAP`] (with [`MAX_WASTE_RATIO`] guard), then opens **one
+    /// `read_stream` per cluster** instead of one per entry. This reduces
+    /// HTTP round trips from O(2N) to O(M) where M = number of clusters.
+    ///
+    /// `sink_factory` is called once per entry (in archive physical order)
+    /// from async context. Return `Some(writer)` to extract, `None` to skip.
+    /// Directories are always skipped.
+    ///
+    /// Per-entry failures (CRC mismatch, decompression, wrong password) are
+    /// collected in `BatchResult.failed` — the loop continues. Returns `Err`
+    /// only for unrecoverable stream-level errors.
+    pub async fn extract_selected<SinkFn>(
+        &self,
+        entries: &[&ArchiveEntry],
+        mut sink_factory: SinkFn,
+        progress: Arc<Mutex<dyn ProgressReporter>>,
+        password: Option<&[u8]>,
+    ) -> Result<BatchResult, CoreError>
+    where
+        SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn AsyncWrite + Send + Unpin>> + Send,
+    {
+        // 1. Filter directories, map to (entry, location) pairs.
+        let mut work: Vec<(&ArchiveEntry, &ZipEntryLocation)> = entries
+            .iter()
+            .filter_map(|&e| {
+                if e.is_directory {
+                    None
+                } else {
+                    Some((e, &self.locations[e.index]))
+                }
+            })
+            .collect();
+
+        if work.is_empty() {
+            return Ok(BatchResult { bytes_written: 0, succeeded: 0, failed: vec![] });
+        }
+
+        // 2. Sort by physical LFH offset.
+        work.sort_by_key(|(_, loc)| loc.offset);
+
+        // 3. Cluster nearby entries to minimise read_stream calls.
+        let clusters = build_clusters(&work);
+
+        let file_size = self.reader.size().await.map_err(CoreError::Io)?;
+        let password_bytes: Option<Vec<u8>> = password.map(|p| p.to_vec());
+        let mut batch = BatchResult { bytes_written: 0, succeeded: 0, failed: vec![] };
+
+        for cluster in &clusters {
+            // Cancel check between clusters.
+            {
+                let p = progress.lock().unwrap();
+                if p.should_cancel() {
+                    return Err(CoreError::Cancelled);
+                }
+            }
+
+            let (_, first_loc) = cluster[0];
+            let (last_entry, last_loc) = cluster[cluster.len() - 1];
+
+            let cluster_start = first_loc.offset;
+            // Generous estimate for the end of the last entry's data:
+            // LFH fixed(30) + name + extra(≤1024 in practice) + compressed data.
+            let estimated_end = last_loc
+                .offset
+                .saturating_add(30)
+                .saturating_add(last_entry.name.len() as u64)
+                .saturating_add(1024)
+                .saturating_add(last_entry.compressed_size);
+            let cluster_end = estimated_end.min(file_size);
+            let cluster_len = cluster_end.saturating_sub(cluster_start);
+
+            info!(
+                cluster_entries = cluster.len(),
+                cluster_start,
+                cluster_len,
+                "ZIP extract_selected: opening cluster stream"
+            );
+
+            let stream = self
+                .reader
+                .read_stream(cluster_start, cluster_len)
+                .await
+                .map_err(CoreError::Io)?;
+
+            // Owned copies for spawn_blocking.
+            let cluster_data: Vec<(ArchiveEntry, ZipEntryLocation)> = cluster
+                .iter()
+                .map(|(e, loc)| ((*e).clone(), (*loc).clone()))
+                .collect();
+            let pw = password_bytes.clone();
+            let prog = progress.clone();
+            let handle = tokio::runtime::Handle::current();
+            let sync_reader = SyncIoBridge::new_with_handle(stream, handle);
+
+            // Decompress all entries in this cluster from a single stream.
+            let decompressed: Vec<Result<Vec<u8>, CoreError>> =
+                tokio::task::spawn_blocking(move || {
+                    decompress_cluster(sync_reader, cluster_start, &cluster_data, pw, prog)
+                })
+                .await
+                .map_err(|e| CoreError::BitstreamError {
+                    detail: format!("extract_selected cluster task panicked: {e}"),
+                })??;
+
+            // Write results asynchronously and accumulate BatchResult.
+            for (result, &(entry, _)) in decompressed.into_iter().zip(cluster.iter()) {
+                match result {
+                    Ok(bytes) => {
+                        if let Some(mut sink) = sink_factory(entry) {
+                            match sink.write_all(&bytes).await {
+                                Ok(()) => {
+                                    batch.bytes_written += bytes.len() as u64;
+                                    batch.succeeded += 1;
+                                }
+                                Err(e) => {
+                                    batch.failed.push((
+                                        entry.name.clone(),
+                                        format!("write failed: {e}"),
+                                    ));
+                                }
+                            }
+                        }
+                        // sink_factory returned None → entry skipped, not counted.
+                    }
+                    Err(CoreError::Cancelled) => return Err(CoreError::Cancelled),
+                    Err(e) => {
+                        batch.failed.push((entry.name.clone(), e.to_string()));
+                    }
+                }
+            }
+        }
+
+        Ok(batch)
+    }
 }
 
 impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for ZipArchive<R> {
@@ -412,6 +550,183 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for ZipArchive<R> {
     async fn test(&self, entry: &ArchiveEntry, progress: Arc<Mutex<dyn ProgressReporter>>) -> Result<(), CoreError> {
         ZipArchive::test(self, entry, progress).await
     }
+
+    fn extract_selected<SinkFn>(
+        &self,
+        entries: &[&ArchiveEntry],
+        sink_factory: SinkFn,
+        progress: Arc<Mutex<dyn ProgressReporter>>,
+        password: Option<&[u8]>,
+    ) -> impl std::future::Future<Output = Result<BatchResult, CoreError>> + Send
+    where
+        SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn tokio::io::AsyncWrite + Send + Unpin>>
+            + Send,
+    {
+        ZipArchive::extract_selected(self, entries, sink_factory, progress, password)
+    }
+}
+
+// ── Stream coalescing constants ───────────────────────────────────────────────
+
+/// Gap threshold for stream coalescing.
+///
+/// Entries whose compressed data ranges are within this distance share one
+/// `read_stream` call. 2 MiB ≈ 400 ms at 5 MB/s — less than the RTT of an
+/// extra HTTP request (~900 ms for Google Drive).
+const COALESCE_GAP: u64 = 2 * 1024 * 1024;
+
+/// Maximum ratio of wasted (gap) bytes to useful (data) bytes in a cluster.
+///
+/// If adding the next entry would make the cluster download more than 10×
+/// the actual data, start a new cluster instead. Prevents degenerate cases
+/// where many tiny files spread just under the gap threshold cause
+/// pathological over-fetching.
+const MAX_WASTE_RATIO: u64 = 10;
+
+// ── Cluster builder ───────────────────────────────────────────────────────────
+
+/// Group a sorted (by LFH offset) entry list into coalesced clusters.
+///
+/// A new cluster is started when the gap to the next entry exceeds
+/// [`COALESCE_GAP`] **or** the cumulative waste ratio would exceed
+/// [`MAX_WASTE_RATIO`].
+fn build_clusters<'a>(
+    sorted_work: &[(&'a ArchiveEntry, &'a ZipEntryLocation)],
+) -> Vec<Vec<(&'a ArchiveEntry, &'a ZipEntryLocation)>> {
+    if sorted_work.is_empty() {
+        return vec![];
+    }
+
+    let mut clusters: Vec<Vec<(&ArchiveEntry, &ZipEntryLocation)>> = vec![];
+    let mut current: Vec<(&ArchiveEntry, &ZipEntryLocation)> = vec![sorted_work[0]];
+
+    // Conservative estimate of where the first entry's data ends.
+    // We ignore the LFH extra field length (not known until read), which means
+    // we may overestimate the gap slightly — leading to conservative (safe)
+    // cluster splits, never merges of entries that should be separate.
+    let first_data_end = |e: &ArchiveEntry, loc: &ZipEntryLocation| -> u64 {
+        loc.offset
+            .saturating_add(30)
+            .saturating_add(e.name.len() as u64)
+            .saturating_add(e.compressed_size)
+    };
+
+    let mut cluster_data_bytes: u64 = sorted_work[0].0.compressed_size;
+    let mut cluster_gap_bytes: u64 = 0;
+    let mut prev_data_end: u64 = first_data_end(sorted_work[0].0, sorted_work[0].1);
+
+    for &(entry, loc) in &sorted_work[1..] {
+        let gap = loc.offset.saturating_sub(prev_data_end);
+        let entry_data_bytes = entry.compressed_size;
+        let new_total_data = cluster_data_bytes.saturating_add(entry_data_bytes);
+        let new_total_gap = cluster_gap_bytes.saturating_add(gap);
+
+        let gap_ok = gap < COALESCE_GAP;
+        let ratio_ok =
+            new_total_gap < new_total_data.saturating_mul(MAX_WASTE_RATIO);
+
+        if gap_ok && ratio_ok {
+            current.push((entry, loc));
+            cluster_data_bytes = new_total_data;
+            cluster_gap_bytes = new_total_gap;
+        } else {
+            clusters.push(std::mem::take(&mut current));
+            current = vec![(entry, loc)];
+            cluster_data_bytes = entry_data_bytes;
+            cluster_gap_bytes = 0;
+        }
+
+        prev_data_end = first_data_end(entry, loc);
+    }
+
+    clusters.push(current);
+    clusters
+}
+
+// ── Cluster decompressor (runs inside spawn_blocking) ────────────────────────
+
+/// Decompress all entries in a single coalesced cluster stream.
+///
+/// Returns one `Result<Vec<u8>, CoreError>` per entry **in the same order as
+/// `cluster_data`**. Per-entry failures are returned as `Err` items; the loop
+/// continues. Only stream-level failures (I/O, bad LFH signature) cause the
+/// entire `Result` to be `Err`.
+fn decompress_cluster(
+    mut stream: SyncIoBridge<Box<dyn tokio::io::AsyncRead + Send + Unpin>>,
+    cluster_start: u64,
+    cluster_data: &[(ArchiveEntry, ZipEntryLocation)],
+    password: Option<Vec<u8>>,
+    progress: Arc<Mutex<dyn ProgressReporter>>,
+) -> Result<Vec<Result<Vec<u8>, CoreError>>, CoreError> {
+    let mut stream_pos = cluster_start;
+    let mut results = Vec::with_capacity(cluster_data.len());
+
+    for (entry, location) in cluster_data {
+        // Cancel check between entries.
+        {
+            let p = progress.lock().unwrap();
+            if p.should_cancel() {
+                return Err(CoreError::Cancelled);
+            }
+        }
+
+        // Skip gap bytes to reach this entry's Local File Header.
+        let gap = location.offset.saturating_sub(stream_pos);
+        if gap > 0 {
+            skip_exact(&mut stream, gap)?;
+            stream_pos += gap;
+        }
+
+        // Parse the 30-byte fixed LFH header.
+        let mut lfh = [0u8; 30];
+        stream.read_exact(&mut lfh).map_err(|e| stream_io_err(e, stream_pos))?;
+        stream_pos += 30;
+
+        let sig = u32::from_le_bytes([lfh[0], lfh[1], lfh[2], lfh[3]]);
+        if sig != 0x04034b50 {
+            return Err(CoreError::InvalidFormat {
+                message: format!(
+                    "invalid LFH signature at offset {:#x}: {sig:#010x}",
+                    location.offset
+                ),
+            });
+        }
+
+        let name_len = u16::from_le_bytes([lfh[26], lfh[27]]) as u64;
+        let extra_len = u16::from_le_bytes([lfh[28], lfh[29]]) as u64;
+        let var_len = name_len + extra_len;
+        if var_len > 0 {
+            skip_exact(&mut stream, var_len)?;
+            stream_pos += var_len;
+        }
+
+        // Read compressed data into memory (including encryption overhead).
+        let compressed_size = entry.compressed_size;
+        let mut compressed = vec![0u8; compressed_size as usize];
+        stream.read_exact(&mut compressed).map_err(|e| stream_io_err(e, stream_pos))?;
+        stream_pos += compressed_size;
+
+        // Decompress + CRC-verify (per-entry failure → Err item, loop continues).
+        let result = decompress_and_verify(
+            std::io::Cursor::new(compressed),
+            DecompressParams {
+                entry_name: &entry.name,
+                compressed_size,
+                uncompressed_size: entry.uncompressed_size,
+                method_id: location.method_id,
+                mod_time: location.mod_time,
+                aes_info: location.aes_info.clone(),
+                expected_crc: location.crc32,
+                is_encrypted: entry.is_encrypted,
+                password: password.as_deref(),
+                progress: &progress,
+            },
+        );
+
+        results.push(result);
+    }
+
+    Ok(results)
 }
 
 /// Read and strip the ZIP LZMA header, returning the raw LZMA properties.

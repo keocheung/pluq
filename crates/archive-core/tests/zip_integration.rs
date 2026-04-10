@@ -586,3 +586,167 @@ async fn cancel_after_50_percent_returns_cancelled() {
         "expected Cancelled after exceeding 50% of entry size, got: {result:?}"
     );
 }
+
+// ── extract_selected tests ─────────────────────────────────────────────────
+
+/// Simple AsyncWrite impl that collects bytes and flushes into the shared map on drop.
+struct MapWriter {
+    name: String,
+    map: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
+    buf: Vec<u8>,
+}
+
+impl tokio::io::AsyncWrite for MapWriter {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<Result<usize, std::io::Error>> {
+        self.buf.extend_from_slice(buf);
+        std::task::Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        let bytes = std::mem::take(&mut self.buf);
+        self.map.lock().unwrap().insert(self.name.clone(), bytes);
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+impl Drop for MapWriter {
+    fn drop(&mut self) {
+        if !self.buf.is_empty() {
+            let bytes = std::mem::take(&mut self.buf);
+            self.map.lock().unwrap().insert(self.name.clone(), bytes);
+        }
+    }
+}
+
+/// Simpler helper: extract entries to a HashMap<name, bytes>.
+async fn extract_selected_map(
+    archive: &ZipArchive<LocalReadAt>,
+    entries: &[&ArchiveEntry],
+) -> std::collections::HashMap<String, Vec<u8>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    let map: Arc<Mutex<HashMap<String, Vec<u8>>>> = Arc::new(Mutex::new(HashMap::new()));
+    let map2 = map.clone();
+
+    let sink_factory = move |entry: &ArchiveEntry| -> Option<Box<dyn tokio::io::AsyncWrite + Send + Unpin>> {
+        let name = entry.name.clone();
+        let map3 = map2.clone();
+        Some(Box::new(MapWriter { name, map: map3, buf: Vec::new() }))
+    };
+
+    let progress = Arc::new(Mutex::new(()));
+    archive
+        .extract_selected(entries, sink_factory, progress, None)
+        .await
+        .expect("extract_selected failed");
+
+    // Consume the Arc and take the map.
+    Arc::try_unwrap(map).unwrap().into_inner().unwrap()
+}
+
+/// All non-directory entries extracted and content matches.
+#[tokio::test]
+async fn extract_selected_all_entries_match() {
+    let (_tmp, path) = build_integration_zip();
+    let archive = open_zip(&path).await;
+
+    let all_entries: Vec<&ArchiveEntry> = archive
+        .entries()
+        .iter()
+        .filter(|e| !e.is_directory && !e.is_encrypted)
+        .collect();
+
+    let map = extract_selected_map(&archive, &all_entries).await;
+
+    assert_eq!(
+        map["plain_large.txt"],
+        large_content(),
+        "plain_large.txt content mismatch"
+    );
+    assert_eq!(
+        map["plain_small.bin"],
+        SMALL_CONTENT,
+        "plain_small.bin content mismatch"
+    );
+}
+
+/// Extracting a subset only extracts the requested entries.
+#[tokio::test]
+async fn extract_selected_subset_only_extracts_requested() {
+    let (_tmp, path) = build_integration_zip();
+    let archive = open_zip(&path).await;
+
+    // Only select plain_small.bin.
+    let entries: Vec<&ArchiveEntry> = archive
+        .entries()
+        .iter()
+        .filter(|e| e.name == "plain_small.bin")
+        .collect();
+
+    let map = extract_selected_map(&archive, &entries).await;
+
+    assert_eq!(map.len(), 1, "only one entry should be extracted");
+    assert_eq!(map["plain_small.bin"], SMALL_CONTENT);
+}
+
+/// Empty selection returns Ok with zeros.
+#[tokio::test]
+async fn extract_selected_empty_returns_ok() {
+    let (_tmp, path) = build_integration_zip();
+    let archive = open_zip(&path).await;
+
+    let progress = std::sync::Arc::new(std::sync::Mutex::new(()));
+    let result = archive
+        .extract_selected(
+            &[],
+            |_| -> Option<Box<dyn tokio::io::AsyncWrite + Send + Unpin>> { None },
+            progress,
+            None,
+        )
+        .await
+        .expect("extract_selected on empty slice should succeed");
+
+    assert_eq!(result.bytes_written, 0);
+    assert_eq!(result.succeeded, 0);
+    assert!(result.failed.is_empty());
+}
+
+/// Single-entry extract_selected produces identical output to extract().
+#[tokio::test]
+async fn extract_selected_single_entry_matches_extract() {
+    let (_tmp, path) = build_integration_zip();
+    let archive = open_zip(&path).await;
+
+    let entry = archive
+        .entries()
+        .iter()
+        .find(|e| e.name == "plain_large.txt")
+        .unwrap();
+
+    // Via extract().
+    let via_extract = extract_bytes(&archive, entry, None).await.unwrap();
+
+    // Via extract_selected().
+    let map = extract_selected_map(&archive, &[entry]).await;
+
+    assert_eq!(
+        map["plain_large.txt"].as_slice(),
+        via_extract.as_ref(),
+        "extract_selected output must match extract() output"
+    );
+}

@@ -12,7 +12,7 @@ mod time;
 pub mod zip;
 
 // Trait for format-agnostic archive operations.
-pub use archive_reader::ArchiveReader;
+pub use archive_reader::{ArchiveReader, BatchResult, extract_selected_default};
 
 // Shared codec types.
 pub use codec::CompressionMethod;

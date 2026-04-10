@@ -1,8 +1,8 @@
 use std::sync::{Arc, Mutex};
 
 use archive_core::{
-    ArchiveEntry, ArchiveReader, CoreError, LocalPath, ProgressReporter, Rar4Archive, RarArchive,
-    ReadAt, ScanInfo, ZipArchive, RAR4_SIGNATURE, RAR5_SIGNATURE,
+    ArchiveEntry, ArchiveReader, BatchResult, CoreError, LocalPath, ProgressReporter, Rar4Archive,
+    RarArchive, ReadAt, ScanInfo, ZipArchive, RAR4_SIGNATURE, RAR5_SIGNATURE,
 };
 use bytes::Bytes;
 use tokio::io::AsyncWrite;
@@ -270,6 +270,36 @@ impl<R: ReadAt + LocalPath + 'static> Archive<R> {
             ArchiveInner::Zip(z) => z.extract(entry, sink, progress, password).await,
             ArchiveInner::Rar(r) => r.extract(entry, sink, progress, password).await,
             ArchiveInner::Rar4(r) => r.extract(entry, sink, progress, password).await,
+        }
+        .map_err(translate_core_error)
+    }
+
+    /// Extract multiple entries in a single batch operation.
+    ///
+    /// Per-entry failures are collected in `BatchResult.failed` — extraction
+    /// continues past CRC/decompression errors. Returns `Err` only for
+    /// unrecoverable errors (cancellation).
+    pub async fn extract_selected<SinkFn>(
+        &self,
+        entries: &[&ArchiveEntry],
+        sink_factory: SinkFn,
+        progress: Arc<Mutex<dyn ProgressReporter>>,
+        password: Option<&[u8]>,
+    ) -> Result<BatchResult, ArchiveError>
+    where
+        SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn tokio::io::AsyncWrite + Send + Unpin>>
+            + Send,
+    {
+        match &self.inner {
+            ArchiveInner::Zip(z) => {
+                z.extract_selected(entries, sink_factory, progress, password).await
+            }
+            ArchiveInner::Rar(r) => {
+                r.extract_selected(entries, sink_factory, progress, password).await
+            }
+            ArchiveInner::Rar4(r) => {
+                r.extract_selected(entries, sink_factory, progress, password).await
+            }
         }
         .map_err(translate_core_error)
     }
@@ -577,6 +607,61 @@ mod tests {
 
         let restored_entries: Vec<String> = restored.entries().iter().map(|e| e.name.clone()).collect();
         assert_eq!(restored_entries, expected_entries);
+    }
+
+    #[tokio::test]
+    async fn extract_selected_extracts_subset() {
+        let buf = build_zip(&[
+            ("a.txt", b"hello world"),
+            ("b.txt", b"foo bar baz"),
+            ("c.txt", b"skip me please"),
+        ]);
+        let (_f, path) = write_temp(&buf);
+        let archive = Archive::open_reader(&path, LocalReadAt::new(&path))
+            .await.unwrap().ready().await.unwrap();
+
+        let all_entries = archive.entries_clean();
+        assert_eq!(all_entries.len(), 3);
+
+        // Select only the first two entries.
+        let selected: Vec<&ArchiveEntry> = all_entries[..2].to_vec();
+
+        let progress = Arc::new(Mutex::new(()));
+        let result = archive
+            .extract_selected(
+                &selected,
+                |_entry| Some(Box::new(tokio::io::sink()) as Box<dyn AsyncWrite + Send + Unpin>),
+                progress,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.succeeded, 2);
+        assert_eq!(result.bytes_written, b"hello world".len() as u64 + b"foo bar baz".len() as u64);
+        assert!(result.failed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn extract_selected_skips_when_sink_factory_returns_none() {
+        let buf = build_zip(&[("x.txt", b"data"), ("y.txt", b"more data")]);
+        let (_f, path) = write_temp(&buf);
+        let archive = Archive::open_reader(&path, LocalReadAt::new(&path))
+            .await.unwrap().ready().await.unwrap();
+
+        let all_entries = archive.entries_clean();
+        let selected: Vec<&ArchiveEntry> = all_entries.iter().copied().collect();
+
+        let progress = Arc::new(Mutex::new(()));
+        // Skip all entries by returning None.
+        let result = archive
+            .extract_selected(&selected, |_entry| None, progress, None)
+            .await
+            .unwrap();
+
+        assert_eq!(result.succeeded, 0);
+        assert_eq!(result.bytes_written, 0);
+        assert!(result.failed.is_empty());
     }
 
     #[tokio::test]
