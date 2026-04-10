@@ -235,8 +235,12 @@ impl<R: ReadAt> Rar4Archive<R> {
     }
 
     /// Bytes that must be transferred to produce this entry.
+    ///
+    /// For surgical cloud extraction, we must download both the file header
+    /// and the compressed data area.
     pub fn extraction_cost(&self, entry: &ArchiveEntry) -> u64 {
-        self.locations[entry.index].data_size
+        let loc = &self.locations[entry.index];
+        loc.header_size + loc.data_size
     }
 
     /// Elastic metadata scan — streams archive bytes from `start_offset`.

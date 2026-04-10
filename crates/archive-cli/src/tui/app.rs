@@ -107,6 +107,12 @@ pub struct App {
     pub visible_items: Vec<DisplayItem>,
     /// Last selected index for each visited path (e.g. "" -> 2, "photos" -> 5).
     pub selection_history: std::collections::HashMap<String, usize>,
+    /// Whether to show the help overlay.
+    pub show_help: bool,
+    /// The current search filter query.
+    pub filter_query: String,
+    /// Whether the user is currently typing into the filter.
+    pub is_filtering: bool,
 }
 
 impl App {
@@ -127,6 +133,9 @@ impl App {
             current_path: Vec::new(),
             visible_items: Vec::new(),
             selection_history: std::collections::HashMap::new(),
+            show_help: false,
+            filter_query: String::new(),
+            is_filtering: false,
         }
     }
 
@@ -139,16 +148,22 @@ impl App {
             let Some(tree) = &self.entry_tree else { return };
             let path_str = self.current_path.join("/");
             let children = tree.children_at(&path_str);
+            let query = self.filter_query.to_lowercase();
+
             children
                 .iter()
-                .map(|node| {
+                .filter_map(|node| {
+                    if !query.is_empty() && !node.name.to_lowercase().contains(&query) {
+                        return None;
+                    }
+
                     let full_path = if path_str.is_empty() {
                         node.name.clone()
                     } else {
                         format!("{}/{}", path_str, node.name)
                     };
                     let is_directory = !node.children.is_empty();
-                    (node.name.clone(), full_path, is_directory, node.entry_index)
+                    Some((node.name.clone(), full_path, is_directory, node.entry_index))
                 })
                 .collect()
         };
@@ -358,6 +373,34 @@ impl App {
         // Any keypress clears status message.
         self.status_message = None;
 
+        if self.show_help {
+            match key.code {
+                KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') => {
+                    self.show_help = false;
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        if self.is_filtering {
+            match key.code {
+                KeyCode::Char(c) => {
+                    self.filter_query.push(c);
+                    self.rebuild_visible_items(None);
+                }
+                KeyCode::Backspace => {
+                    self.filter_query.pop();
+                    self.rebuild_visible_items(None);
+                }
+                KeyCode::Enter | KeyCode::Esc => {
+                    self.is_filtering = false;
+                }
+                _ => {}
+            }
+            return;
+        }
+
         match key.code {
             KeyCode::Char('q') => {
                 if matches!(
@@ -385,6 +428,8 @@ impl App {
                     let old_path = self.current_path.join("/");
                     self.selection_history.insert(old_path, self.selected);
                     let target = self.current_path.pop();
+                    self.filter_query.clear();
+                    self.is_filtering = false;
                     self.rebuild_visible_items(target.as_deref());
                 } else {
                     debug!("Esc at root → quit");
@@ -438,6 +483,8 @@ impl App {
                         let old_path = self.current_path.join("/");
                         self.selection_history.insert(old_path, self.selected);
                         self.current_path.push(item.name.clone());
+                        self.filter_query.clear();
+                        self.is_filtering = false;
                         self.rebuild_visible_items(None);
                     }
                 }
@@ -447,6 +494,8 @@ impl App {
                     let old_path = self.current_path.join("/");
                     self.selection_history.insert(old_path, self.selected);
                     let target = self.current_path.pop();
+                    self.filter_query.clear();
+                    self.is_filtering = false;
                     self.rebuild_visible_items(target.as_deref());
                 }
             }
@@ -471,6 +520,16 @@ impl App {
                     }
                 }
             }
+            KeyCode::Char('?') => {
+                if matches!(self.phase, AppPhase::Browsing) {
+                    self.show_help = !self.show_help;
+                }
+            }
+            KeyCode::Char('/') => {
+                if matches!(self.phase, AppPhase::Browsing) {
+                    self.is_filtering = true;
+                }
+            }
             KeyCode::Enter => {
                 if matches!(self.phase, AppPhase::ConfirmExtract { .. }) {
                     // User confirmed — proceed with extraction.
@@ -488,6 +547,8 @@ impl App {
                             let old_path = self.current_path.join("/");
                             self.selection_history.insert(old_path, self.selected);
                             self.current_path.push(item.name.clone());
+                            self.filter_query.clear();
+                            self.is_filtering = false;
                             self.rebuild_visible_items(None);
                             return;
                         }

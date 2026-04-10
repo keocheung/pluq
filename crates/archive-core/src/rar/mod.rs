@@ -668,10 +668,11 @@ impl<R: ReadAt> RarArchive<R> {
 
     /// Bytes that must be transferred to produce this entry.
     ///
-    /// For non-solid RAR archives every entry is independently seekable, so
-    /// this is just the entry's compressed data size.
+    /// For surgical cloud extraction, we must download both the file header
+    /// and the compressed data area.
     pub fn extraction_cost(&self, entry: &ArchiveEntry) -> u64 {
-        self.locations[entry.index].data_size
+        let loc = &self.locations[entry.index];
+        loc.header_size + loc.data_size
     }
 
     /// Compression dictionary size in bytes for this entry.

@@ -82,11 +82,13 @@ async fn rar5_extract_unicode_entry_content() {
 // ── Extraction cost ───────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn rar5_extraction_cost_positive() {
+async fn rar5_extraction_cost_includes_header() {
     let archive = open_rar(&fixture("rar5_unicode_entry.rar")).await;
     let entry = &archive.entries()[0];
     let cost = archive.extraction_cost(entry);
-    assert!(cost > 0, "extraction cost must be positive for a non-empty entry");
+    let loc = &archive.locations()[0];
+    assert_eq!(cost, loc.header_size + loc.data_size, "RAR5 cost must be header + data");
+    assert!(loc.header_size > 0);
 }
 
 // ── Progress reporting ────────────────────────────────────────────────────────

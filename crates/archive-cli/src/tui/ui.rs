@@ -2,7 +2,7 @@ use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, Cell, Gauge, Paragraph, Row, Table},
+    widgets::{Block, Borders, Cell, Clear, Gauge, Paragraph, Row, Table},
 };
 
 use super::app::{App, AppPhase};
@@ -107,7 +107,15 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 breadcrumb.push_str(" /");
             }
 
-            let header = Paragraph::new(breadcrumb)
+            let header_text = if app.is_filtering {
+                format!("{}  [Filter: \"{}-\"]", breadcrumb, app.filter_query)
+            } else if !app.filter_query.is_empty() {
+                format!("{}  [Filter: \"{}\"]", breadcrumb, app.filter_query)
+            } else {
+                breadcrumb
+            };
+
+            let header = Paragraph::new(header_text)
                 .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
             frame.render_widget(header, chunks[0]);
 
@@ -168,39 +176,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
 
             frame.render_stateful_widget(table, chunks[2], &mut app.table_state);
 
-            let footer_text = if let Some(msg) = &app.status_message {
-                format!(" {}", msg)
-            } else if !app.toggled.is_empty() {
-                let n = app.toggled.len();
-                let total_size: u64 = app
-                    .entries
-                    .iter()
-                    .filter(|e| app.toggled.contains(&e.name))
-                    .map(|e| e.uncompressed_size)
-                    .sum();
-                format!(
-                    " [ {} file{} — {} ]  Enter extract  q quit",
-                    n,
-                    if n == 1 { "" } else { "s" },
-                    crate::format_size(total_size),
-                )
-            } else if let Some(item) = app.visible_items.get(app.selected) {
-                if item.is_directory {
-                    format!(" {}/", item.full_path)
-                } else {
-                    format!(
-                        " {}  {}",
-                        item.full_path,
-                        crate::format_size(item.uncompressed_size)
-                    )
-                }
-            } else {
-                String::new()
-            };
-
-            let footer = Paragraph::new(footer_text)
-                .style(Style::default().fg(Color::DarkGray));
-            frame.render_widget(footer, chunks[4]);
+            draw_footer(frame, app, chunks[4]);
         }
         AppPhase::ConfirmExtract {
             entry_name,
@@ -385,4 +361,109 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             frame.render_widget(hint, chunks[1]);
         }
     }
+
+    if app.show_help {
+        draw_help_popup(frame, area);
+    }
+}
+
+fn draw_footer(frame: &mut Frame<'_>, app: &App, area: ratatui::layout::Rect) {
+    let text = if let Some(msg) = &app.status_message {
+        format!(" {}", msg)
+    } else if !app.toggled.is_empty() {
+        let n = app.toggled.len();
+        let total_size: u64 = app
+            .entries
+            .iter()
+            .filter(|e| app.toggled.contains(&e.name))
+            .map(|e| e.uncompressed_size)
+            .sum();
+
+        let total_cost: u64 = app
+            .entries
+            .iter()
+            .filter(|e| app.toggled.contains(&e.name))
+            .map(|e| {
+                app.archive
+                    .as_ref()
+                    .map(|a| a.extraction_cost(e))
+                    .unwrap_or(0)
+            })
+            .sum();
+
+        format!(
+            " [ {} file{} — {} · Cost: {} ]  Enter extract  q quit",
+            n,
+            if n == 1 { "" } else { "s" },
+            crate::format_size(total_size),
+            crate::format_size(total_cost),
+        )
+    } else if let Some(item) = app.visible_items.get(app.selected) {
+        if item.is_directory {
+            format!(" {}/", item.full_path)
+        } else {
+            let cost = if let Some(idx) = item.entry_index {
+                app.archive
+                    .as_ref()
+                    .map(|a| a.extraction_cost(&app.entries[idx]))
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+
+            format!(
+                " {}  {}  Cost: {}",
+                item.full_path,
+                crate::format_size(item.uncompressed_size),
+                crate::format_size(cost)
+            )
+        }
+    } else {
+        String::new()
+    };
+
+    let footer = Paragraph::new(text).style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(footer, area);
+}
+
+fn draw_help_popup(frame: &mut Frame<'_>, area: ratatui::layout::Rect) {
+    let help_text = "
+ l / Right: Dive in
+ h / Left:  Back out
+ Space:     Toggle selection
+ a:         Toggle all in folder
+ Enter:     Extract selection
+ /:         Filter items
+ ?:         Toggle this help
+ q:         Quit
+";
+
+    let block = Block::default()
+        .title(" Help ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let paragraph = Paragraph::new(help_text).block(block);
+
+    // Center the popup.
+    let popup_area = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(12),
+            Constraint::Min(0),
+        ])
+        .split(area)[1];
+
+    let popup_area = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(30),
+            Constraint::Min(0),
+        ])
+        .split(popup_area)[1];
+
+    frame.render_widget(Clear, popup_area);
+    frame.render_widget(paragraph, popup_area);
 }

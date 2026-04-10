@@ -194,11 +194,15 @@ async fn rar4_store_extraction_exact_content() {
 }
 
 #[tokio::test]
-async fn rar4_store_extraction_cost_positive() {
+async fn rar4_extraction_cost_includes_header() {
     let bytes = build_rar4_store_archive(&[("test.txt", b"payload")]);
     let (_g, path) = write_tempfile(&bytes);
     let archive = open_rar4(&path).await;
-    assert!(archive.extraction_cost(&archive.entries()[0]) > 0);
+    let entry = &archive.entries()[0];
+    let cost = archive.extraction_cost(entry);
+    let loc = &archive.locations()[0];
+    assert_eq!(cost, loc.header_size + loc.data_size, "RAR4 cost must be header + data");
+    assert!(loc.header_size > 0);
 }
 
 // ── CRC verification ──────────────────────────────────────────────────────────
