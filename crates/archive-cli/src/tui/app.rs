@@ -153,6 +153,15 @@ pub enum AppPhase {
         entry_name: String,
         dict_size: u64,
     },
+    /// Prompting user for a password before extraction.
+    PasswordPrompt {
+        /// What to retry after password entry.
+        /// `false` = single file extraction (uses `entry_index`).
+        /// `true` = batch extraction.
+        is_batch: bool,
+        /// For single-file extraction, the entry index to retry.
+        entry_index: Option<usize>,
+    },
     Extracting {
         entry_name: String,
         total_bytes: u64,
@@ -216,6 +225,12 @@ pub struct App {
     pub review_selected: usize,
     /// Tracks extraction speed and ETA.
     pub speed_tracker: SpeedTracker,
+    /// Session password — once entered, reused for all subsequent extractions.
+    pub password: Option<Vec<u8>>,
+    /// Text buffer for the password input field.
+    pub password_input: String,
+    /// Error message to show above the password prompt (e.g., "Wrong password").
+    pub password_error: Option<String>,
 }
 
 impl App {
@@ -242,6 +257,9 @@ impl App {
             in_review_mode: false,
             review_selected: 0,
             speed_tracker: SpeedTracker::new(),
+            password: None,
+            password_input: String::new(),
+            password_error: None,
         }
     }
 
@@ -399,6 +417,23 @@ impl App {
                     Some(format!("Extracted '{}' ({})", name, crate::format_size(bytes)));
             }
             AppMessage::ExtractionComplete(Err(e)) => {
+                if matches!(e, ArchiveError::PasswordNeeded) {
+                    // Password was wrong — clear it and re-prompt.
+                    self.password = None;
+                    self.password_input.clear();
+
+                    // Figure out the entry index from the current phase.
+                    let entry_index = if let AppPhase::Extracting { ref entry_name, .. } = self.phase
+                    {
+                        self.entries.iter().position(|e| e.name == *entry_name)
+                    } else {
+                        None
+                    };
+
+                    self.password_error = Some("Wrong password. Try again.".into());
+                    self.phase = AppPhase::PasswordPrompt { is_batch: false, entry_index };
+                    return;
+                }
                 if matches!(e, ArchiveError::Cancelled) {
                     info!("extraction cancelled → Browsing");
                     self.status_message = Some("Extraction cancelled.".to_string());
@@ -409,6 +444,45 @@ impl App {
                 self.phase = AppPhase::Browsing;
             }
             AppMessage::BatchExtractionComplete(Ok(batch)) => {
+                // Check if failures are all password-related.
+                let password_failures: Vec<&String> = batch
+                    .failed
+                    .iter()
+                    .filter(|(_, err)| err.to_lowercase().contains("password"))
+                    .map(|(name, _)| name)
+                    .collect();
+
+                if !password_failures.is_empty() {
+                    // Some entries failed due to wrong password.
+                    // Remove successfully extracted entries from toggled so they won't be re-attempted.
+                    let succeeded_names: HashSet<String> = self
+                        .entries
+                        .iter()
+                        .filter(|e| self.toggled.contains(&e.name))
+                        .filter(|e| !batch.failed.iter().any(|(name, _)| name == &e.name))
+                        .map(|e| e.name.clone())
+                        .collect();
+                    for name in &succeeded_names {
+                        self.toggled.remove(name);
+                    }
+
+                    self.password = None;
+
+                    let msg = if batch.succeeded > 0 {
+                        format!(
+                            "Extracted {} file{} — {} failed (wrong password). Try again.",
+                            batch.succeeded,
+                            if batch.succeeded == 1 { "" } else { "s" },
+                            password_failures.len(),
+                        )
+                    } else {
+                        "Wrong password. Try extracting again.".into()
+                    };
+                    self.status_message = Some(msg);
+                    self.phase = AppPhase::Browsing;
+                    return;
+                }
+
                 let n = batch.succeeded;
                 let bytes = batch.bytes_written;
                 let failed = batch.failed.len();
@@ -433,6 +507,13 @@ impl App {
                 });
             }
             AppMessage::BatchExtractionComplete(Err(e)) => {
+                if matches!(e, ArchiveError::PasswordNeeded) {
+                    // Batch aborted early due to password — no files succeeded.
+                    self.password = None;
+                    self.status_message = Some("Wrong password. Try extracting again.".into());
+                    self.phase = AppPhase::Browsing;
+                    return;
+                }
                 self.toggled.clear();
                 self.phase = AppPhase::Browsing;
                 if matches!(e, ArchiveError::Cancelled) {
@@ -555,6 +636,64 @@ impl App {
                 }
                 KeyCode::Char('q') => {
                     self.should_quit = true;
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        if matches!(self.phase, AppPhase::PasswordPrompt { .. }) {
+            match key.code {
+                KeyCode::Char(c) => {
+                    self.password_input.push(c);
+                }
+                KeyCode::Backspace => {
+                    self.password_input.pop();
+                }
+                KeyCode::Enter => {
+                    if self.password_input.is_empty() {
+                        return; // Don't accept empty password
+                    }
+                    // Store the password for the session.
+                    let pw = self.password_input.as_bytes().to_vec();
+                    self.password = Some(pw);
+                    self.password_input.clear();
+
+                    // Extract the phase data before replacing it.
+                    let (is_batch, entry_index) = if let AppPhase::PasswordPrompt {
+                        is_batch,
+                        entry_index,
+                    } = &self.phase
+                    {
+                        (*is_batch, *entry_index)
+                    } else {
+                        unreachable!()
+                    };
+
+                    // Resume the extraction that was interrupted.
+                    if is_batch {
+                        self.start_batch_extraction(tx);
+                    } else if let Some(idx) = entry_index {
+                        const DICT_WARN_THRESHOLD: u64 = 4 * 1024 * 1024 * 1024;
+                        let dict = self.archive.as_ref().unwrap().dict_size(&self.entries[idx]);
+                        if let Some(ds) = dict
+                            && ds > DICT_WARN_THRESHOLD
+                        {
+                            self.phase = AppPhase::ConfirmExtract {
+                                entry_index: idx,
+                                entry_name: self.entries[idx].name.clone(),
+                                dict_size: ds,
+                            };
+                        } else {
+                            self.start_extraction(idx, tx);
+                        }
+                    }
+                }
+                KeyCode::Esc => {
+                    // Cancel password entry, return to browsing.
+                    self.password_input.clear();
+                    self.password_error = None;
+                    self.phase = AppPhase::Browsing;
                 }
                 _ => {}
             }
@@ -707,6 +846,19 @@ impl App {
                     self.start_extraction(idx, tx);
                 } else if matches!(self.phase, AppPhase::Browsing) {
                     if !self.toggled.is_empty() {
+                        // Check if ANY toggled entry is encrypted.
+                        let has_encrypted = self.entries.iter().any(|e| {
+                            self.toggled.contains(&e.name) && e.is_encrypted && self.password.is_none()
+                        });
+                        if has_encrypted {
+                            self.password_input.clear();
+                            self.password_error = None;
+                            self.phase = AppPhase::PasswordPrompt {
+                                is_batch: true,
+                                entry_index: None,
+                            };
+                            return;
+                        }
                         self.start_batch_extraction(tx);
                     } else if let Some(item) = self.visible_items.get(self.selected) {
                         if item.is_directory {
@@ -719,6 +871,17 @@ impl App {
                             return;
                         }
                         if let Some(idx) = item.entry_index {
+                            let entry = &self.entries[idx];
+                            if entry.is_encrypted && self.password.is_none() {
+                                self.password_input.clear();
+                                self.password_error = None;
+                                self.phase = AppPhase::PasswordPrompt {
+                                    is_batch: false,
+                                    entry_index: Some(idx),
+                                };
+                                return;
+                            }
+
                             const DICT_WARN_THRESHOLD: u64 = 4 * 1024 * 1024 * 1024;
                             let dict =
                                 self.archive.as_ref().unwrap().dict_size(&self.entries[idx]);
@@ -772,6 +935,8 @@ impl App {
         let archive = self.archive.as_ref().unwrap().clone();
         let entry = self.entries[idx].clone();
         let tx_extract = tx.clone();
+        let password = self.password.clone();
+
         self.cancel_flag.store(false, Ordering::SeqCst);
         self.progress.bytes_extracted.store(0, Ordering::Relaxed);
         let progress = Arc::new(Mutex::new(TuiProgressReporter::new(
@@ -786,7 +951,8 @@ impl App {
             }
             match tokio::fs::File::create(&output_path).await {
                 Ok(mut file) => {
-                    let result = archive.extract(&entry, &mut file, progress, None).await;
+                    let result =
+                        archive.extract(&entry, &mut file, progress, password.as_deref()).await;
                     if matches!(&result, Err(ArchiveError::Cancelled)) {
                         drop(file);
                         let _ = tokio::fs::remove_file(&output_path).await;
@@ -840,6 +1006,8 @@ impl App {
 
         let archive = self.archive.as_ref().unwrap().clone();
         let tx_extract = tx.clone();
+        let password = self.password.clone();
+
         self.cancel_flag.store(false, Ordering::SeqCst);
         self.progress.bytes_extracted.store(0, Ordering::Relaxed);
         self.progress.files_done.store(0, Ordering::Relaxed);
@@ -877,7 +1045,7 @@ impl App {
             };
 
             let result =
-                archive.extract_selected(&entry_refs, sink_factory, progress, None).await;
+                archive.extract_selected(&entry_refs, sink_factory, progress, password.as_deref()).await;
 
             // Clean up output files on cancel or per-entry failures.
             match &result {

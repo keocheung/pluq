@@ -64,12 +64,12 @@ These commands define the CLI's public API. The TUI is the default entry point.
 - [x] **Drill-down navigation** — `Right`/`l` to dive into folders, `Left`/`h`/`Backspace` to return to parent.
 - [x] **Full-path selection** — Refactor `app.toggled` to use `HashSet<String>` (paths) instead of indices.
 - [x] **Zen Sniper aesthetic** — Minimalist Cyan/Black theme, Size + Name columns only, strip borders.
-- [ ] **Tab Review mode** — `Tab` to see/prune selected files; `Esc` to return to browsing.
+- [x] **Tab Review mode** — `Tab` to see/prune selected files; `Esc` to return to browsing.
 - [x] **Extraction cost display** — Show estimated download cost for the highlighted entry.
 - [x] **Search / filter** — `/` to filter the current folder's entry list.
 - [x] **`?` help popup** — Overlay showing all keybindings.
-- [ ] **Speed + ETA during extraction** — MB/s and estimated time remaining.
-- [ ] **Password-protected archive support** — Inline TUI prompt for encrypted archives.
+- [x] **Speed + ETA during extraction** — MB/s and estimated time remaining.
+- [x] **Password-protected archive support** — Inline TUI prompt for encrypted archives.
 
 ### Phase 3c: Home Screen
 - [ ] **Home screen** — Entry point with URL/path input, saved bookmarks, and recents (see `TUI_VISION.md`).

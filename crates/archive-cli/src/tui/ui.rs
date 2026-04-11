@@ -308,6 +308,46 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 chunks[8],
             );
         }
+        AppPhase::PasswordPrompt { .. } => {
+            let chunks = Layout::vertical([
+                Constraint::Min(1),    // top fill
+                Constraint::Length(1), // error message (if any)
+                Constraint::Length(1), // spacing
+                Constraint::Length(1), // prompt label
+                Constraint::Length(1), // input field
+                Constraint::Length(1), // spacing
+                Constraint::Length(1), // hint
+                Constraint::Min(1),    // bottom fill
+            ])
+            .split(area);
+
+            // Error message (e.g., "Wrong password")
+            if let Some(ref err) = app.password_error {
+                let err_text = Paragraph::new(format!("  {}", err))
+                    .style(Style::default().fg(Color::Red))
+                    .alignment(Alignment::Center);
+                frame.render_widget(err_text, chunks[1]);
+            }
+
+            // Prompt label
+            let label = Paragraph::new("  This archive is password protected.")
+                .alignment(Alignment::Center);
+            frame.render_widget(label, chunks[3]);
+
+            // Input field: show dots for each character (mask the password)
+            let masked: String = "*".repeat(app.password_input.len());
+            let input_text = format!("  Password: {}_", masked); // Underscore as cursor
+            let input = Paragraph::new(input_text)
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(Color::Cyan));
+            frame.render_widget(input, chunks[4]);
+
+            // Hint
+            let hint = Paragraph::new("  Enter to confirm  ·  Esc to cancel")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(Color::DarkGray));
+            frame.render_widget(hint, chunks[6]);
+        }
         AppPhase::Extracting {
             entry_name,
             total_bytes,
