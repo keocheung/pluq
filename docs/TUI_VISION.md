@@ -1,7 +1,8 @@
 # TUI Vision
 
-> The long-term vision for ArchiveSniper's terminal UI.
-> This is a living document — add ideas as they come up.
+> The long-term **feature** vision for Archive Sniper's terminal UI.
+> This document describes *what the TUI can do* — screens, capabilities, user flows.
+> For *how it looks* (colors, borders, layout rules, key bindings), see `TUI_STYLE_GUIDE.md`.
 
 ---
 
@@ -17,98 +18,59 @@ The TUI is the primary experience. CLI commands exist for scripting and automati
 Launching `snipe` shows the home screen — an entry point where users can open
 a new archive or jump back into a saved/recent one.
 
-```
-┌─ Archive Sniper ─────────────────────────────────────────┐
-│                                                           │
-│  Open: [_________________________________________] [Go]   │
-│                                                           │
-│  ┌─ Saved Archives ───────────────────────────────────┐   │
-│  │                                                    │   │
-│  │  photos-2024.rar        Google Drive    4.2 GB     │   │
-│  │  project-backup.zip     Local           890 MB     │   │
-│  │  assets-v3.rar          Dropbox         1.1 GB     │   │
-│  │                                                    │   │
-│  ├─ Recent ───────────────────────────────────────────┤   │
-│  │                                                    │   │
-│  │  demo.zip               Local           12 MB      │   │
-│  │  client-data.rar        Google Drive    340 MB     │   │
-│  │                                                    │   │
-│  └────────────────────────────────────────────────────┘   │
-│                                                           │
-│  enter: open  s: save  d: delete  /: search               │
-└───────────────────────────────────────────────────────────┘
-```
-
-### Open field
+### Snipe Input
 
 - Text input: paste a URL (Google Drive, Dropbox, etc.) or a local file path
 - Tab-completion for local paths (future)
 
-### Saved Archives (Bookmarks)
+### Bookmarks
 
-- User explicitly saves an archive with a name ("save link" action)
+- User explicitly saves an archive with a custom name
 - Stored in `~/.config/archive-sniper/bookmarks.json`
-- Shows: user-given name, provider (Google Drive / Dropbox / Local), file size
+- Shows: user-given name, provider tag (GDrive / Dropbox / Local), file size
 - Select one to open it immediately
 - Combined with the metadata cache (`~/.cache/archive-sniper/`), re-opens are
   near-instant — no re-scan needed
 
 ### Recent Archives
 
-- Automatically tracked — last N opened archives
-- Stored alongside bookmarks (or in a separate recent.json)
-- Duplicates with saved archives are hidden from the recent list
+- Automatically tracked — last 10 opened archives
+- Stored in `~/.config/archive-sniper/recent.json`
+- Duplicates with bookmarks are hidden from the recent list
 
 ---
 
 ## Browse Screen
 
-After opening an archive (from home screen, `snipe browse <url>`, or a bookmark),
-the user lands in the browse screen. This is what Phase 3 already implements,
-extended with upcoming features.
+After opening an archive (from home screen, `snipe <source>`, or a bookmark),
+the user lands in the browse screen — a drill-down file browser.
 
-```
-┌─ photos-2024.rar ─ Google Drive ─ 4.2 GB ───────────────┐
-│                                                           │
-│  Search: [filter...______]                                │
-│                                                           │
-│  [x] photos/vacation/IMG_001.jpg          2.4 MB          │
-│  [ ] photos/vacation/IMG_002.jpg          3.1 MB          │
-│  [x] photos/vacation/IMG_003.jpg          1.8 MB          │
-│  [ ] documents/readme.txt                 4.2 KB          │
-│                                                           │
-│  [Extract Selected]  2 files, 4.2 MB                      │
-│                                                           │
-│  q: quit  /: search  space: select  enter: extract        │
-│  s: save link  esc: home                                  │
-└───────────────────────────────────────────────────────────┘
-```
+### Capabilities
 
-### Planned features (from roadmap)
-
-- **Search/filter:** `/` to filter the current folder's entry list.
-- **Drill-down navigation:** `Right` to enter, `Left` to exit.
-- **Full-path selection:** Multi-select across different folders.
-- **Selection Review:** `Tab` to see a review of all staged files before extraction.
-- **Zen Aesthetic:** Stripping boxes and borders for a minimalist, content-focused view.
-
-### Navigation
-
-- `Left` or `Backspace` to move up to the parent directory.
-- `Tab` or `Esc` to toggle/close the selection review screen.
-- `q` quits the app entirely.
-- `s` saves the current archive as a bookmark.
+- **Drill-down navigation:** Enter directories, back out to parent
+- **Search/filter:** Filter the current folder's entry list
+- **Selection:** Toggle individual files and directories, or select all in folder
+- **Selection Review:** Full-screen view of all staged files, with pruning
+- **Extraction Cost:** Live cost estimate for highlighted and selected entries
 
 ---
 
 ## Extraction
 
-When extracting (single or batch), the browse screen transitions to show progress:
+### Destination Strategy
+
+Before extraction begins, the user chooses where to extract:
+
+1. **Archive-name folder (default):** `photos.zip` extracts to `./photos/`
+2. **Here:** Extract directly into CWD
+3. **Custom name:** User types a folder name
+
+### Progress
 
 - Progress bar with bytes extracted / total
-- Current file name
-- Speed indicator (MB/s)
-- Cancel with `esc` (returns to browse, partial extraction kept)
+- Current file name and batch index
+- Speed indicator and ETA
+- Cancel with Esc (returns to browse, partial extraction kept)
 
 After extraction completes, return to browse with a status message.
 
@@ -121,10 +83,11 @@ CLI commands remain for non-interactive use:
 | Command | Purpose |
 | --- | --- |
 | `snipe` | Launch TUI (home screen) |
-| `snipe browse <source>` | Launch TUI directly into browse screen |
+| `snipe <source>` | Launch TUI directly into browse screen |
 | `snipe list <source>` | Print entries to stdout (scriptable) |
-| `snipe extract <source> <entry>` | Extract one file (scriptable) |
+| `snipe get <source> [glob] [-o dir]` | Non-interactive extraction |
 | `snipe test <source>` | Verify integrity (CI/automation) |
+| `snipe auth add/remove/list` | Manage OAuth tokens |
 
 The TUI and CLI share all the same core logic. The TUI is the primary UX;
 CLI commands are the scripting/automation interface.

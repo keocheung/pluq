@@ -3,7 +3,7 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 3 — Interactive TUI + Google Drive Provider.
-* **Current Active Task:** [HANDOVER] — Phase 3b complete. Tab Review, Speed+ETA, Password prompt all implemented.
+* **Current Active Task:** SESSION_PLAN.md — Phase 3c Style Guide Compliance (5 steps). Ready to execute.
 * **Baseline:** 236 tests pass, 14 ignored. Clippy clean.
 
 
