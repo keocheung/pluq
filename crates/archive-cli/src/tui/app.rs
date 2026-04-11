@@ -1,8 +1,9 @@
 #![allow(dead_code)]
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use archive::{Archive, ArchiveEntry, ArchiveError, BatchResult, EntryTree, Opened, ProgressReporter, ScanInfo};
 use archive_source::ResolvedSource;
@@ -40,6 +41,102 @@ pub struct SharedProgress {
     pub files_done: AtomicUsize,
     /// Name of the entry currently being extracted (batch mode).
     pub current_entry_name: Mutex<String>,
+}
+
+/// Tracks byte progress over time to compute rolling speed and ETA.
+pub struct SpeedTracker {
+    /// Ring buffer of (timestamp, cumulative_bytes) samples.
+    samples: VecDeque<(Instant, u64)>,
+    /// Window size for rolling average (in seconds).
+    window_secs: f64,
+}
+
+impl SpeedTracker {
+    pub fn new() -> Self {
+        Self {
+            samples: VecDeque::with_capacity(128),
+            window_secs: 3.0, // 3-second rolling window
+        }
+    }
+
+    /// Record a new progress sample. Call on each tick.
+    pub fn record(&mut self, bytes: u64) {
+        let now = Instant::now();
+        self.samples.push_back((now, bytes));
+
+        // Evict samples older than the window.
+        let cutoff = now - std::time::Duration::from_secs_f64(self.window_secs);
+        while self.samples.len() > 2 {
+            if self.samples[0].0 < cutoff {
+                self.samples.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Current speed in bytes per second, or None if insufficient data.
+    pub fn speed_bps(&self) -> Option<f64> {
+        if self.samples.len() < 2 {
+            return None;
+        }
+        let first = self.samples.front().unwrap();
+        let last = self.samples.back().unwrap();
+        let elapsed = last.0.duration_since(first.0).as_secs_f64();
+        if elapsed < 0.1 {
+            return None; // Not enough time elapsed
+        }
+        let bytes_delta = last.1.saturating_sub(first.1);
+        Some(bytes_delta as f64 / elapsed)
+    }
+
+    /// Estimated seconds remaining, given total bytes expected.
+    pub fn eta_secs(&self, total_bytes: u64, current_bytes: u64) -> Option<f64> {
+        let speed = self.speed_bps()?;
+        if speed < 1.0 {
+            return None; // Too slow to estimate
+        }
+        let remaining = total_bytes.saturating_sub(current_bytes);
+        Some(remaining as f64 / speed)
+    }
+
+    /// Human-readable speed string, or None if insufficient data.
+    pub fn format_speed(&self) -> Option<String> {
+        let bps = self.speed_bps()?;
+        const KB: f64 = 1024.0;
+        const MB: f64 = 1024.0 * KB;
+        const GB: f64 = 1024.0 * MB;
+
+        Some(if bps >= GB {
+            format!("{:.1} GB/s", bps / GB)
+        } else if bps >= MB {
+            format!("{:.1} MB/s", bps / MB)
+        } else if bps >= KB {
+            format!("{:.0} KB/s", bps / KB)
+        } else {
+            format!("{:.0} B/s", bps)
+        })
+    }
+
+    /// Human-readable ETA string ("M:SS" or "H:MM:SS"), or None if unavailable.
+    pub fn format_eta(&self, total_bytes: u64, current_bytes: u64) -> Option<String> {
+        let secs = self.eta_secs(total_bytes, current_bytes)?;
+        let total_secs = secs.ceil() as u64;
+        let hours = total_secs / 3600;
+        let minutes = (total_secs % 3600) / 60;
+        let seconds = total_secs % 60;
+
+        Some(if hours > 0 {
+            format!("ETA {}:{:02}:{:02}", hours, minutes, seconds)
+        } else {
+            format!("ETA {}:{:02}", minutes, seconds)
+        })
+    }
+
+    /// Reset for a new extraction.
+    pub fn reset(&mut self) {
+        self.samples.clear();
+    }
 }
 
 /// Current phase of the application.
@@ -117,6 +214,8 @@ pub struct App {
     pub in_review_mode: bool,
     /// Index of the highlighted item within the review list.
     pub review_selected: usize,
+    /// Tracks extraction speed and ETA.
+    pub speed_tracker: SpeedTracker,
 }
 
 impl App {
@@ -142,6 +241,7 @@ impl App {
             is_filtering: false,
             in_review_mode: false,
             review_selected: 0,
+            speed_tracker: SpeedTracker::new(),
         }
     }
 
@@ -356,6 +456,7 @@ impl App {
             }
             AppPhase::Extracting { ref mut bytes_extracted, .. } => {
                 *bytes_extracted = self.progress.bytes_extracted.load(Ordering::Relaxed);
+                self.speed_tracker.record(*bytes_extracted);
             }
             AppPhase::ExtractingBatch {
                 ref mut bytes_extracted,
@@ -366,6 +467,7 @@ impl App {
                 *bytes_extracted = self.progress.bytes_extracted.load(Ordering::Relaxed);
                 *files_done = self.progress.files_done.load(Ordering::Relaxed);
                 *current_entry = self.progress.current_entry_name.lock().unwrap().clone();
+                self.speed_tracker.record(*bytes_extracted);
             }
             _ => {}
         }
@@ -650,6 +752,7 @@ impl App {
         idx: usize,
         tx: &mpsc::UnboundedSender<AppMessage>,
     ) {
+        self.speed_tracker.reset();
         let entry = &self.entries[idx];
         let entry_name = entry.name.clone();
         let total_bytes = entry.uncompressed_size;
@@ -706,6 +809,7 @@ impl App {
 
     /// Spawn a batch extraction task for all toggled entries.
     fn start_batch_extraction(&mut self, tx: &mpsc::UnboundedSender<AppMessage>) {
+        self.speed_tracker.reset();
         let selected_entries: Vec<ArchiveEntry> = self
             .entries
             .iter()

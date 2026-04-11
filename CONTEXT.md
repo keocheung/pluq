@@ -3,7 +3,7 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 3 — Interactive TUI + Google Drive Provider.
-* **Current Active Task:** SESSION_PLAN Step 1 — Tab Review Mode
+* **Current Active Task:** SESSION_PLAN Step 2 — Speed + ETA during extraction
 * **Baseline:** 236 tests pass, 14 ignored. Clippy clean.
 
 

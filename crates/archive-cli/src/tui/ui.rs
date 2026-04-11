@@ -347,14 +347,29 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 .ratio(ratio);
             frame.render_widget(gauge, chunks[3]);
 
+            let speed_str = app.speed_tracker.format_speed().unwrap_or_default();
+            let eta_str = if total_bytes > 0 {
+                app.speed_tracker.format_eta(total_bytes, bytes_extracted).unwrap_or_default()
+            } else {
+                String::new()
+            };
+
             let counter_text = if total_bytes > 0 {
-                format!(
+                let mut text = format!(
                     "  Extracted:  {} / {}",
                     crate::format_size(bytes_extracted),
-                    crate::format_size(total_bytes)
-                )
+                    crate::format_size(total_bytes),
+                );
+                if !speed_str.is_empty() {
+                    text.push_str(&format!("  —  {}  {}", speed_str, eta_str));
+                }
+                text
             } else {
-                format!("  Extracted:  {}", crate::format_size(bytes_extracted))
+                let mut text = format!("  Extracted:  {}", crate::format_size(bytes_extracted));
+                if !speed_str.is_empty() {
+                    text.push_str(&format!("  —  {}", speed_str));
+                }
+                text
             };
             frame.render_widget(Paragraph::new(counter_text), chunks[5]);
             frame.render_widget(Paragraph::new("  Esc to cancel  ·  q to quit"), chunks[7]);
@@ -407,14 +422,29 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 .ratio(ratio);
             frame.render_widget(gauge, chunks[3]);
 
+            let speed_str = app.speed_tracker.format_speed().unwrap_or_default();
+            let eta_str = if total_bytes > 0 {
+                app.speed_tracker.format_eta(total_bytes, bytes_extracted).unwrap_or_default()
+            } else {
+                String::new()
+            };
+
             let counter_text = if total_bytes > 0 {
-                format!(
+                let mut text = format!(
                     "  Extracted:  {} / {}",
                     crate::format_size(bytes_extracted),
                     crate::format_size(total_bytes),
-                )
+                );
+                if !speed_str.is_empty() {
+                    text.push_str(&format!("  —  {}  {}", speed_str, eta_str));
+                }
+                text
             } else {
-                format!("  Extracted:  {}", crate::format_size(bytes_extracted))
+                let mut text = format!("  Extracted:  {}", crate::format_size(bytes_extracted));
+                if !speed_str.is_empty() {
+                    text.push_str(&format!("  —  {}", speed_str));
+                }
+                text
             };
             frame.render_widget(Paragraph::new(counter_text), chunks[5]);
             frame.render_widget(Paragraph::new("  Esc to cancel  ·  q to quit"), chunks[7]);
