@@ -12,11 +12,43 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
 
     match &app.phase {
         AppPhase::Opening => {
-            let text = format!("Opening {}...", app.source);
-            let para = Paragraph::new(text)
-                .alignment(Alignment::Center)
-                .block(Block::default().borders(Borders::ALL).title("Archive Sniper"));
-            frame.render_widget(para, area);
+            let chunks = Layout::vertical([
+                Constraint::Length(1), // header
+                Constraint::Length(1), // separator
+                Constraint::Min(1),    // content
+                Constraint::Length(1), // separator
+                Constraint::Length(1), // footer
+            ])
+            .split(area);
+
+            // Header
+            let header = Paragraph::new(" Opening archive...")
+                .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+            frame.render_widget(header, chunks[0]);
+
+            // Separators
+            let sep = "─".repeat(area.width as usize);
+            let sep_style = Style::default().fg(Color::DarkGray);
+            frame.render_widget(Paragraph::new(sep.clone()).style(sep_style), chunks[1]);
+            frame.render_widget(Paragraph::new(sep).style(sep_style), chunks[3]);
+
+            // Content
+            let content_chunks = Layout::vertical([
+                Constraint::Min(0),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
+            .split(chunks[2]);
+
+            let source_text = Paragraph::new(format!(" {}", app.source))
+                .style(Style::default().fg(Color::DarkGray))
+                .alignment(Alignment::Center);
+            frame.render_widget(source_text, content_chunks[1]);
+
+            // Footer
+            let footer = Paragraph::new(" Please wait...")
+                .style(Style::default().fg(Color::DarkGray));
+            frame.render_widget(footer, chunks[4]);
         }
         AppPhase::Scanning {
             total_bytes,
@@ -26,38 +58,50 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             let (total_bytes, bytes_scanned, entries_found) =
                 (*total_bytes, *bytes_scanned, *entries_found);
 
-            let outer = Block::default().borders(Borders::ALL).title("Archive Sniper");
-            let inner = outer.inner(area);
-            frame.render_widget(outer, area);
+            let chunks = Layout::vertical([
+                Constraint::Length(1), // header
+                Constraint::Length(1), // separator
+                Constraint::Min(1),    // content
+                Constraint::Length(1), // separator
+                Constraint::Length(1), // footer
+            ])
+            .split(area);
 
+            // Header
+            let header = Paragraph::new(" Scanning archive...")
+                .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+            frame.render_widget(header, chunks[0]);
+
+            // Separators
+            let sep = "─".repeat(area.width as usize);
+            let sep_style = Style::default().fg(Color::DarkGray);
+            frame.render_widget(Paragraph::new(sep.clone()).style(sep_style), chunks[1]);
+            frame.render_widget(Paragraph::new(sep).style(sep_style), chunks[3]);
+
+            // Content
             let ratio = if total_bytes > 0 {
                 (bytes_scanned as f64 / total_bytes as f64).clamp(0.0, 1.0)
             } else {
                 0.0
             };
 
-            let chunks = Layout::default()
+            let content_chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(1), // top padding
-                    Constraint::Length(1), // "Scanning archive..."
                     Constraint::Length(1), // spacing
                     Constraint::Length(1), // gauge
                     Constraint::Length(1), // spacing
                     Constraint::Length(1), // scanned counter
                     Constraint::Length(1), // found counter
                     Constraint::Min(1),    // fill
-                    Constraint::Length(1), // cancel hint
                 ])
-                .split(inner);
-
-            let title = Paragraph::new("Scanning archive...").alignment(Alignment::Center);
-            frame.render_widget(title, chunks[1]);
+                .split(chunks[2]);
 
             let gauge = Gauge::default()
-                .gauge_style(Style::default().fg(Color::Green))
+                .gauge_style(Style::default().fg(Color::Cyan))
                 .ratio(ratio);
-            frame.render_widget(gauge, chunks[3]);
+            frame.render_widget(gauge, content_chunks[2]);
 
             let scanned_text = if total_bytes > 0 {
                 format!(
@@ -68,16 +112,19 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             } else {
                 format!("  Scanned:  {}", crate::format_size(bytes_scanned))
             };
-            frame.render_widget(Paragraph::new(scanned_text), chunks[5]);
+            frame.render_widget(Paragraph::new(scanned_text), content_chunks[4]);
 
             let found_text = format!(
                 "  Found:    {} file{}",
                 entries_found,
                 if entries_found == 1 { "" } else { "s" }
             );
-            frame.render_widget(Paragraph::new(found_text), chunks[6]);
+            frame.render_widget(Paragraph::new(found_text), content_chunks[5]);
 
-            frame.render_widget(Paragraph::new("  Press q to cancel"), chunks[8]);
+            // Footer
+            let footer = Paragraph::new("  Press q to cancel")
+                .style(Style::default().fg(Color::DarkGray));
+            frame.render_widget(footer, chunks[4]);
         }
         AppPhase::Browsing => {
             if app.in_review_mode {
@@ -210,7 +257,24 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                     .visible_items
                     .iter()
                     .map(|item| {
-                        let is_toggled = app.toggled.contains(&item.full_path);
+                        let is_toggled = if item.is_directory {
+                            let prefix = format!("{}/", item.full_path);
+                            let mut has_children = false;
+                            let mut all_toggled = true;
+                            
+                            for e in app.entries.iter() {
+                                if !e.is_directory && e.name.starts_with(&prefix) {
+                                    has_children = true;
+                                    if !app.toggled.contains(&e.name) {
+                                        all_toggled = false;
+                                        break; // Short-circuit, no need to check the rest
+                                    }
+                                }
+                            }
+                            has_children && all_toggled
+                        } else {
+                            app.toggled.contains(&item.full_path)
+                        };
                         let marker = if is_toggled { "+" } else { " " };
 
                         let size_str = if item.is_directory {
@@ -260,14 +324,28 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         } => {
             let (entry_name, dict_size) = (entry_name.clone(), *dict_size);
 
-            let outer = Block::default()
-                .borders(Borders::ALL)
-                .title("Large Dictionary Warning")
-                .border_style(Style::default().fg(Color::Yellow));
-            let inner = outer.inner(area);
-            frame.render_widget(outer, area);
+            let chunks = Layout::vertical([
+                Constraint::Length(1), // header
+                Constraint::Length(1), // separator
+                Constraint::Min(1),    // content
+                Constraint::Length(1), // separator
+                Constraint::Length(1), // footer
+            ])
+            .split(area);
 
-            let chunks = Layout::default()
+            // Header
+            let header = Paragraph::new(" Large Dictionary Warning")
+                .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+            frame.render_widget(header, chunks[0]);
+
+            // Separators
+            let sep = "─".repeat(area.width as usize);
+            let sep_style = Style::default().fg(Color::DarkGray);
+            frame.render_widget(Paragraph::new(sep.clone()).style(sep_style), chunks[1]);
+            frame.render_widget(Paragraph::new(sep).style(sep_style), chunks[3]);
+
+            // Content
+            let content_chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(1), // top padding
@@ -278,18 +356,17 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                     Constraint::Length(1), // spacing
                     Constraint::Length(1), // dict size
                     Constraint::Min(1),    // fill
-                    Constraint::Length(1), // action hints
                 ])
-                .split(inner);
+                .split(chunks[2]);
 
             frame.render_widget(
                 Paragraph::new(format!("  {}", entry_name)),
-                chunks[1],
+                content_chunks[1],
             );
             frame.render_widget(
                 Paragraph::new("  This file uses a large compression dictionary.")
                     .style(Style::default().fg(Color::Yellow)),
-                chunks[3],
+                content_chunks[3],
             );
             frame.render_widget(
                 Paragraph::new(format!(
@@ -297,16 +374,17 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                     crate::format_size(dict_size)
                 ))
                 .style(Style::default().fg(Color::Yellow)),
-                chunks[4],
+                content_chunks[4],
             );
             frame.render_widget(
                 Paragraph::new(format!("  Dictionary size: {}", crate::format_size(dict_size))),
-                chunks[6],
+                content_chunks[6],
             );
-            frame.render_widget(
-                Paragraph::new("  Enter to proceed  ·  Esc to cancel"),
-                chunks[8],
-            );
+
+            // Footer
+            let footer = Paragraph::new("  Enter to proceed  ·  Esc to cancel")
+                .style(Style::default().fg(Color::DarkGray));
+            frame.render_widget(footer, chunks[4]);
         }
         AppPhase::PasswordPrompt { .. } => {
             let chunks = Layout::vertical([
@@ -356,17 +434,34 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             let (entry_name, total_bytes, bytes_extracted) =
                 (entry_name.clone(), *total_bytes, *bytes_extracted);
 
-            let outer = Block::default().borders(Borders::ALL).title("Extracting");
-            let inner = outer.inner(area);
-            frame.render_widget(outer, area);
+            let chunks = Layout::vertical([
+                Constraint::Length(1), // header
+                Constraint::Length(1), // separator
+                Constraint::Min(1),    // content
+                Constraint::Length(1), // separator
+                Constraint::Length(1), // footer
+            ])
+            .split(area);
 
+            // Header
+            let header = Paragraph::new(" Extracting")
+                .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+            frame.render_widget(header, chunks[0]);
+
+            // Separators
+            let sep = "─".repeat(area.width as usize);
+            let sep_style = Style::default().fg(Color::DarkGray);
+            frame.render_widget(Paragraph::new(sep.clone()).style(sep_style), chunks[1]);
+            frame.render_widget(Paragraph::new(sep).style(sep_style), chunks[3]);
+
+            // Content
             let ratio = if total_bytes > 0 {
                 (bytes_extracted as f64 / total_bytes as f64).clamp(0.0, 1.0)
             } else {
                 0.0
             };
 
-            let chunks = Layout::default()
+            let content_chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(1), // top padding
@@ -376,16 +471,15 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                     Constraint::Length(1), // spacing
                     Constraint::Length(1), // byte counter
                     Constraint::Min(1),    // fill
-                    Constraint::Length(1), // cancel hint
                 ])
-                .split(inner);
+                .split(chunks[2]);
 
-            frame.render_widget(Paragraph::new(format!("  {}", entry_name)), chunks[1]);
+            frame.render_widget(Paragraph::new(format!("  {}", entry_name)), content_chunks[1]);
 
             let gauge = Gauge::default()
                 .gauge_style(Style::default().fg(Color::Cyan))
                 .ratio(ratio);
-            frame.render_widget(gauge, chunks[3]);
+            frame.render_widget(gauge, content_chunks[3]);
 
             let speed_str = app.speed_tracker.format_speed().unwrap_or_default();
             let eta_str = if total_bytes > 0 {
@@ -411,8 +505,12 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 }
                 text
             };
-            frame.render_widget(Paragraph::new(counter_text), chunks[5]);
-            frame.render_widget(Paragraph::new("  Esc to cancel  ·  q to quit"), chunks[7]);
+            frame.render_widget(Paragraph::new(counter_text), content_chunks[5]);
+
+            // Footer
+            let footer = Paragraph::new("  Esc to cancel  ·  q to quit")
+                .style(Style::default().fg(Color::DarkGray));
+            frame.render_widget(footer, chunks[4]);
         }
         AppPhase::ExtractingBatch {
             total_files,
@@ -425,18 +523,35 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 (*total_files, *files_done, *total_bytes, *bytes_extracted);
             let current_entry = current_entry.clone();
 
-            let title = format!("Extracting ({} of {} files)", files_done, total_files);
-            let outer = Block::default().borders(Borders::ALL).title(title);
-            let inner = outer.inner(area);
-            frame.render_widget(outer, area);
+            let chunks = Layout::vertical([
+                Constraint::Length(1), // header
+                Constraint::Length(1), // separator
+                Constraint::Min(1),    // content
+                Constraint::Length(1), // separator
+                Constraint::Length(1), // footer
+            ])
+            .split(area);
 
+            // Header
+            let title = format!(" Extracting ({} of {} files)", files_done, total_files);
+            let header = Paragraph::new(title)
+                .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+            frame.render_widget(header, chunks[0]);
+
+            // Separators
+            let sep = "─".repeat(area.width as usize);
+            let sep_style = Style::default().fg(Color::DarkGray);
+            frame.render_widget(Paragraph::new(sep.clone()).style(sep_style), chunks[1]);
+            frame.render_widget(Paragraph::new(sep).style(sep_style), chunks[3]);
+
+            // Content
             let ratio = if total_bytes > 0 {
                 (bytes_extracted as f64 / total_bytes as f64).clamp(0.0, 1.0)
             } else {
                 0.0
             };
 
-            let chunks = Layout::default()
+            let content_chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(1), // top padding
@@ -446,21 +561,20 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                     Constraint::Length(1), // spacing
                     Constraint::Length(1), // byte counter
                     Constraint::Min(1),    // fill
-                    Constraint::Length(1), // cancel hint
                 ])
-                .split(inner);
+                .split(chunks[2]);
 
             let entry_label = if current_entry.is_empty() {
                 "  Preparing...".to_string()
             } else {
                 format!("  {}", current_entry)
             };
-            frame.render_widget(Paragraph::new(entry_label), chunks[1]);
+            frame.render_widget(Paragraph::new(entry_label), content_chunks[1]);
 
             let gauge = Gauge::default()
                 .gauge_style(Style::default().fg(Color::Cyan))
                 .ratio(ratio);
-            frame.render_widget(gauge, chunks[3]);
+            frame.render_widget(gauge, content_chunks[3]);
 
             let speed_str = app.speed_tracker.format_speed().unwrap_or_default();
             let eta_str = if total_bytes > 0 {
@@ -486,24 +600,45 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 }
                 text
             };
-            frame.render_widget(Paragraph::new(counter_text), chunks[5]);
-            frame.render_widget(Paragraph::new("  Esc to cancel  ·  q to quit"), chunks[7]);
+            frame.render_widget(Paragraph::new(counter_text), content_chunks[5]);
+
+            // Footer
+            let footer = Paragraph::new("  Esc to cancel  ·  q to quit")
+                .style(Style::default().fg(Color::DarkGray));
+            frame.render_widget(footer, chunks[4]);
         }
         AppPhase::Error(msg) => {
             let msg = msg.clone();
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Min(1), Constraint::Length(1)])
-                .split(area);
+            let chunks = Layout::vertical([
+                Constraint::Length(1), // header
+                Constraint::Length(1), // separator
+                Constraint::Min(1),    // content
+                Constraint::Length(1), // separator
+                Constraint::Length(1), // footer
+            ])
+            .split(area);
 
+            // Header
+            let header = Paragraph::new(" Error")
+                .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD));
+            frame.render_widget(header, chunks[0]);
+
+            // Separators
+            let sep = "─".repeat(area.width as usize);
+            let sep_style = Style::default().fg(Color::DarkGray);
+            frame.render_widget(Paragraph::new(sep.clone()).style(sep_style), chunks[1]);
+            frame.render_widget(Paragraph::new(sep).style(sep_style), chunks[3]);
+
+            // Content
             let para = Paragraph::new(msg)
                 .style(Style::default().fg(Color::Red))
-                .alignment(Alignment::Center)
-                .block(Block::default().borders(Borders::ALL).title("Error"));
-            frame.render_widget(para, chunks[0]);
+                .alignment(Alignment::Center);
+            frame.render_widget(para, chunks[2]);
 
-            let hint = Paragraph::new("Press q to quit");
-            frame.render_widget(hint, chunks[1]);
+            // Footer
+            let footer = Paragraph::new(" Press q to quit")
+                .style(Style::default().fg(Color::DarkGray));
+            frame.render_widget(footer, chunks[4]);
         }
     }
 
@@ -575,6 +710,8 @@ fn draw_help_popup(frame: &mut Frame<'_>, area: ratatui::layout::Rect) {
     let help_text = "
  l / Right: Dive in
  h / Left:  Back out
+ g / Home:  Jump to top
+ G / End:   Jump to bottom
  Space:     Toggle selection
  a:         Toggle all in folder
  Tab:       Review selection
@@ -596,7 +733,7 @@ fn draw_help_popup(frame: &mut Frame<'_>, area: ratatui::layout::Rect) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(0),
-            Constraint::Length(13),
+            Constraint::Length(15),
             Constraint::Min(0),
         ])
         .split(area)[1];

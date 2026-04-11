@@ -74,11 +74,11 @@ These commands define the CLI's public API. The TUI is the default entry point.
 ### Phase 3c: Style Guide Compliance & Home Screen
 > Migrate all TUI screens to the canonical design system defined in `docs/TUI_STYLE_GUIDE.md`.
 
-- [ ] **Migrate non-browse screens to borderless layout** — Opening, Scanning, Extracting, ExtractingBatch, ConfirmExtract, and Error phases still use bordered `Block`. Migrate to the Content Screen layout (5-row, `─` separators).
-- [ ] **Fix scanning gauge color** — Change from `Color::Green` to `accent` (Cyan) per palette.
-- [ ] **Esc never quits** — Esc should be "back one level" only; remove quit-on-Esc-at-root. `q` is the sole exit.
-- [ ] **Directory selection** — `Space` on a directory should toggle-select all its files recursively.
-- [ ] **Document `g`/`G`/`Home`/`End` in help popup** — These bindings exist in code but aren't shown in `?` overlay.
+- [x] **Migrate non-browse screens to borderless layout** — Opening, Scanning, Extracting, ExtractingBatch, ConfirmExtract, and Error phases still use bordered `Block`. Migrate to the Content Screen layout (5-row, `─` separators).
+- [x] **Fix scanning gauge color** — Change from `Color::Green` to `accent` (Cyan) per palette.
+- [x] **Esc never quits** — Esc should be "back one level" only; remove quit-on-Esc-at-root. `q` is the sole exit.
+- [x] **Directory selection** — `Space` on a directory should toggle-select all its files recursively.
+- [x] **Document `g`/`G`/`Home`/`End` in help popup** — These bindings exist in code but aren't shown in `?` overlay.
 - [ ] **Extraction strategy modal** — Pre-extraction destination picker (archive-name folder / here / custom name). See zen-sniper spec Section 6.1.
 - [ ] **Home screen** — Entry point with URL/path input, bookmarks, and recents (see `TUI_VISION.md` and home-screen spec).
 

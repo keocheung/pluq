@@ -731,8 +731,7 @@ impl App {
                     self.is_filtering = false;
                     self.rebuild_visible_items(target.as_deref());
                 } else {
-                    debug!("Esc at root → quit");
-                    self.should_quit = true;
+                    // At root — Esc is a no-op. Only `q` quits.
                 }
             }
             KeyCode::Up | KeyCode::Char('k') => {
@@ -762,7 +761,27 @@ impl App {
             KeyCode::Char(' ') => {
                 if matches!(self.phase, AppPhase::Browsing) && !self.visible_items.is_empty() {
                     let item = &self.visible_items[self.selected];
-                    if !item.is_directory {
+                    if item.is_directory {
+                        // Recursively toggle all files under this directory.
+                        let prefix = format!("{}/", item.full_path);
+                        let child_paths: Vec<String> = self
+                            .entries
+                            .iter()
+                            .filter(|e| !e.is_directory && e.name.starts_with(&prefix))
+                            .map(|e| e.name.clone())
+                            .collect();
+                        let all_selected = !child_paths.is_empty()
+                            && child_paths.iter().all(|p| self.toggled.contains(p));
+                        if all_selected {
+                            for p in &child_paths {
+                                self.toggled.remove(p);
+                            }
+                        } else {
+                            for p in child_paths {
+                                self.toggled.insert(p);
+                            }
+                        }
+                    } else {
                         let path = item.full_path.clone();
                         if self.toggled.contains(&path) {
                             self.toggled.remove(&path);
