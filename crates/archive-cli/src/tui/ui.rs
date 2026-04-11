@@ -80,103 +80,178 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             frame.render_widget(Paragraph::new("  Press q to cancel"), chunks[8]);
         }
         AppPhase::Browsing => {
-            let chunks = Layout::vertical([
-                Constraint::Length(1), // breadcrumb header
-                Constraint::Length(1), // separator
-                Constraint::Min(1),    // file list
-                Constraint::Length(1), // separator
-                Constraint::Length(1), // footer / details bar
-            ])
-            .split(area);
+            if app.in_review_mode {
+                // Build the review list from toggled entries.
+                let mut review_items: Vec<&archive::ArchiveEntry> = app
+                    .entries
+                    .iter()
+                    .filter(|e| app.toggled.contains(&e.name))
+                    .collect();
+                review_items
+                    .sort_by_key(|a| a.name.to_lowercase());
 
-            // Build breadcrumb: " archive.zip / photos / vacation /"
-            let filename = app
-                .source
-                .rsplit('/')
-                .next()
-                .or_else(|| app.source.rsplit('\\').next())
-                .unwrap_or(&app.source);
-            let filename = filename.split('?').next().unwrap_or(filename);
+                // Use the same layout as browsing.
+                let chunks = Layout::vertical([
+                    Constraint::Length(1), // header
+                    Constraint::Length(1), // separator
+                    Constraint::Min(1),    // file list
+                    Constraint::Length(1), // separator
+                    Constraint::Length(1), // footer
+                ])
+                .split(area);
 
-            let mut breadcrumb = format!(" {}", filename);
-            for segment in &app.current_path {
-                breadcrumb.push_str(" / ");
-                breadcrumb.push_str(segment);
-            }
-            if !app.current_path.is_empty() {
-                breadcrumb.push_str(" /");
-            }
+                // Header
+                let header = Paragraph::new(" Review Selection (Tab/Esc to return)")
+                    .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+                frame.render_widget(header, chunks[0]);
 
-            let header_text = if app.is_filtering {
-                format!("{}  [Filter: \"{}-\"]", breadcrumb, app.filter_query)
-            } else if !app.filter_query.is_empty() {
-                format!("{}  [Filter: \"{}\"]", breadcrumb, app.filter_query)
-            } else {
-                breadcrumb
-            };
+                // Separators
+                let sep = "─".repeat(area.width as usize);
+                let sep_style = Style::default().fg(Color::DarkGray);
+                frame.render_widget(Paragraph::new(sep.clone()).style(sep_style), chunks[1]);
+                frame.render_widget(Paragraph::new(sep).style(sep_style), chunks[3]);
 
-            let header = Paragraph::new(header_text)
-                .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
-            frame.render_widget(header, chunks[0]);
-
-            let sep = "─".repeat(area.width as usize);
-            let separator_style = Style::default().fg(Color::DarkGray);
-            frame.render_widget(
-                Paragraph::new(sep.clone()).style(separator_style),
-                chunks[1],
-            );
-            frame.render_widget(
-                Paragraph::new(sep).style(separator_style),
-                chunks[3],
-            );
-
-            let rows: Vec<Row> = app
-                .visible_items
-                .iter()
-                .map(|item| {
-                    let is_toggled = app.toggled.contains(&item.full_path);
-                    let marker = if is_toggled { "+" } else { " " };
-
-                    let size_str = if item.is_directory {
-                        String::new()
-                    } else {
-                        crate::format_size(item.uncompressed_size)
-                    };
-
-                    let display_name = if item.is_directory {
-                        format!("{}/", item.name)
-                    } else {
-                        item.name.clone()
-                    };
-
-                    let name_style = if item.is_directory {
-                        Style::default().fg(Color::Cyan)
-                    } else {
-                        Style::default().fg(Color::White)
-                    };
-
-                    Row::new([
-                        Cell::from(format!(" {}", size_str))
+                // Table rows
+                let rows: Vec<Row> = review_items
+                    .iter()
+                    .map(|entry| {
+                        Row::new([
+                            Cell::from(format!(
+                                " {}",
+                                crate::format_size(entry.uncompressed_size)
+                            ))
                             .style(Style::default().fg(Color::DarkGray)),
-                        Cell::from(format!("{} {}", marker, display_name)).style(name_style),
-                    ])
-                })
-                .collect();
+                            Cell::from(format!(" {}", entry.name))
+                                .style(Style::default().fg(Color::White)),
+                        ])
+                    })
+                    .collect();
 
-            let highlight_style = Style::default()
-                .bg(Color::Cyan)
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD);
+                let highlight_style = Style::default()
+                    .bg(Color::Cyan)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD);
 
-            let table = Table::new(
-                rows,
-                [Constraint::Length(10), Constraint::Min(1)],
-            )
-            .row_highlight_style(highlight_style);
+                let table = Table::new(rows, [Constraint::Length(10), Constraint::Min(1)])
+                    .row_highlight_style(highlight_style);
 
-            frame.render_stateful_widget(table, chunks[2], &mut app.table_state);
+                // Use a temporary TableState for the review view.
+                let mut review_state = ratatui::widgets::TableState::default();
+                review_state.select(if review_items.is_empty() {
+                    None
+                } else {
+                    Some(app.review_selected)
+                });
+                frame.render_stateful_widget(table, chunks[2], &mut review_state);
 
-            draw_footer(frame, app, chunks[4]);
+                // Footer
+                let total_size: u64 =
+                    review_items.iter().map(|e| e.uncompressed_size).sum();
+                let n = review_items.len();
+                let footer_text = format!(
+                    " [ {} file{} — {} ]  Space deselect  Enter extract  Tab return",
+                    n,
+                    if n == 1 { "" } else { "s" },
+                    crate::format_size(total_size),
+                );
+                let footer =
+                    Paragraph::new(footer_text).style(Style::default().fg(Color::DarkGray));
+                frame.render_widget(footer, chunks[4]);
+            } else {
+                let chunks = Layout::vertical([
+                    Constraint::Length(1), // breadcrumb header
+                    Constraint::Length(1), // separator
+                    Constraint::Min(1),    // file list
+                    Constraint::Length(1), // separator
+                    Constraint::Length(1), // footer / details bar
+                ])
+                .split(area);
+
+                // Build breadcrumb: " archive.zip / photos / vacation /"
+                let filename = app
+                    .source
+                    .rsplit('/')
+                    .next()
+                    .or_else(|| app.source.rsplit('\\').next())
+                    .unwrap_or(&app.source);
+                let filename = filename.split('?').next().unwrap_or(filename);
+
+                let mut breadcrumb = format!(" {}", filename);
+                for segment in &app.current_path {
+                    breadcrumb.push_str(" / ");
+                    breadcrumb.push_str(segment);
+                }
+                if !app.current_path.is_empty() {
+                    breadcrumb.push_str(" /");
+                }
+
+                let header_text = if app.is_filtering {
+                    format!("{}  [Filter: \"{}-\"]", breadcrumb, app.filter_query)
+                } else if !app.filter_query.is_empty() {
+                    format!("{}  [Filter: \"{}\"]", breadcrumb, app.filter_query)
+                } else {
+                    breadcrumb
+                };
+
+                let header = Paragraph::new(header_text).style(
+                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                );
+                frame.render_widget(header, chunks[0]);
+
+                let sep = "─".repeat(area.width as usize);
+                let separator_style = Style::default().fg(Color::DarkGray);
+                frame.render_widget(
+                    Paragraph::new(sep.clone()).style(separator_style),
+                    chunks[1],
+                );
+                frame.render_widget(Paragraph::new(sep).style(separator_style), chunks[3]);
+
+                let rows: Vec<Row> = app
+                    .visible_items
+                    .iter()
+                    .map(|item| {
+                        let is_toggled = app.toggled.contains(&item.full_path);
+                        let marker = if is_toggled { "+" } else { " " };
+
+                        let size_str = if item.is_directory {
+                            String::new()
+                        } else {
+                            crate::format_size(item.uncompressed_size)
+                        };
+
+                        let display_name = if item.is_directory {
+                            format!("{}/", item.name)
+                        } else {
+                            item.name.clone()
+                        };
+
+                        let name_style = if item.is_directory {
+                            Style::default().fg(Color::Cyan)
+                        } else {
+                            Style::default().fg(Color::White)
+                        };
+
+                        Row::new([
+                            Cell::from(format!(" {}", size_str))
+                                .style(Style::default().fg(Color::DarkGray)),
+                            Cell::from(format!("{} {}", marker, display_name))
+                                .style(name_style),
+                        ])
+                    })
+                    .collect();
+
+                let highlight_style = Style::default()
+                    .bg(Color::Cyan)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD);
+
+                let table = Table::new(rows, [Constraint::Length(10), Constraint::Min(1)])
+                    .row_highlight_style(highlight_style);
+
+                frame.render_stateful_widget(table, chunks[2], &mut app.table_state);
+
+                draw_footer(frame, app, chunks[4]);
+            }
         }
         AppPhase::ConfirmExtract {
             entry_name,
@@ -432,6 +507,7 @@ fn draw_help_popup(frame: &mut Frame<'_>, area: ratatui::layout::Rect) {
  h / Left:  Back out
  Space:     Toggle selection
  a:         Toggle all in folder
+ Tab:       Review selection
  Enter:     Extract selection
  /:         Filter items
  ?:         Toggle this help
@@ -450,7 +526,7 @@ fn draw_help_popup(frame: &mut Frame<'_>, area: ratatui::layout::Rect) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(0),
-            Constraint::Length(12),
+            Constraint::Length(13),
             Constraint::Min(0),
         ])
         .split(area)[1];

@@ -113,6 +113,10 @@ pub struct App {
     pub filter_query: String,
     /// Whether the user is currently typing into the filter.
     pub is_filtering: bool,
+    /// Whether the Tab Review mode is active (shows only selected files).
+    pub in_review_mode: bool,
+    /// Index of the highlighted item within the review list.
+    pub review_selected: usize,
 }
 
 impl App {
@@ -136,6 +140,8 @@ impl App {
             show_help: false,
             filter_query: String::new(),
             is_filtering: false,
+            in_review_mode: false,
+            review_selected: 0,
         }
     }
 
@@ -401,6 +407,58 @@ impl App {
             return;
         }
 
+        if self.in_review_mode {
+            match key.code {
+                KeyCode::Tab | KeyCode::Esc => {
+                    self.in_review_mode = false;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.review_selected = self.review_selected.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let count = self.toggled.len();
+                    if count > 0 {
+                        self.review_selected = (self.review_selected + 1).min(count - 1);
+                    }
+                }
+                KeyCode::Char(' ') => {
+                    // Remove the highlighted item from the selection.
+                    // Items are sorted alphabetically by full path in the UI.
+                    let mut review_items: Vec<String> = self
+                        .entries
+                        .iter()
+                        .filter(|e| self.toggled.contains(&e.name))
+                        .map(|e| e.name.clone())
+                        .collect();
+                    review_items.sort_by_key(|a| a.to_lowercase());
+
+                    if let Some(name) = review_items.get(self.review_selected) {
+                        self.toggled.remove(name);
+                    }
+                    // If selection is now empty, exit review mode.
+                    if self.toggled.is_empty() {
+                        self.in_review_mode = false;
+                    } else {
+                        // Clamp review_selected to the new count.
+                        let new_count = self.toggled.len();
+                        if self.review_selected >= new_count {
+                            self.review_selected = new_count.saturating_sub(1);
+                        }
+                    }
+                }
+                KeyCode::Enter => {
+                    // Start batch extraction from review mode.
+                    self.in_review_mode = false;
+                    self.start_batch_extraction(tx);
+                }
+                KeyCode::Char('q') => {
+                    self.should_quit = true;
+                }
+                _ => {}
+            }
+            return;
+        }
+
         match key.code {
             KeyCode::Char('q') => {
                 if matches!(
@@ -523,6 +581,12 @@ impl App {
             KeyCode::Char('?') => {
                 if matches!(self.phase, AppPhase::Browsing) {
                     self.show_help = !self.show_help;
+                }
+            }
+            KeyCode::Tab => {
+                if matches!(self.phase, AppPhase::Browsing) && !self.toggled.is_empty() {
+                    self.in_review_mode = true;
+                    self.review_selected = 0;
                 }
             }
             KeyCode::Char('/') => {
