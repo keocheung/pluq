@@ -79,7 +79,7 @@ These commands define the CLI's public API. The TUI is the default entry point.
 - [x] **Esc never quits** — Esc should be "back one level" only; remove quit-on-Esc-at-root. `q` is the sole exit.
 - [x] **Directory selection** — `Space` on a directory should toggle-select all its files recursively.
 - [x] **Document `g`/`G`/`Home`/`End` in help popup** — These bindings exist in code but aren't shown in `?` overlay.
-- [ ] **Extraction strategy modal** — Pre-extraction destination picker (archive-name folder / here / custom name). See zen-sniper spec Section 6.1.
+- [x] **Extraction strategy modal** — Pre-extraction destination picker (archive-name folder / here / custom name). See zen-sniper spec Section 6.1.
 - [ ] **Home screen** — Entry point with URL/path input, bookmarks, and recents (see `TUI_VISION.md` and home-screen spec).
 
 ### Phase 4: Cloud Provider API Readers

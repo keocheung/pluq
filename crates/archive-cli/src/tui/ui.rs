@@ -1,6 +1,6 @@
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Direction, Layout},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     widgets::{Block, Borders, Cell, Clear, Gauge, Paragraph, Row, Table},
 };
@@ -128,193 +128,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
         AppPhase::Browsing => {
             if app.in_review_mode {
-                // Build the review list from toggled entries.
-                let mut review_items: Vec<&archive::ArchiveEntry> = app
-                    .entries
-                    .iter()
-                    .filter(|e| app.toggled.contains(&e.name))
-                    .collect();
-                review_items
-                    .sort_by_key(|a| a.name.to_lowercase());
-
-                // Use the same layout as browsing.
-                let chunks = Layout::vertical([
-                    Constraint::Length(1), // header
-                    Constraint::Length(1), // separator
-                    Constraint::Min(1),    // file list
-                    Constraint::Length(1), // separator
-                    Constraint::Length(1), // footer
-                ])
-                .split(area);
-
-                // Header
-                let header = Paragraph::new(" Review Selection (Tab/Esc to return)")
-                    .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
-                frame.render_widget(header, chunks[0]);
-
-                // Separators
-                let sep = "─".repeat(area.width as usize);
-                let sep_style = Style::default().fg(Color::DarkGray);
-                frame.render_widget(Paragraph::new(sep.clone()).style(sep_style), chunks[1]);
-                frame.render_widget(Paragraph::new(sep).style(sep_style), chunks[3]);
-
-                // Table rows
-                let rows: Vec<Row> = review_items
-                    .iter()
-                    .map(|entry| {
-                        Row::new([
-                            Cell::from(format!(
-                                " {}",
-                                crate::format_size(entry.uncompressed_size)
-                            ))
-                            .style(Style::default().fg(Color::DarkGray)),
-                            Cell::from(format!(" {}", entry.name))
-                                .style(Style::default().fg(Color::White)),
-                        ])
-                    })
-                    .collect();
-
-                let highlight_style = Style::default()
-                    .bg(Color::Cyan)
-                    .fg(Color::Black)
-                    .add_modifier(Modifier::BOLD);
-
-                let table = Table::new(rows, [Constraint::Length(10), Constraint::Min(1)])
-                    .row_highlight_style(highlight_style);
-
-                // Use a temporary TableState for the review view.
-                let mut review_state = ratatui::widgets::TableState::default();
-                review_state.select(if review_items.is_empty() {
-                    None
-                } else {
-                    Some(app.review_selected)
-                });
-                frame.render_stateful_widget(table, chunks[2], &mut review_state);
-
-                // Footer
-                let total_size: u64 =
-                    review_items.iter().map(|e| e.uncompressed_size).sum();
-                let n = review_items.len();
-                let footer_text = format!(
-                    " [ {} file{} — {} ]  Space deselect  Enter extract  Tab return",
-                    n,
-                    if n == 1 { "" } else { "s" },
-                    crate::format_size(total_size),
-                );
-                let footer =
-                    Paragraph::new(footer_text).style(Style::default().fg(Color::DarkGray));
-                frame.render_widget(footer, chunks[4]);
+                draw_review(frame, app, area);
             } else {
-                let chunks = Layout::vertical([
-                    Constraint::Length(1), // breadcrumb header
-                    Constraint::Length(1), // separator
-                    Constraint::Min(1),    // file list
-                    Constraint::Length(1), // separator
-                    Constraint::Length(1), // footer / details bar
-                ])
-                .split(area);
-
-                // Build breadcrumb: " archive.zip / photos / vacation /"
-                let filename = app
-                    .source
-                    .rsplit('/')
-                    .next()
-                    .or_else(|| app.source.rsplit('\\').next())
-                    .unwrap_or(&app.source);
-                let filename = filename.split('?').next().unwrap_or(filename);
-
-                let mut breadcrumb = format!(" {}", filename);
-                for segment in &app.current_path {
-                    breadcrumb.push_str(" / ");
-                    breadcrumb.push_str(segment);
-                }
-                if !app.current_path.is_empty() {
-                    breadcrumb.push_str(" /");
-                }
-
-                let header_text = if app.is_filtering {
-                    format!("{}  [Filter: \"{}-\"]", breadcrumb, app.filter_query)
-                } else if !app.filter_query.is_empty() {
-                    format!("{}  [Filter: \"{}\"]", breadcrumb, app.filter_query)
-                } else {
-                    breadcrumb
-                };
-
-                let header = Paragraph::new(header_text).style(
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-                );
-                frame.render_widget(header, chunks[0]);
-
-                let sep = "─".repeat(area.width as usize);
-                let separator_style = Style::default().fg(Color::DarkGray);
-                frame.render_widget(
-                    Paragraph::new(sep.clone()).style(separator_style),
-                    chunks[1],
-                );
-                frame.render_widget(Paragraph::new(sep).style(separator_style), chunks[3]);
-
-                let rows: Vec<Row> = app
-                    .visible_items
-                    .iter()
-                    .map(|item| {
-                        let is_toggled = if item.is_directory {
-                            let prefix = format!("{}/", item.full_path);
-                            let mut has_children = false;
-                            let mut all_toggled = true;
-                            
-                            for e in app.entries.iter() {
-                                if !e.is_directory && e.name.starts_with(&prefix) {
-                                    has_children = true;
-                                    if !app.toggled.contains(&e.name) {
-                                        all_toggled = false;
-                                        break; // Short-circuit, no need to check the rest
-                                    }
-                                }
-                            }
-                            has_children && all_toggled
-                        } else {
-                            app.toggled.contains(&item.full_path)
-                        };
-                        let marker = if is_toggled { "+" } else { " " };
-
-                        let size_str = if item.is_directory {
-                            String::new()
-                        } else {
-                            crate::format_size(item.uncompressed_size)
-                        };
-
-                        let display_name = if item.is_directory {
-                            format!("{}/", item.name)
-                        } else {
-                            item.name.clone()
-                        };
-
-                        let name_style = if item.is_directory {
-                            Style::default().fg(Color::Cyan)
-                        } else {
-                            Style::default().fg(Color::White)
-                        };
-
-                        Row::new([
-                            Cell::from(format!(" {}", size_str))
-                                .style(Style::default().fg(Color::DarkGray)),
-                            Cell::from(format!("{} {}", marker, display_name))
-                                .style(name_style),
-                        ])
-                    })
-                    .collect();
-
-                let highlight_style = Style::default()
-                    .bg(Color::Cyan)
-                    .fg(Color::Black)
-                    .add_modifier(Modifier::BOLD);
-
-                let table = Table::new(rows, [Constraint::Length(10), Constraint::Min(1)])
-                    .row_highlight_style(highlight_style);
-
-                frame.render_stateful_widget(table, chunks[2], &mut app.table_state);
-
-                draw_footer(frame, app, chunks[4]);
+                draw_browsing(frame, app, area);
             }
         }
         AppPhase::ConfirmExtract {
@@ -425,6 +241,30 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 .alignment(Alignment::Center)
                 .style(Style::default().fg(Color::DarkGray));
             frame.render_widget(hint, chunks[6]);
+        }
+        AppPhase::ExtractionStrategy {
+            selected,
+            editing_custom,
+            custom_input,
+            ..
+        } => {
+            let selected = *selected;
+            let editing_custom = *editing_custom;
+            let custom_input = custom_input.clone();
+            let archive_stem = app.archive_stem();
+
+            // Render the browse screen as backdrop (dimmed).
+            draw_browsing(frame, app, area);
+
+            // Draw the modal overlay.
+            draw_extraction_strategy_modal(
+                frame,
+                area,
+                selected,
+                editing_custom,
+                &custom_input,
+                &archive_stem,
+            );
         }
         AppPhase::Extracting {
             entry_name,
@@ -647,6 +487,278 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     }
 }
 
+fn draw_browsing(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let chunks = Layout::vertical([
+        Constraint::Length(1), // breadcrumb header
+        Constraint::Length(1), // separator
+        Constraint::Min(1),    // file list
+        Constraint::Length(1), // separator
+        Constraint::Length(1), // footer / details bar
+    ])
+    .split(area);
+
+    // Build breadcrumb: " archive.zip / photos / vacation /"
+    let filename = app
+        .source
+        .rsplit('/')
+        .next()
+        .or_else(|| app.source.rsplit('\\').next())
+        .unwrap_or(&app.source);
+    let filename = filename.split('?').next().unwrap_or(filename);
+
+    let mut breadcrumb = format!(" {}", filename);
+    for segment in &app.current_path {
+        breadcrumb.push_str(" / ");
+        breadcrumb.push_str(segment);
+    }
+    if !app.current_path.is_empty() {
+        breadcrumb.push_str(" /");
+    }
+
+    let header_text = if app.is_filtering || !app.filter_query.is_empty() {
+        format!("{}  [Filter: \"{}\"]", breadcrumb, app.filter_query)
+    } else {
+        breadcrumb
+    };
+
+    let header = Paragraph::new(header_text)
+        .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+    frame.render_widget(header, chunks[0]);
+
+    let sep = "─".repeat(area.width as usize);
+    let separator_style = Style::default().fg(Color::DarkGray);
+    frame.render_widget(Paragraph::new(sep.clone()).style(separator_style), chunks[1]);
+    frame.render_widget(Paragraph::new(sep).style(separator_style), chunks[3]);
+
+    let rows: Vec<Row> = app
+        .visible_items
+        .iter()
+        .map(|item| {
+            let is_toggled = if item.is_directory {
+                let prefix = format!("{}/", item.full_path);
+                let mut has_children = false;
+                let mut all_toggled = true;
+
+                for e in app.entries.iter() {
+                    if !e.is_directory && e.name.starts_with(&prefix) {
+                        has_children = true;
+                        if !app.toggled.contains(&e.name) {
+                            all_toggled = false;
+                            break; // Short-circuit, no need to check the rest
+                        }
+                    }
+                }
+                has_children && all_toggled
+            } else {
+                app.toggled.contains(&item.full_path)
+            };
+            let marker = if is_toggled { "+" } else { " " };
+
+            let size_str = if item.is_directory {
+                String::new()
+            } else {
+                crate::format_size(item.uncompressed_size)
+            };
+
+            let display_name = if item.is_directory {
+                format!("{}/", item.name)
+            } else {
+                item.name.clone()
+            };
+
+            let name_style = if item.is_directory {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::White)
+            };
+
+            Row::new([
+                Cell::from(format!(" {}", size_str)).style(Style::default().fg(Color::DarkGray)),
+                Cell::from(format!("{} {}", marker, display_name)).style(name_style),
+            ])
+        })
+        .collect();
+
+    let highlight_style = Style::default()
+        .bg(Color::Cyan)
+        .fg(Color::Black)
+        .add_modifier(Modifier::BOLD);
+
+    let table = Table::new(rows, [Constraint::Length(10), Constraint::Min(1)])
+        .row_highlight_style(highlight_style);
+
+    frame.render_stateful_widget(table, chunks[2], &mut app.table_state);
+
+    draw_footer(frame, app, chunks[4]);
+}
+
+fn draw_review(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    // Build the review list from toggled entries.
+    let mut review_items: Vec<&archive::ArchiveEntry> = app
+        .entries
+        .iter()
+        .filter(|e| app.toggled.contains(&e.name))
+        .collect();
+    review_items.sort_by_key(|a| a.name.to_lowercase());
+
+    // Use the same layout as browsing.
+    let chunks = Layout::vertical([
+        Constraint::Length(1), // header
+        Constraint::Length(1), // separator
+        Constraint::Min(1),    // file list
+        Constraint::Length(1), // separator
+        Constraint::Length(1), // footer
+    ])
+    .split(area);
+
+    // Header
+    let header = Paragraph::new(" Review Selection (Tab/Esc to return)")
+        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+    frame.render_widget(header, chunks[0]);
+
+    // Separators
+    let sep = "─".repeat(area.width as usize);
+    let sep_style = Style::default().fg(Color::DarkGray);
+    frame.render_widget(Paragraph::new(sep.clone()).style(sep_style), chunks[1]);
+    frame.render_widget(Paragraph::new(sep).style(sep_style), chunks[3]);
+
+    // Table rows
+    let rows: Vec<Row> = review_items
+        .iter()
+        .map(|entry| {
+            Row::new([
+                Cell::from(format!(" {}", crate::format_size(entry.uncompressed_size)))
+                    .style(Style::default().fg(Color::DarkGray)),
+                Cell::from(format!(" {}", entry.name)).style(Style::default().fg(Color::White)),
+            ])
+        })
+        .collect();
+
+    let highlight_style = Style::default()
+        .bg(Color::Cyan)
+        .fg(Color::Black)
+        .add_modifier(Modifier::BOLD);
+
+    let table = Table::new(rows, [Constraint::Length(10), Constraint::Min(1)])
+        .row_highlight_style(highlight_style);
+
+    // Use a temporary TableState for the review view.
+    let mut review_state = ratatui::widgets::TableState::default();
+    review_state.select(if review_items.is_empty() {
+        None
+    } else {
+        Some(app.review_selected)
+    });
+    frame.render_stateful_widget(table, chunks[2], &mut review_state);
+
+    // Footer
+    let total_size: u64 = review_items.iter().map(|e| e.uncompressed_size).sum();
+    let n = review_items.len();
+    let footer_text = format!(
+        " [ {} file{} — {} ]  Space deselect  Enter choice  Tab return",
+        n,
+        if n == 1 { "" } else { "s" },
+        crate::format_size(total_size),
+    );
+    let footer = Paragraph::new(footer_text).style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(footer, chunks[4]);
+}
+
+fn draw_extraction_strategy_modal(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    selected: usize,
+    editing_custom: bool,
+    custom_input: &str,
+    archive_stem: &str,
+) {
+    // Modal dimensions
+    let modal_width: u16 = 40;
+    let modal_height: u16 = 9; // title + blank + 3 options + blank + hint + border
+
+    // Center vertically
+    let popup_area = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(modal_height),
+            Constraint::Min(0),
+        ])
+        .split(area)[1];
+
+    // Center horizontally
+    let popup_area = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(modal_width),
+            Constraint::Min(0),
+        ])
+        .split(popup_area)[1];
+
+    // Clear the area behind the modal
+    frame.render_widget(Clear, popup_area);
+
+    // Border block
+    let block = Block::default()
+        .title(" Extract to ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    // Inner area (inside the border)
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    // Layout the inner content
+    let inner_chunks = Layout::vertical([
+        Constraint::Length(1), // top padding
+        Constraint::Length(1), // option 1: archive name
+        Constraint::Length(1), // option 2: here
+        Constraint::Length(1), // option 3: custom
+        Constraint::Length(1), // bottom padding
+        Constraint::Length(1), // hint line
+    ])
+    .split(inner);
+
+    // Styles
+    let highlight = Style::default()
+        .bg(Color::Cyan)
+        .fg(Color::Black)
+        .add_modifier(Modifier::BOLD);
+    let normal = Style::default().fg(Color::White);
+    let hint_style = Style::default().fg(Color::DarkGray);
+
+    // Option 1: Archive name folder
+    let opt1_label = format!(" {}/", archive_stem);
+    let padded1 = format!("{:<width$}", opt1_label, width = inner.width as usize);
+    let style1 = if selected == 0 { highlight } else { normal };
+    frame.render_widget(Paragraph::new(padded1).style(style1), inner_chunks[1]);
+
+    // Option 2: Here (CWD)
+    let opt2_label = " ./";
+    let padded2 = format!("{:<width$}", opt2_label, width = inner.width as usize);
+    let style2 = if selected == 1 { highlight } else { normal };
+    frame.render_widget(Paragraph::new(padded2).style(style2), inner_chunks[2]);
+
+    // Option 3: Custom
+    if editing_custom {
+        let input_text = format!(" {}/_", custom_input); // Trailing underscore as cursor
+        let padded = format!("{:<width$}", input_text, width = inner.width as usize);
+        frame.render_widget(Paragraph::new(padded).style(highlight), inner_chunks[3]);
+    } else {
+        let label = " [type a name]/";
+        let padded = format!("{:<width$}", label, width = inner.width as usize);
+        let style3 = if selected == 2 { highlight } else { hint_style };
+        frame.render_widget(Paragraph::new(padded).style(style3), inner_chunks[3]);
+    }
+
+    // Hint line
+    let hint = Paragraph::new(" Esc cancel · Enter confirm")
+        .style(hint_style)
+        .alignment(Alignment::Center);
+    frame.render_widget(hint, inner_chunks[5]);
+}
+
 fn draw_footer(frame: &mut Frame<'_>, app: &App, area: ratatui::layout::Rect) {
     let text = if let Some(msg) = &app.status_message {
         format!(" {}", msg)
@@ -672,13 +784,12 @@ fn draw_footer(frame: &mut Frame<'_>, app: &App, area: ratatui::layout::Rect) {
             .sum();
 
         format!(
-            " [ {} file{} — {} · Cost: {} ]  Enter extract  q quit",
+            " [ {} file{} — {} · Cost: {} ]  Enter choice  q quit",
             n,
             if n == 1 { "" } else { "s" },
             crate::format_size(total_size),
             crate::format_size(total_cost),
-        )
-    } else if let Some(item) = app.visible_items.get(app.selected) {
+        )    } else if let Some(item) = app.visible_items.get(app.selected) {
         if item.is_directory {
             format!(" {}/", item.full_path)
         } else {
@@ -715,12 +826,11 @@ fn draw_help_popup(frame: &mut Frame<'_>, area: ratatui::layout::Rect) {
  Space:     Toggle selection
  a:         Toggle all in folder
  Tab:       Review selection
- Enter:     Extract selection
+ Enter:     Choose destination
  /:         Filter items
  ?:         Toggle this help
  q:         Quit
 ";
-
     let block = Block::default()
         .title(" Help ")
         .borders(Borders::ALL)

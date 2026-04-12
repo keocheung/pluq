@@ -139,6 +139,17 @@ impl SpeedTracker {
     }
 }
 
+/// The three extraction destination strategies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExtractionStrategy {
+    /// Extract into a folder named after the archive (e.g., `photos.zip` → `./photos/`).
+    ArchiveName,
+    /// Extract directly into the current working directory.
+    Here,
+    /// Extract into a user-specified folder name.
+    Custom(String),
+}
+
 /// Current phase of the application.
 pub enum AppPhase {
     Opening,
@@ -160,6 +171,19 @@ pub enum AppPhase {
         /// `true` = batch extraction.
         is_batch: bool,
         /// For single-file extraction, the entry index to retry.
+        entry_index: Option<usize>,
+    },
+    /// Pre-extraction modal — user picks where to extract.
+    ExtractionStrategy {
+        /// Which strategy is currently highlighted (0 = ArchiveName, 1 = Here, 2 = Custom).
+        selected: usize,
+        /// Whether we're in text-input mode for the Custom option.
+        editing_custom: bool,
+        /// The text buffer for the custom folder name.
+        custom_input: String,
+        /// Whether this is a batch extraction (true) or single-file (false).
+        is_batch: bool,
+        /// For single-file extraction, the entry index.
         entry_index: Option<usize>,
     },
     Extracting {
@@ -231,6 +255,9 @@ pub struct App {
     pub password_input: String,
     /// Error message to show above the password prompt (e.g., "Wrong password").
     pub password_error: Option<String>,
+    /// The output directory chosen in the extraction strategy modal.
+    /// Persists across the password prompt so resume-after-password uses the right directory.
+    pub chosen_output_dir: Option<std::path::PathBuf>,
 }
 
 impl App {
@@ -260,6 +287,27 @@ impl App {
             password: None,
             password_input: String::new(),
             password_error: None,
+            chosen_output_dir: None,
+        }
+    }
+
+    /// Returns the archive stem name for use as the default extraction folder.
+    /// e.g., "photos.zip" → "photos", a Google Drive URL → the file ID or detected name.
+    pub fn archive_stem(&self) -> String {
+        crate::default_output_folder(&self.source)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "extracted".to_string())
+    }
+
+    /// Resolve the chosen extraction strategy into an output directory path.
+    pub fn resolve_output_dir(&self, strategy: &ExtractionStrategy) -> std::path::PathBuf {
+        match strategy {
+            ExtractionStrategy::ArchiveName => {
+                crate::default_output_folder(&self.source)
+                    .unwrap_or_else(|| std::path::PathBuf::from("extracted"))
+            }
+            ExtractionStrategy::Here => std::path::PathBuf::from("."),
+            ExtractionStrategy::Custom(name) => std::path::PathBuf::from(name),
         }
     }
 
@@ -412,6 +460,7 @@ impl App {
                     String::new()
                 };
                 info!(name = %name, bytes, "extraction complete → Browsing");
+                self.chosen_output_dir = None;
                 self.phase = AppPhase::Browsing;
                 self.status_message =
                     Some(format!("Extracted '{}' ({})", name, crate::format_size(bytes)));
@@ -441,6 +490,7 @@ impl App {
                     warn!(error = %e, "extraction failed → Browsing");
                     self.status_message = Some(format!("Extraction failed: {e}"));
                 }
+                self.chosen_output_dir = None;
                 self.phase = AppPhase::Browsing;
             }
             AppMessage::BatchExtractionComplete(Ok(batch)) => {
@@ -488,6 +538,7 @@ impl App {
                 let failed = batch.failed.len();
                 info!(succeeded = n, failed, bytes, "batch extraction complete → Browsing");
                 self.toggled.clear();
+                self.chosen_output_dir = None;
                 self.phase = AppPhase::Browsing;
                 self.status_message = Some(if failed == 0 {
                     format!(
@@ -515,6 +566,7 @@ impl App {
                     return;
                 }
                 self.toggled.clear();
+                self.chosen_output_dir = None;
                 self.phase = AppPhase::Browsing;
                 if matches!(e, ArchiveError::Cancelled) {
                     info!("batch extraction cancelled → Browsing");
@@ -550,6 +602,7 @@ impl App {
                 *current_entry = self.progress.current_entry_name.lock().unwrap().clone();
                 self.speed_tracker.record(*bytes_extracted);
             }
+            AppPhase::ExtractionStrategy { .. } => {}
             _ => {}
         }
     }
@@ -630,9 +683,15 @@ impl App {
                     }
                 }
                 KeyCode::Enter => {
-                    // Start batch extraction from review mode.
+                    // Open strategy modal for batch extraction from review mode.
                     self.in_review_mode = false;
-                    self.start_batch_extraction(tx);
+                    self.phase = AppPhase::ExtractionStrategy {
+                        selected: 0,
+                        editing_custom: false,
+                        custom_input: String::new(),
+                        is_batch: true,
+                        entry_index: None,
+                    };
                 }
                 KeyCode::Char('q') => {
                     self.should_quit = true;
@@ -671,8 +730,11 @@ impl App {
                     };
 
                     // Resume the extraction that was interrupted.
+                    let output_dir = self.chosen_output_dir.clone().unwrap_or_else(|| {
+                        self.resolve_output_dir(&ExtractionStrategy::ArchiveName)
+                    });
                     if is_batch {
-                        self.start_batch_extraction(tx);
+                        self.start_batch_extraction(output_dir, tx);
                     } else if let Some(idx) = entry_index {
                         const DICT_WARN_THRESHOLD: u64 = 4 * 1024 * 1024 * 1024;
                         let dict = self.archive.as_ref().unwrap().dict_size(&self.entries[idx]);
@@ -685,7 +747,7 @@ impl App {
                                 dict_size: ds,
                             };
                         } else {
-                            self.start_extraction(idx, tx);
+                            self.start_extraction(idx, &output_dir, tx);
                         }
                     }
                 }
@@ -694,6 +756,80 @@ impl App {
                     self.password_input.clear();
                     self.password_error = None;
                     self.phase = AppPhase::Browsing;
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        if let AppPhase::ExtractionStrategy {
+            ref mut selected,
+            ref mut editing_custom,
+            ref mut custom_input,
+            is_batch,
+            entry_index,
+        } = self.phase
+        {
+            if *editing_custom {
+                // Text input mode for custom folder name
+                match key.code {
+                    KeyCode::Char(c) => {
+                        custom_input.push(c);
+                    }
+                    KeyCode::Backspace => {
+                        if custom_input.is_empty() {
+                            // Backspace on empty input exits editing mode
+                            *editing_custom = false;
+                        } else {
+                            custom_input.pop();
+                        }
+                    }
+                    KeyCode::Enter => {
+                        let trimmed = custom_input.trim().to_string();
+                        if trimmed.is_empty() {
+                            return; // Don't accept empty or whitespace-only custom name
+                        }
+                        let strategy = ExtractionStrategy::Custom(trimmed);
+                        // Drop borrow before calling methods on self
+                        let output_dir = self.resolve_output_dir(&strategy);
+                        self.proceed_with_extraction(is_batch, entry_index, output_dir, tx);
+                    }
+                    KeyCode::Esc => {
+                        *editing_custom = false;
+                    }
+                    _ => {}
+                }
+                return;
+            }
+
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    *selected = selected.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    *selected = (*selected + 1).min(2); // 3 options: 0, 1, 2
+                }
+                KeyCode::Enter => {
+                    let strategy = match *selected {
+                        0 => ExtractionStrategy::ArchiveName,
+                        1 => ExtractionStrategy::Here,
+                        2 => {
+                            // Enter editing mode for custom name
+                            *editing_custom = true;
+                            return;
+                        }
+                        _ => unreachable!(),
+                    };
+                    // Drop borrow before calling methods on self
+                    let output_dir = self.resolve_output_dir(&strategy);
+                    self.proceed_with_extraction(is_batch, entry_index, output_dir, tx);
+                }
+                KeyCode::Esc => {
+                    self.chosen_output_dir = None;
+                    self.phase = AppPhase::Browsing;
+                }
+                KeyCode::Char('q') => {
+                    self.should_quit = true;
                 }
                 _ => {}
             }
@@ -856,29 +992,26 @@ impl App {
             }
             KeyCode::Enter => {
                 if matches!(self.phase, AppPhase::ConfirmExtract { .. }) {
-                    // User confirmed — proceed with extraction.
+                    // User confirmed — proceed with extraction using the chosen output dir.
                     let idx = if let AppPhase::ConfirmExtract { entry_index, .. } = &self.phase {
                         *entry_index
                     } else {
                         unreachable!()
                     };
-                    self.start_extraction(idx, tx);
+                    let output_dir = self.chosen_output_dir.clone().unwrap_or_else(|| {
+                        self.resolve_output_dir(&ExtractionStrategy::ArchiveName)
+                    });
+                    self.start_extraction(idx, &output_dir, tx);
                 } else if matches!(self.phase, AppPhase::Browsing) {
                     if !self.toggled.is_empty() {
-                        // Check if ANY toggled entry is encrypted.
-                        let has_encrypted = self.entries.iter().any(|e| {
-                            self.toggled.contains(&e.name) && e.is_encrypted && self.password.is_none()
-                        });
-                        if has_encrypted {
-                            self.password_input.clear();
-                            self.password_error = None;
-                            self.phase = AppPhase::PasswordPrompt {
-                                is_batch: true,
-                                entry_index: None,
-                            };
-                            return;
-                        }
-                        self.start_batch_extraction(tx);
+                        // Batch extraction — open strategy modal
+                        self.phase = AppPhase::ExtractionStrategy {
+                            selected: 0,
+                            editing_custom: false,
+                            custom_input: String::new(),
+                            is_batch: true,
+                            entry_index: None,
+                        };
                     } else if let Some(item) = self.visible_items.get(self.selected) {
                         if item.is_directory {
                             let old_path = self.current_path.join("/");
@@ -890,36 +1023,14 @@ impl App {
                             return;
                         }
                         if let Some(idx) = item.entry_index {
-                            let entry = &self.entries[idx];
-                            if entry.is_encrypted && self.password.is_none() {
-                                self.password_input.clear();
-                                self.password_error = None;
-                                self.phase = AppPhase::PasswordPrompt {
-                                    is_batch: false,
-                                    entry_index: Some(idx),
-                                };
-                                return;
-                            }
-
-                            const DICT_WARN_THRESHOLD: u64 = 4 * 1024 * 1024 * 1024;
-                            let dict =
-                                self.archive.as_ref().unwrap().dict_size(&self.entries[idx]);
-                            if let Some(ds) = dict
-                                && ds > DICT_WARN_THRESHOLD
-                            {
-                                info!(
-                                    name = %self.entries[idx].name,
-                                    dict_size = ds,
-                                    "large dictionary → ConfirmExtract"
-                                );
-                                self.phase = AppPhase::ConfirmExtract {
-                                    entry_index: idx,
-                                    entry_name: self.entries[idx].name.clone(),
-                                    dict_size: ds,
-                                };
-                                return;
-                            }
-                            self.start_extraction(idx, tx);
+                            // Single file — open strategy modal
+                            self.phase = AppPhase::ExtractionStrategy {
+                                selected: 0,
+                                editing_custom: false,
+                                custom_input: String::new(),
+                                is_batch: false,
+                                entry_index: Some(idx),
+                            };
                         }
                     }
                 }
@@ -928,10 +1039,67 @@ impl App {
         }
     }
 
+    /// After the user picks an extraction strategy, handle password/dict checks and start extraction.
+    fn proceed_with_extraction(
+        &mut self,
+        is_batch: bool,
+        entry_index: Option<usize>,
+        output_dir: std::path::PathBuf,
+        tx: &mpsc::UnboundedSender<AppMessage>,
+    ) {
+        self.chosen_output_dir = Some(output_dir.clone());
+        if is_batch {
+            // Check if any toggled entry is encrypted and needs a password.
+            let has_encrypted = self.entries.iter().any(|e| {
+                self.toggled.contains(&e.name) && e.is_encrypted && self.password.is_none()
+            });
+            if has_encrypted {
+                self.password_input.clear();
+                self.password_error = None;
+                self.phase = AppPhase::PasswordPrompt {
+                    is_batch: true,
+                    entry_index: None,
+                };
+                return;
+            }
+            self.start_batch_extraction(output_dir, tx);
+        } else if let Some(idx) = entry_index {
+            let entry = &self.entries[idx];
+            if entry.is_encrypted && self.password.is_none() {
+                self.password_input.clear();
+                self.password_error = None;
+                self.phase = AppPhase::PasswordPrompt {
+                    is_batch: false,
+                    entry_index: Some(idx),
+                };
+                return;
+            }
+            const DICT_WARN_THRESHOLD: u64 = 4 * 1024 * 1024 * 1024;
+            let dict = self.archive.as_ref().unwrap().dict_size(&self.entries[idx]);
+            if let Some(ds) = dict
+                && ds > DICT_WARN_THRESHOLD
+            {
+                info!(
+                    name = %self.entries[idx].name,
+                    dict_size = ds,
+                    "large dictionary → ConfirmExtract"
+                );
+                self.phase = AppPhase::ConfirmExtract {
+                    entry_index: idx,
+                    entry_name: self.entries[idx].name.clone(),
+                    dict_size: ds,
+                };
+                return;
+            }
+            self.start_extraction(idx, &output_dir, tx);
+        }
+    }
+
     /// Spawn the extraction task for the entry at `idx`.
     fn start_extraction(
         &mut self,
         idx: usize,
+        output_dir: &std::path::Path,
         tx: &mpsc::UnboundedSender<AppMessage>,
     ) {
         self.speed_tracker.reset();
@@ -947,8 +1115,6 @@ impl App {
             bytes_extracted: 0,
         };
 
-        let output_dir = crate::default_output_folder(&self.source)
-            .unwrap_or_else(|| std::path::PathBuf::from("extracted"));
         let output_path = output_dir.join(&entry_name);
 
         let archive = self.archive.as_ref().unwrap().clone();
@@ -993,7 +1159,11 @@ impl App {
     }
 
     /// Spawn a batch extraction task for all toggled entries.
-    fn start_batch_extraction(&mut self, tx: &mpsc::UnboundedSender<AppMessage>) {
+    fn start_batch_extraction(
+        &mut self,
+        output_dir: std::path::PathBuf,
+        tx: &mpsc::UnboundedSender<AppMessage>,
+    ) {
         self.speed_tracker.reset();
         let selected_entries: Vec<ArchiveEntry> = self
             .entries
@@ -1019,9 +1189,6 @@ impl App {
             total_bytes,
             bytes_extracted: 0,
         };
-
-        let output_dir = crate::default_output_folder(&self.source)
-            .unwrap_or_else(|| std::path::PathBuf::from("extracted"));
 
         let archive = self.archive.as_ref().unwrap().clone();
         let tx_extract = tx.clone();
