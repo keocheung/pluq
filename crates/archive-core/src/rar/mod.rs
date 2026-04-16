@@ -786,12 +786,8 @@ impl<R: ReadAt> RarArchive<R> {
         let handle = tokio::runtime::Handle::current();
         let mut sync_reader = SyncIoBridge::new_with_handle(stream, handle);
 
-        // Keep a handle to check cancel after spawn_blocking returns — the
-        // blocking loop can finish faster than the event loop processes Esc.
-        let progress_post = progress.clone();
-
-        let verified: Vec<u8> =
-            tokio::task::spawn_blocking(move || -> Result<Vec<u8>, CoreError> {
+        use std::io::Write;
+        let temp_file = tokio::task::spawn_blocking(move || -> Result<tempfile::NamedTempFile, CoreError> {
                 const CHUNK_SIZE: usize = 64 * 1024;
 
                 let mut crc_hasher = crc32fast::Hasher::new();
@@ -803,7 +799,13 @@ impl<R: ReadAt> RarArchive<R> {
 
                 let mut total_written: u64 = 0;
                 let mut chunk_buf = vec![0u8; CHUNK_SIZE];
-                let mut verified_buf = Vec::with_capacity(uncompressed_size as usize);
+                
+                let temp_file = tempfile::NamedTempFile::new().map_err(|e| {
+                    CoreError::BitstreamError {
+                        detail: format!("failed to create temp file: {e}"),
+                    }
+                })?;
+                let mut temp_writer = std::io::BufWriter::new(temp_file.as_file());
 
                 {
                     let mut p = progress.lock().unwrap();
@@ -829,7 +831,13 @@ impl<R: ReadAt> RarArchive<R> {
                     if let Some(ref mut state) = blake2_state {
                         state.update(&chunk_buf[..n]);
                     }
-                    verified_buf.extend_from_slice(&chunk_buf[..n]);
+                    
+                    temp_writer.write_all(&chunk_buf[..n]).map_err(|e| {
+                        CoreError::BitstreamError {
+                            detail: format!("temp file write failed for '{entry_name}': {e}"),
+                        }
+                    })?;
+
                     total_written += n as u64;
 
                     {
@@ -841,6 +849,13 @@ impl<R: ReadAt> RarArchive<R> {
                         }
                     }
                 }
+
+                temp_writer.flush().map_err(|e| {
+                    CoreError::BitstreamError {
+                        detail: format!("temp file flush failed for '{entry_name}': {e}"),
+                    }
+                })?;
+                drop(temp_writer);
 
                 // CRC32 verification.
                 if let Some(expected) = expected_crc {
@@ -873,35 +888,26 @@ impl<R: ReadAt> RarArchive<R> {
                     p.on_entry_complete(&entry_name, true);
                 }
 
-                Ok(verified_buf)
+                Ok(temp_file)
             })
             .await
             .map_err(|e| CoreError::BitstreamError {
                 detail: format!("extraction task panicked: {e}"),
             })??;
 
-        // Step 3 (async): write verified bytes to the sink in chunks,
-        // checking for cancellation between each chunk.  On fast SSDs the
-        // blocking read loop above finishes in <200ms — too fast for a
-        // human to press Esc — so the write phase is where cancellation
-        // actually needs to land.
-        const WRITE_CHUNK: usize = 256 * 1024;
-        let mut written: u64 = 0;
-        for chunk in verified.chunks(WRITE_CHUNK) {
-            {
-                let p = progress_post.lock().unwrap();
-                if p.should_cancel() {
-                    return Err(CoreError::Cancelled);
-                }
-            }
-            sink.write_all(chunk)
-                .await
-                .map_err(|e| CoreError::BitstreamError {
-                    detail: format!("write to sink failed: {e}"),
-                })?;
-            written += chunk.len() as u64;
-        }
-
+        // Step 3 (async): write verified bytes to the sink.
+        // Copy verified temp file to the final sink.
+        let mut temp_reader = tokio::fs::File::open(temp_file.path())
+            .await
+            .map_err(|e| CoreError::BitstreamError {
+                detail: format!("failed to reopen temp file: {e}"),
+            })?;
+        let written = tokio::io::copy(&mut temp_reader, sink)
+            .await
+            .map_err(|e| CoreError::BitstreamError {
+                detail: format!("copy to sink failed: {e}"),
+            })?;
+        // temp_file dropped here → auto-deleted.
         Ok(written)
     }
 
@@ -1039,10 +1045,10 @@ impl<R: ReadAt> RarArchive<R> {
             .await
             .map_err(CoreError::Io)?;
 
-        // 2. Download the compressed data.
-        let compressed_data = self
+        // 2. Open a streaming reader for the compressed data (no RAM buffering).
+        let compressed_stream = self
             .reader
-            .read_range(loc.data_offset, loc.data_size)
+            .read_stream(loc.data_offset, loc.data_size)
             .await
             .map_err(CoreError::Io)?;
 
@@ -1051,6 +1057,7 @@ impl<R: ReadAt> RarArchive<R> {
         let end_block = self.end_block.clone();
 
         let (cancel, on_progress) = build_unrar_progress_hooks(&progress);
+        let handle = tokio::runtime::Handle::current();
 
         // 3. Assemble synthetic archive, extract with unrar — all in spawn_blocking.
         let data =
@@ -1069,8 +1076,6 @@ impl<R: ReadAt> RarArchive<R> {
                     for chunk in [
                         archive_preamble.as_ref(),
                         file_header_bytes.as_ref(),
-                        compressed_data.as_ref(),
-                        end_block.as_ref(),
                     ] {
                         writer.write_all(chunk).map_err(|e| {
                             CoreError::BitstreamError {
@@ -1078,6 +1083,27 @@ impl<R: ReadAt> RarArchive<R> {
                             }
                         })?;
                     }
+
+                    // Stream compressed data from network to temp file (O(1) memory).
+                    let mut sync_reader = SyncIoBridge::new_with_handle(compressed_stream, handle);
+                    std::io::copy(&mut sync_reader, &mut writer).map_err(|e| {
+                        let detail = e.to_string();
+                        if let Some(inner) = e.into_inner()
+                            && let Ok(read_error) = inner.downcast::<crate::io::ReadError>()
+                        {
+                            return CoreError::Io(*read_error);
+                        }
+                        CoreError::BitstreamError {
+                            detail: format!("streaming compressed data to temp failed: {detail}"),
+                        }
+                    })?;
+
+                    writer.write_all(end_block.as_ref()).map_err(|e| {
+                        CoreError::BitstreamError {
+                            detail: format!("temp file write failed: {e}"),
+                        }
+                    })?;
+
                     writer.flush().map_err(|e| CoreError::BitstreamError {
                         detail: format!("temp file flush failed: {e}"),
                     })?;
