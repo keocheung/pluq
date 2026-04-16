@@ -3,8 +3,8 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 3 — Interactive TUI + Google Drive Provider.
-* **Current Active Task:** [HANDOVER] Step 3 complete.
-* **Baseline:** 236 tests pass, 14 ignored. Clippy clean. (Step 3 complete)
+* **Current Active Task:** [HANDOVER] RAM pressure eliminated.
+* **Baseline:** 236 tests pass, 14 ignored. Clippy clean.
 
 
 ---

@@ -7,29 +7,200 @@ pub(crate) mod parse;
 
 pub use parse::{RAR4_SIGNATURE, RAR5_SIGNATURE};
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use blake2s_simd::blake2sp;
 use bytes::Bytes;
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio_util::io::SyncIoBridge;
+use tracing::debug;
+
+use crate::core_error::CoreError;
+use crate::progress::ProgressReporter;
+
+/// Stream a file on disk through CRC32 + BLAKE2sp verification into `sink`,
+/// 256 KiB at a time. Hashes are computed incrementally so RAM use is bounded
+/// by the buffer size regardless of file length.
+///
+/// Note: partial bytes may land in `sink` before a hash mismatch is detected,
+/// because we cannot verify the full output without buffering it. Callers that
+/// need atomic writes must wrap `sink` accordingly.
+pub(crate) async fn verify_and_stream_from_path<W: AsyncWrite + Send + Unpin>(
+    path: &Path,
+    entry_name: &str,
+    expected_crc: Option<u32>,
+    expected_blake2: Option<[u8; 32]>,
+    sink: &mut W,
+    progress: &Arc<Mutex<dyn ProgressReporter>>,
+) -> Result<u64, CoreError> {
+    let mut file = tokio::fs::File::open(path).await.map_err(|e| {
+        CoreError::BitstreamError {
+            detail: format!("failed to open temp file for verification: {e}"),
+        }
+    })?;
+
+    let mut crc_hasher = crc32fast::Hasher::new();
+    let mut blake_state = blake2sp::State::new();
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut total_bytes = 0u64;
+
+    loop {
+        let n = file.read(&mut buf).await.map_err(|e| {
+            CoreError::BitstreamError {
+                detail: format!("failed to read from temp file: {e}"),
+            }
+        })?;
+
+        if n == 0 {
+            break;
+        }
+
+        let chunk = &buf[..n];
+        if expected_crc.is_some() {
+            crc_hasher.update(chunk);
+        }
+        if expected_blake2.is_some() {
+            blake_state.update(chunk);
+        }
+
+        sink.write_all(chunk).await.map_err(|e| {
+            CoreError::BitstreamError {
+                detail: format!("failed to write to sink: {e}"),
+            }
+        })?;
+
+        total_bytes += n as u64;
+    }
+
+    // Finalize hashes and compare.
+    if let Some(expected) = expected_crc {
+        let actual = crc_hasher.finalize();
+        if actual != expected {
+            progress
+                .lock()
+                .unwrap()
+                .on_entry_complete(entry_name, false);
+            return Err(CoreError::CrcMismatch {
+                entry: entry_name.to_owned(),
+                expected,
+                actual,
+            });
+        }
+    }
+
+    if let Some(expected) = expected_blake2 {
+        let actual = blake_state.finalize();
+        if actual.as_bytes() != expected {
+            progress
+                .lock()
+                .unwrap()
+                .on_entry_complete(entry_name, false);
+            return Err(CoreError::BitstreamError {
+                detail: format!("BLAKE2sp hash mismatch for '{entry_name}'"),
+            });
+        }
+    }
+
+    progress
+        .lock()
+        .unwrap()
+        .on_entry_complete(entry_name, true);
+    Ok(total_bytes)
+}
+
+/// Blocking version of [`verify_and_stream_from_path`] for use inside `spawn_blocking`.
+pub(crate) fn verify_and_stream_from_path_sync<W: Write>(
+    path: &Path,
+    entry_name: &str,
+    expected_crc: Option<u32>,
+    expected_blake2: Option<[u8; 32]>,
+    sink: &mut W,
+    progress: &Arc<Mutex<dyn ProgressReporter>>,
+) -> Result<u64, CoreError> {
+    let mut file = std::fs::File::open(path).map_err(|e| CoreError::BitstreamError {
+        detail: format!("failed to open temp file for sync verification: {e}"),
+    })?;
+
+    let mut crc_hasher = crc32fast::Hasher::new();
+    let mut blake_state = blake2sp::State::new();
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut total_bytes = 0u64;
+
+    loop {
+        let n = file.read(&mut buf).map_err(|e| CoreError::BitstreamError {
+            detail: format!("failed to read from temp file (sync): {e}"),
+        })?;
+
+        if n == 0 {
+            break;
+        }
+
+        let chunk = &buf[..n];
+        if expected_crc.is_some() {
+            crc_hasher.update(chunk);
+        }
+        if expected_blake2.is_some() {
+            blake_state.update(chunk);
+        }
+
+        sink.write_all(chunk).map_err(|e| CoreError::BitstreamError {
+            detail: format!("failed to write to sync sink: {e}"),
+        })?;
+
+        total_bytes += n as u64;
+    }
+
+    if let Some(expected) = expected_crc {
+        let actual = crc_hasher.finalize();
+        if actual != expected {
+            progress
+                .lock()
+                .unwrap()
+                .on_entry_complete(entry_name, false);
+            return Err(CoreError::CrcMismatch {
+                entry: entry_name.to_owned(),
+                expected,
+                actual,
+            });
+        }
+    }
+
+    if let Some(expected) = expected_blake2 {
+        let actual = blake_state.finalize();
+        if actual.as_bytes() != expected {
+            progress
+                .lock()
+                .unwrap()
+                .on_entry_complete(entry_name, false);
+            return Err(CoreError::BitstreamError {
+                detail: format!("BLAKE2sp hash mismatch for '{entry_name}'"),
+            });
+        }
+    }
+
+    progress
+        .lock()
+        .unwrap()
+        .on_entry_complete(entry_name, true);
+    Ok(total_bytes)
+}
 
 use serde::{Deserialize, Serialize};
 
-use tracing::{debug, info};
+use tracing::info;
 
 use crate::archive_reader::ArchiveReader;
 use crate::codec::CompressionMethod;
 use crate::io::LocalPath;
-use crate::progress::ProgressReporter;
 use crate::rar::parse::{
     QoCachedBlock, parse_block_header, parse_file_header, parse_main_header, parse_quick_open_data,
 };
-use crate::{ArchiveEntry, CoreError, ReadAt};
+use crate::{ArchiveEntry, ReadAt};
 
 // ── Location data (private) ───────────────────────────────────────────────────
 
@@ -963,8 +1134,15 @@ impl<R: ReadAt> RarArchive<R> {
         }
 
         let (cancel, on_progress) = build_unrar_progress_hooks(&progress);
-        let data =
-            tokio::task::spawn_blocking(move || -> Result<Vec<u8>, CoreError> {
+        let out_tmp =
+            tokio::task::spawn_blocking(move || -> Result<tempfile::NamedTempFile, CoreError> {
+                let out_tmp = tempfile::NamedTempFile::new().map_err(|e| {
+                    CoreError::BitstreamError {
+                        detail: format!("failed to create extraction temp file: {e}"),
+                    }
+                })?;
+                let out_path = out_tmp.path().to_path_buf();
+
                 let mut archive = match &password_bytes {
                     Some(pw) => unrar::Archive::with_password(&path, pw.as_slice())
                         .open_for_processing()
@@ -990,10 +1168,14 @@ impl<R: ReadAt> RarArchive<R> {
                     let name =
                         header.entry().filename.to_string_lossy().replace('\\', "/");
                     if name == target_name {
-                        let (data, _) = header
-                            .read_with_progress(Some(cancel), Some(on_progress))
+                        header
+                            .extract_to_with_progress(
+                                &out_path,
+                                Some(cancel),
+                                Some(on_progress),
+                            )
                             .map_err(map_unrar_error)?;
-                        return Ok(data);
+                        return Ok(out_tmp);
                     }
                     archive = header.skip().map_err(map_unrar_error)?;
                 }
@@ -1003,15 +1185,18 @@ impl<R: ReadAt> RarArchive<R> {
                 detail: format!("extraction task panicked: {e}"),
             })??;
 
-        verify_and_write(
-            &data,
+        let result = verify_and_stream_from_path(
+            out_tmp.path(),
             &entry_name,
             expected_crc,
             expected_blake2,
             sink,
             &progress,
         )
-        .await
+        .await;
+
+        drop(out_tmp); // Ensure deletion.
+        result
     }
 
     /// Extract a compressed (or encrypted) entry from a **cloud** archive via `unrar`.
@@ -1060,14 +1245,22 @@ impl<R: ReadAt> RarArchive<R> {
         let handle = tokio::runtime::Handle::current();
 
         // 3. Assemble synthetic archive, extract with unrar — all in spawn_blocking.
-        let data =
-            tokio::task::spawn_blocking(move || -> Result<Vec<u8>, CoreError> {
-                // Create temp file and write the synthetic RAR5 archive.
+        let out_tmp =
+            tokio::task::spawn_blocking(move || -> Result<tempfile::NamedTempFile, CoreError> {
+                // Create temp file for synthetic RAR5 archive.
                 let temp_file = tempfile::NamedTempFile::new().map_err(|e| {
                     CoreError::BitstreamError {
-                        detail: format!("failed to create temp file: {e}"),
+                        detail: format!("failed to create synthetic archive temp file: {e}"),
                     }
                 })?;
+
+                // Create second temp file for extraction output.
+                let out_tmp = tempfile::NamedTempFile::new().map_err(|e| {
+                    CoreError::BitstreamError {
+                        detail: format!("failed to create extraction temp file: {e}"),
+                    }
+                })?;
+                let out_path = out_tmp.path().to_path_buf();
 
                 {
                     use std::io::Write;
@@ -1124,27 +1317,34 @@ impl<R: ReadAt> RarArchive<R> {
                 let header = header.ok_or_else(|| CoreError::BitstreamError {
                     detail: "synthetic archive produced no entries".into(),
                 })?;
-                let (data, _) = header
-                    .read_with_progress(Some(cancel), Some(on_progress))
+                header
+                    .extract_to_with_progress(
+                        &out_path,
+                        Some(cancel),
+                        Some(on_progress),
+                    )
                     .map_err(map_unrar_error)?;
 
-                // temp_file is dropped here → temp file deleted automatically.
-                Ok(data)
+                // temp_file is dropped here → synthetic archive deleted.
+                Ok(out_tmp)
             })
             .await
             .map_err(|e| CoreError::BitstreamError {
                 detail: format!("extraction task panicked: {e}"),
             })??;
 
-        verify_and_write(
-            &data,
+        let result = verify_and_stream_from_path(
+            out_tmp.path(),
             &entry_name,
             expected_crc,
             expected_blake2,
             sink,
             &progress,
         )
-        .await
+        .await;
+
+        drop(out_tmp); // Ensure deletion.
+        result
     }
 
     /// Attempt to build the entry list from the Quick Open (QO) service block.
@@ -1462,7 +1662,7 @@ fn build_end_of_archive_block() -> Bytes {
     Bytes::from(buf)
 }
 
-/// Build the cancel flag and progress closure for `read_with_progress`.
+/// Build the cancel flag and progress closure for `extract_to_with_progress`.
 ///
 /// The closure accumulates chunk bytes and reports cumulative progress.
 /// It also bridges `ProgressReporter::should_cancel()` into the `AtomicBool`.
@@ -1508,63 +1708,6 @@ pub(crate) fn map_unrar_error(e: unrar::error::UnrarError) -> CoreError {
             detail: format!("unrar error: {e}"),
         },
     }
-}
-
-/// Verify CRC32 and BLAKE2sp of `data`, write to `sink`, and fire progress callbacks.
-///
-/// Used by both local and cloud extraction paths after `unrar` decompresses bytes
-/// into a `Vec<u8>`.  Writes to `sink` only after hash verification succeeds.
-pub(crate) async fn verify_and_write<W: AsyncWrite + Send + Unpin>(
-    data: &[u8],
-    entry_name: &str,
-    expected_crc: Option<u32>,
-    expected_blake2: Option<[u8; 32]>,
-    sink: &mut W,
-    progress: &Arc<Mutex<dyn ProgressReporter>>,
-) -> Result<u64, CoreError> {
-    // CRC32 verification.
-    if let Some(expected) = expected_crc {
-        let actual = crc32fast::hash(data);
-        if actual != expected {
-            progress
-                .lock()
-                .unwrap()
-                .on_entry_complete(entry_name, false);
-            return Err(CoreError::CrcMismatch {
-                entry: entry_name.to_owned(),
-                expected,
-                actual,
-            });
-        }
-    }
-
-    // BLAKE2sp verification (present only when extra area record 0x02 exists).
-    if let Some(expected_hash) = expected_blake2 {
-        let mut state = blake2s_simd::blake2sp::State::new();
-        state.update(data);
-        let actual = state.finalize();
-        if actual.as_array() != &expected_hash {
-            progress
-                .lock()
-                .unwrap()
-                .on_entry_complete(entry_name, false);
-            return Err(CoreError::BitstreamError {
-                detail: format!("BLAKE2sp hash mismatch for '{entry_name}'"),
-            });
-        }
-    }
-
-    let bytes_written = data.len() as u64;
-    sink.write_all(data)
-        .await
-        .map_err(|e| CoreError::BitstreamError {
-            detail: format!("write to sink failed: {e}"),
-        })?;
-    progress
-        .lock()
-        .unwrap()
-        .on_entry_complete(entry_name, true);
-    Ok(bytes_written)
 }
 
 /// Extract multiple entries from a RAR5 archive via `unrar` in a single pass.
@@ -1624,42 +1767,31 @@ where
                         .on_entry_start(&name, entry.uncompressed_size);
 
                     let (cancel, on_progress) = build_unrar_progress_hooks(&progress);
-                    let (data, next_archive) = header
-                        .read_with_progress(Some(cancel), Some(on_progress))
+
+                    // Create extraction temp file.
+                    let out_tmp =
+                        tempfile::NamedTempFile::new().map_err(|e| CoreError::BitstreamError {
+                            detail: format!("failed to create extraction temp file for '{name}': {e}"),
+                        })?;
+                    let out_path = out_tmp.path().to_path_buf();
+
+                    let next_archive = header
+                        .extract_to_with_progress(&out_path, Some(cancel), Some(on_progress))
                         .map_err(map_unrar_error)?;
                     archive = next_archive;
 
-                    // CRC32 verification.
-                    if let Some(expected) = loc.crc32 {
-                        let actual = crc32fast::hash(&data);
-                        if actual != expected {
-                            return Err(CoreError::CrcMismatch {
-                                entry: name,
-                                expected,
-                                actual,
-                            });
-                        }
-                    }
+                    // Verify and stream from temp file to sink using sync verifier.
+                    let bytes = verify_and_stream_from_path_sync(
+                        &out_path,
+                        &name,
+                        loc.crc32,
+                        loc.blake2_hash,
+                        &mut sink,
+                        &progress,
+                    )?;
 
-                    // BLAKE2sp verification.
-                    if let Some(expected_hash) = loc.blake2_hash {
-                        let mut state = blake2s_simd::blake2sp::State::new();
-                        state.update(&data);
-                        let actual = state.finalize();
-                        if actual.as_array() != &expected_hash {
-                            return Err(CoreError::BitstreamError {
-                                detail: format!("BLAKE2sp hash mismatch for '{name}'"),
-                            });
-                        }
-                    }
-
-                    use std::io::Write;
-                    sink.write_all(&data).map_err(|e| CoreError::BitstreamError {
-                        detail: format!("write failed for '{name}': {e}"),
-                    })?;
-
-                    total_bytes += data.len() as u64;
-                    progress.lock().unwrap().on_entry_complete(&name, true);
+                    total_bytes += bytes;
+                    drop(out_tmp); // Ensure deletion.
                 } else {
                     // Sink factory returned None — skip this entry.
                     archive = header.skip().map_err(map_unrar_error)?;
@@ -1732,8 +1864,16 @@ where
 
     let (cancel, on_progress) = build_unrar_progress_hooks(progress);
 
-    // Extract via unrar in blocking task.
-    let data = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, CoreError> {
+    // Extract and verify via unrar in a single blocking task.
+    let progress_sync = progress.clone();
+    tokio::task::spawn_blocking(move || -> Result<u64, CoreError> {
+        let out_tmp = tempfile::NamedTempFile::new().map_err(|e| {
+            CoreError::BitstreamError {
+                detail: format!("failed to create extraction temp file: {e}"),
+            }
+        })?;
+        let out_path = out_tmp.path().to_path_buf();
+
         let archive = match &password_bytes {
             Some(pw) => unrar::Archive::with_password(&snippet_path, pw.as_slice())
                 .open_for_processing()
@@ -1747,46 +1887,27 @@ where
         let header = header.ok_or_else(|| CoreError::BitstreamError {
             detail: "snippet archive produced no entries".into(),
         })?;
-        let (data, _) = header
-            .read_with_progress(Some(cancel), Some(on_progress))
+        header
+            .extract_to_with_progress(&out_path, Some(cancel), Some(on_progress))
             .map_err(map_unrar_error)?;
-        Ok(data)
+
+        // Verify and stream from temp file to sink using sync verifier.
+        let bytes = verify_and_stream_from_path_sync(
+            &out_path,
+            &entry_name,
+            expected_crc,
+            expected_blake2,
+            &mut sink,
+            &progress_sync,
+        );
+
+        drop(out_tmp); // Deletes temp file after verification.
+        bytes
     })
     .await
     .map_err(|e| CoreError::BitstreamError {
-        detail: format!("extract task panicked: {e}"),
-    })??;
-
-    // CRC32 verification.
-    if let Some(expected) = expected_crc {
-        let actual = crc32fast::hash(&data);
-        if actual != expected {
-            progress.lock().unwrap().on_entry_complete(&entry_name, false);
-            return Err(CoreError::CrcMismatch { entry: entry_name, expected, actual });
-        }
-    }
-
-    // BLAKE2sp verification.
-    if let Some(expected_hash) = expected_blake2 {
-        let mut state = blake2s_simd::blake2sp::State::new();
-        state.update(&data);
-        if state.finalize().as_array() != &expected_hash {
-            progress.lock().unwrap().on_entry_complete(&entry_name, false);
-            return Err(CoreError::BitstreamError {
-                detail: format!("BLAKE2sp hash mismatch for '{entry_name}'"),
-            });
-        }
-    }
-
-    // Write to sink.
-    use std::io::Write;
-    sink.write_all(&data).map_err(|e| CoreError::BitstreamError {
-        detail: format!("write failed for '{entry_name}': {e}"),
-    })?;
-
-    progress.lock().unwrap().on_entry_complete(&entry_name, true);
-
-    Ok(data.len() as u64)
+        detail: format!("extraction/verification task panicked: {e}"),
+    })?
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

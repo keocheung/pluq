@@ -19,7 +19,10 @@ use crate::codec::CompressionMethod;
 use crate::io::LocalPath;
 use crate::junk;
 use crate::progress::ProgressReporter;
-use crate::rar::{build_unrar_progress_hooks, consume_snippets, map_unrar_error, verify_and_write, SnippetConfig, SnippetMsg, RAR4_SIGNATURE};
+use crate::rar::{
+    build_unrar_progress_hooks, consume_snippets, map_unrar_error, verify_and_stream_from_path,
+    SnippetConfig, SnippetMsg, RAR4_SIGNATURE,
+};
 use crate::rar4::parse::{
     build_rar4_end_block, parse_block_header, parse_file_header, parse_main_header, BLOCK_END,
     BLOCK_FILE,
@@ -749,8 +752,15 @@ impl<R: ReadAt> Rar4Archive<R> {
         }
 
         let (cancel, on_progress) = build_unrar_progress_hooks(&progress);
-        let data =
-            tokio::task::spawn_blocking(move || -> Result<Vec<u8>, CoreError> {
+        let out_tmp =
+            tokio::task::spawn_blocking(move || -> Result<tempfile::NamedTempFile, CoreError> {
+                let out_tmp = tempfile::NamedTempFile::new().map_err(|e| {
+                    CoreError::BitstreamError {
+                        detail: format!("failed to create extraction temp file: {e}"),
+                    }
+                })?;
+                let out_path = out_tmp.path().to_path_buf();
+
                 let mut archive = match &password_bytes {
                     Some(pw) => unrar::Archive::with_password(&path, pw.as_slice())
                         .open_for_processing()
@@ -776,10 +786,14 @@ impl<R: ReadAt> Rar4Archive<R> {
                     let name =
                         header.entry().filename.to_string_lossy().replace('\\', "/");
                     if name == target_name {
-                        let (data, _) = header
-                            .read_with_progress(Some(cancel), Some(on_progress))
+                        header
+                            .extract_to_with_progress(
+                                &out_path,
+                                Some(cancel),
+                                Some(on_progress),
+                            )
                             .map_err(map_unrar_error)?;
-                        return Ok(data);
+                        return Ok(out_tmp);
                     }
                     archive = header.skip().map_err(map_unrar_error)?;
                 }
@@ -789,7 +803,18 @@ impl<R: ReadAt> Rar4Archive<R> {
                 detail: format!("extraction task panicked: {e}"),
             })??;
 
-        verify_and_write(&data, &entry_name, Some(expected_crc), None, sink, &progress).await
+        let result = verify_and_stream_from_path(
+            out_tmp.path(),
+            &entry_name,
+            Some(expected_crc),
+            None,
+            sink,
+            &progress,
+        )
+        .await;
+
+        drop(out_tmp); // Ensure deletion.
+        result
     }
 
     /// Extract a compressed (or encrypted) entry from a **cloud** archive via `unrar`.
@@ -835,8 +860,8 @@ impl<R: ReadAt> Rar4Archive<R> {
         let handle = tokio::runtime::Handle::current();
 
         // 3. Assemble synthetic RAR4 archive and extract with unrar.
-        let data =
-            tokio::task::spawn_blocking(move || -> Result<Vec<u8>, CoreError> {
+        let out_tmp =
+            tokio::task::spawn_blocking(move || -> Result<tempfile::NamedTempFile, CoreError> {
                 let temp_file = tempfile::NamedTempFile::new().map_err(|e| {
                     CoreError::BitstreamError {
                         detail: format!("failed to create temp file: {e}"),
@@ -880,6 +905,14 @@ impl<R: ReadAt> Rar4Archive<R> {
                     })?;
                 }
 
+                // Create second temp file for extraction output.
+                let out_tmp = tempfile::NamedTempFile::new().map_err(|e| {
+                    CoreError::BitstreamError {
+                        detail: format!("failed to create extraction temp file: {e}"),
+                    }
+                })?;
+                let out_path = out_tmp.path().to_path_buf();
+
                 let temp_path = temp_file.path().to_path_buf();
                 let archive = match &password_bytes {
                     Some(pw) => unrar::Archive::with_password(&temp_path, pw.as_slice())
@@ -894,19 +927,30 @@ impl<R: ReadAt> Rar4Archive<R> {
                 let header = header.ok_or_else(|| CoreError::BitstreamError {
                     detail: "synthetic RAR4 archive produced no entries".into(),
                 })?;
-                let (data, _) = header
-                    .read_with_progress(Some(cancel), Some(on_progress))
+                header
+                    .extract_to_with_progress(&out_path, Some(cancel), Some(on_progress))
                     .map_err(map_unrar_error)?;
 
                 // temp_file dropped here — temp file deleted automatically.
-                Ok(data)
+                Ok(out_tmp)
             })
             .await
             .map_err(|e| CoreError::BitstreamError {
                 detail: format!("extraction task panicked: {e}"),
             })??;
 
-        verify_and_write(&data, &entry_name, Some(expected_crc), None, sink, &progress).await
+        let result = verify_and_stream_from_path(
+            out_tmp.path(),
+            &entry_name,
+            Some(expected_crc),
+            None,
+            sink,
+            &progress,
+        )
+        .await;
+
+        drop(out_tmp); // Ensure deletion.
+        result
     }
 }
 

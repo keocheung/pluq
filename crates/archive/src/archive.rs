@@ -650,6 +650,7 @@ mod tests {
             .await.unwrap().ready().await.unwrap();
 
         let all_entries = archive.entries_clean();
+        #[allow(clippy::iter_cloned_collect)]
         let selected: Vec<&ArchiveEntry> = all_entries.iter().copied().collect();
 
         let progress = Arc::new(Mutex::new(()));
