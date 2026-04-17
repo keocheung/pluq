@@ -5,12 +5,15 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Clear, Gauge, Paragraph, Row, Table},
 };
 
-use super::app::{App, AppPhase};
+use super::app::{App, AppPhase, HomeFocus};
 
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let area = frame.area();
 
     match &app.phase {
+        AppPhase::Home => {
+            draw_home(frame, app, area);
+        }
         AppPhase::Opening => {
             let chunks = Layout::vertical([
                 Constraint::Length(1), // header
@@ -859,4 +862,185 @@ fn draw_help_popup(frame: &mut Frame<'_>, area: ratatui::layout::Rect) {
 
     frame.render_widget(Clear, popup_area);
     frame.render_widget(paragraph, popup_area);
+}
+
+fn draw_home(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let chunks = Layout::vertical([
+        Constraint::Length(1), // header
+        Constraint::Length(1), // separator
+        Constraint::Min(1),    // content
+        Constraint::Length(1), // separator
+        Constraint::Length(1), // footer
+    ])
+    .split(area);
+
+    // Header: Solid cyan bar with black bold text
+    let header = Paragraph::new(" Archive Sniper — Home ")
+        .style(
+            Style::default()
+                .bg(Color::Cyan)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        );
+    frame.render_widget(header, chunks[0]);
+
+    // Separators
+    let sep = "─".repeat(area.width as usize);
+    let sep_style = Style::default().fg(Color::DarkGray);
+    frame.render_widget(Paragraph::new(sep.clone()).style(sep_style), chunks[1]);
+    frame.render_widget(Paragraph::new(sep).style(sep_style), chunks[3]);
+
+    // Content
+    let content_chunks = Layout::vertical([
+        Constraint::Length(2), // Snipe Input + optional inline error
+        Constraint::Length(1), // blank spacer
+        Constraint::Length(3), // Bookmarks (header + placeholder + blank)
+        Constraint::Length(1), // blank spacer
+        Constraint::Min(1),    // Recent (header + list)
+    ])
+    .split(chunks[2]);
+
+    let section_style = |focused: bool| {
+        if focused {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        }
+    };
+
+    // 1. Snipe Input
+    let snipe_chunks = Layout::vertical([Constraint::Length(1), Constraint::Length(1)])
+        .split(content_chunks[0]);
+
+    let snipe_focused = app.home_focus == HomeFocus::SnipeInput;
+    let label_style = if snipe_focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    let mut snipe_text = vec![
+        ratatui::text::Span::styled("[ Snipe: ] ", label_style),
+    ];
+
+    if app.snipe_input.is_empty() && !snipe_focused {
+        snipe_text.push(ratatui::text::Span::styled(
+            " Paste cloud link or local path...",
+            Style::default().fg(Color::DarkGray),
+        ));
+    } else {
+        snipe_text.push(ratatui::text::Span::styled(
+            &app.snipe_input,
+            Style::default().fg(Color::White),
+        ));
+        if snipe_focused {
+            snipe_text.push(ratatui::text::Span::styled("_", Style::default().fg(Color::White)));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(ratatui::text::Line::from(snipe_text)), snipe_chunks[0]);
+
+    if let Some(ref err) = app.home_input_error {
+        frame.render_widget(
+            Paragraph::new(format!(" {}", err)).style(Style::default().fg(Color::Red)),
+            snipe_chunks[1],
+        );
+    }
+
+    // 2. Bookmarks (MVP Placeholder)
+    let bookmarks_focused = app.home_focus == HomeFocus::Bookmarks;
+    frame.render_widget(
+        Paragraph::new("─── BOOKMARKS ───").style(section_style(bookmarks_focused)),
+        content_chunks[2],
+    );
+    let bookmarks_body_area = Rect {
+        x: content_chunks[2].x,
+        y: content_chunks[2].y + 1,
+        width: content_chunks[2].width,
+        height: 1,
+    };
+    frame.render_widget(
+        Paragraph::new("  — no bookmarks —").style(Style::default().fg(Color::DarkGray)),
+        bookmarks_body_area,
+    );
+
+    // 3. Recent Archives
+    let recent_focused = app.home_focus == HomeFocus::Recent;
+    let recent_chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(0)])
+        .split(content_chunks[4]);
+
+    frame.render_widget(
+        Paragraph::new("─── RECENT ───").style(section_style(recent_focused)),
+        recent_chunks[0],
+    );
+
+    if app.home_recent.is_empty() {
+        frame.render_widget(
+            Paragraph::new("  — no recent archives —").style(Style::default().fg(Color::DarkGray)),
+            recent_chunks[1],
+        );
+    } else {
+        let rows: Vec<Row> = app.home_recent.entries().iter().map(|item| {
+            let size_str = crate::format_size(item.size);
+            let name_str = item.name.clone();
+            let provider_tag = item.provider.tag();
+
+            let name_line = ratatui::text::Line::from(vec![
+                ratatui::text::Span::styled(format!(" {}  ", name_str), Style::default().fg(Color::White)),
+                ratatui::text::Span::styled(provider_tag, Style::default().fg(Color::DarkGray)),
+            ]);
+
+            Row::new([
+                Cell::from(format!(" {}", size_str)).style(Style::default().fg(Color::DarkGray)),
+                Cell::from(name_line),
+            ])
+        }).collect();
+
+        let mut table_state = ratatui::widgets::TableState::default();
+        table_state.select(Some(app.home_recent_selected));
+
+        let highlight_style = if recent_focused {
+            Style::default()
+                .bg(Color::Cyan)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+
+        let table = Table::new(rows, [Constraint::Length(10), Constraint::Min(1)])
+            .row_highlight_style(highlight_style);
+
+        frame.render_stateful_widget(table, recent_chunks[1], &mut table_state);
+    }
+
+    // Footer
+    let footer_text = if let Some(ref msg) = app.status_message {
+        format!("  {}", msg)
+    } else {
+        match app.home_focus {
+            HomeFocus::SnipeInput => "  Enter open  Tab cycle  q quit".into(),
+            HomeFocus::Recent if !app.home_recent.is_empty() => {
+                "  Enter open  d delete  Tab cycle  q quit".into()
+            }
+            _ => "  Tab cycle  q quit".into(),
+        }
+    };
+    let footer = Paragraph::new(footer_text).style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(footer, chunks[4]);
+}
+
+#[cfg(test)]
+mod ui_tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    #[test]
+    fn home_renders_empty() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new_home();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+    }
 }

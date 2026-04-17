@@ -3,8 +3,8 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 3 — Interactive TUI + Google Drive Provider.
-* **Current Active Task:** [HANDOVER] HTTP batching unified across ZIP/RAR5/RAR4.
-* **Baseline:** 249 tests pass, 14 ignored. Clippy clean.
+* **Current Active Task:** [HANDOVER] Phase 3c Home Screen MVP complete; Plan v2 (Bookmarks + Overlay) pending.
+* **Baseline:** 281 tests pass. Clippy clean.
 
 
 ---

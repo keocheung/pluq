@@ -1,4 +1,5 @@
 mod cli_progress;
+pub mod home;
 mod tui;
 
 use std::path::PathBuf;
@@ -15,25 +16,25 @@ use archive_source::{ResolvedSource, SourceConfig, classify_transport, resolve};
 
 /// Archive Sniper — surgical archive extraction from local or cloud storage.
 #[derive(Parser)]
-#[command(name = "snipe", version, about)]
+#[command(name = "snipe", version, about, args_conflicts_with_subcommands = true)]
 struct Cli {
+    /// Open an archive directly in the TUI. Omit to launch the Home Screen.
+    source: Option<String>,
+
     /// Enable debug logging to archive-sniper.log (or set ARCHIVE_SNIPER_LOG=debug).
     #[arg(long, global = true)]
     debug: bool,
+
     /// Delete the persistent cache directory before starting the operation.
     #[arg(long, global = true)]
     clean_cache: bool,
+
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// Interactive archive browser.
-    Browse {
-        /// Path to a local file or an HTTP(S) URL.
-        source: String,
-    },
     /// List files inside an archive.
     List {
         /// Path to a local file or an HTTP(S) URL.
@@ -121,7 +122,14 @@ async fn main() {
         eprintln!("\n  Cancelling...");
     });
 
-    if let Err(e) = run(cli.command, cancel).await {
+    let run_result = match (cli.source, cli.command) {
+        (None, None) => run_home(cancel).await,
+        (Some(src), None) => run_browse(src, cancel).await,
+        (None, Some(cmd)) => run_subcommand(cmd, cancel).await,
+        (Some(_), Some(_)) => unreachable!(), // args_conflicts_with_subcommands
+    };
+
+    if let Err(e) = run_result {
         // Clean exit on Ctrl-C — message already printed by the handler.
         if let Some(archive::ArchiveError::Cancelled) = e.downcast_ref::<archive::ArchiveError>() {
             std::process::exit(130); // Standard Unix exit code for Ctrl-C
@@ -138,13 +146,19 @@ async fn main() {
     }
 }
 
-async fn run(command: Command, cancel: Arc<AtomicBool>) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_home(_cancel: Arc<AtomicBool>) -> Result<(), Box<dyn std::error::Error>> {
+    tui::run_home().await
+}
+
+async fn run_browse(source: String, _cancel: Arc<AtomicBool>) -> Result<(), Box<dyn std::error::Error>> {
+    let config = SourceConfig::new();
+    let reader = resolve(&source, &config)?;
+    tui::run_with_source(source, reader).await?;
+    Ok(())
+}
+
+async fn run_subcommand(command: Command, cancel: Arc<AtomicBool>) -> Result<(), Box<dyn std::error::Error>> {
     match command {
-        Command::Browse { source } => {
-            let config = SourceConfig::new();
-            let reader = resolve(&source, &config)?;
-            tui::run(source, reader).await?;
-        }
         Command::List { source, all } => {
             let archive = open_with_progress(&source, &cancel).await?;
 
@@ -461,6 +475,33 @@ fn init_logging(debug_flag: bool) -> Option<tracing_appender::non_blocking::Work
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_cli_parsing() {
+        // snipe -> source: None, command: None
+        let cli = Cli::try_parse_from(["snipe"]).unwrap();
+        assert_eq!(cli.source, None);
+        assert!(cli.command.is_none());
+
+        // snipe file.zip -> source: Some("file.zip"), command: None
+        let cli = Cli::try_parse_from(["snipe", "file.zip"]).unwrap();
+        assert_eq!(cli.source.as_deref(), Some("file.zip"));
+        assert!(cli.command.is_none());
+
+        // snipe list file.zip -> source: None, command: Some(Command::List { ... })
+        let cli = Cli::try_parse_from(["snipe", "list", "file.zip"]).unwrap();
+        assert_eq!(cli.source, None);
+        assert!(matches!(cli.command, Some(Command::List { ref source, all: false }) if source == "file.zip"));
+
+        // snipe file.zip list file.zip -> error (args_conflicts_with_subcommands)
+        let res = Cli::try_parse_from(["snipe", "file.zip", "list", "file.zip"]);
+        assert!(res.is_err());
+
+        // snipe extract file.zip foo.txt -o out/ -> Extract variant
+        let cli = Cli::try_parse_from(["snipe", "extract", "file.zip", "foo.txt", "-o", "out/"]).unwrap();
+        assert_eq!(cli.source, None);
+        assert!(matches!(cli.command, Some(Command::Extract { ref source, ref entry, ref output }) if source == "file.zip" && entry == "foo.txt" && output.as_os_str() == "out/"));
+    }
 
     #[test]
     fn test_default_output_folder() {

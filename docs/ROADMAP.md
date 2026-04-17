@@ -80,7 +80,8 @@ These commands define the CLI's public API. The TUI is the default entry point.
 - [x] **Directory selection** — `Space` on a directory should toggle-select all its files recursively.
 - [x] **Document `g`/`G`/`Home`/`End` in help popup** — These bindings exist in code but aren't shown in `?` overlay.
 - [x] **Extraction strategy modal** — Pre-extraction destination picker (archive-name folder / here / custom name). See zen-sniper spec Section 6.1.
-- [ ] **Home screen** — Entry point with URL/path input, bookmarks, and recents (see `TUI_VISION.md` and home-screen spec).
+- [x] **Home screen** — Entry point with URL/path input, bookmarks, and recents (see `TUI_VISION.md` and home-screen spec).
+- [ ] **Fix 'q' key inconsistency** — 'q' quits even when SnipeInput is focused (URLs with 'q' untypable). Need to balance global 'q' mandate with input requirements.
 
 ### Phase 4: Cloud Provider API Readers
 > API-key / app-credential access for publicly shared files. No OAuth required.

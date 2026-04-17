@@ -28,11 +28,35 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io
     Ok(())
 }
 
-pub async fn run(
+pub async fn run_with_source(
     source: String,
     reader: archive_source::ResolvedSource,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    info!(source = %source, "TUI starting");
+    info!(source = %source, "TUI starting in Browse mode");
+    let app = app::App::new_with_source(source.clone());
+    
+    run_app(app, Some(move |tx: tokio::sync::mpsc::UnboundedSender<app::AppMessage>| {
+        debug!("spawning Archive::open task");
+        tokio::spawn(async move {
+            let result = archive::Archive::open_reader(&source, reader).await;
+            let _ = tx.send(app::AppMessage::ArchiveOpened(result));
+        });
+    })).await
+}
+
+pub async fn run_home() -> Result<(), Box<dyn std::error::Error>> {
+    info!("TUI starting in Home mode");
+    let app = app::App::new_home();
+    run_app(app, None::<fn(tokio::sync::mpsc::UnboundedSender<app::AppMessage>)>).await
+}
+
+async fn run_app<F>(
+    mut app: app::App,
+    setup: Option<F>,
+) -> Result<(), Box<dyn std::error::Error>> 
+where 
+    F: FnOnce(tokio::sync::mpsc::UnboundedSender<app::AppMessage>)
+{
     // Install panic hook that restores terminal before printing panic info.
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -44,19 +68,11 @@ pub async fn run(
     let mut terminal = init_terminal()?;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
-    let mut app = app::App::new(source.clone());
-
-    // Spawn the initial archive open task.
-    debug!("spawning Archive::open task");
-    let tx_open = tx.clone();
-    tokio::spawn(async move {
-        let result = archive::Archive::open_reader(&source, reader).await;
-        let _ = tx_open.send(app::AppMessage::ArchiveOpened(result));
-    });
+    if let Some(setup_fn) = setup {
+        setup_fn(tx.clone());
+    }
 
     // Dedicated event reader task (ratatui recommended pattern).
-    // Runs independently so key events are captured immediately,
-    // even when the main loop is busy drawing or processing messages.
     let (event_tx, mut event_rx) =
         tokio::sync::mpsc::unbounded_channel::<crossterm::event::KeyEvent>();
     let cancel_flag_reader = app.cancel_flag.clone();
@@ -66,9 +82,6 @@ pub async fn run(
             if let crossterm::event::Event::Key(key) = event
                 && key.kind == crossterm::event::KeyEventKind::Press
             {
-                // Fast-path: set the cancel flag directly from this
-                // task so spawn_blocking sees it without waiting for
-                // the main loop to process the key event.
                 if key.code == crossterm::event::KeyCode::Esc
                     || key.code == crossterm::event::KeyCode::Char('q')
                 {
@@ -91,21 +104,17 @@ pub async fn run(
         tokio::select! {
             biased;
 
-            // 1. Process Key Events instantly (State update only)
             key = event_rx.recv() => {
                 if let Some(key) = key {
                     app.handle_key(key, &tx);
                 }
             }
-            // 2. Process System Messages instantly (State update only)
             msg = rx.recv() => {
                 if let Some(msg) = msg {
                     app.handle_message(msg, &tx);
                 }
             }
-            // 3. ONLY DRAW when the tick fires (Rendering)
             _ = tick.tick() => {
-                // Read latest progress from shared atomics for the draw.
                 app.poll_progress();
                 terminal.draw(|frame| ui::draw(frame, &mut app))?;
             }
