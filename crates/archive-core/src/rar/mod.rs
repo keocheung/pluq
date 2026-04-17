@@ -4,6 +4,8 @@
 //! RAR4 archives are detected and rejected with a clear error.
 
 pub(crate) mod parse;
+#[cfg(test)]
+mod batch_tests;
 
 pub use parse::{RAR4_SIGNATURE, RAR5_SIGNATURE};
 
@@ -30,20 +32,22 @@ use crate::progress::ProgressReporter;
 /// Note: partial bytes may land in `sink` before a hash mismatch is detected,
 /// because we cannot verify the full output without buffering it. Callers that
 /// need atomic writes must wrap `sink` accordingly.
-pub(crate) async fn verify_and_stream_from_path<W: AsyncWrite + Send + Unpin>(
-    path: &Path,
+pub(crate) async fn verify_and_stream_from_file<W: AsyncWrite + Send + Unpin>(
+    mut file: std::fs::File,
     entry_name: &str,
     expected_crc: Option<u32>,
     expected_blake2: Option<[u8; 32]>,
     sink: &mut W,
     progress: &Arc<Mutex<dyn ProgressReporter>>,
 ) -> Result<u64, CoreError> {
-    let mut file = tokio::fs::File::open(path).await.map_err(|e| {
+    use std::io::Seek;
+    file.seek(std::io::SeekFrom::Start(0)).map_err(|e| {
         CoreError::BitstreamError {
-            detail: format!("failed to open temp file for verification: {e}"),
+            detail: format!("failed to seek temp file for verification: {e}"),
         }
     })?;
 
+    let mut file = tokio::fs::File::from_std(file);
     let mut crc_hasher = crc32fast::Hasher::new();
     let mut blake_state = blake2sp::State::new();
     let mut buf = vec![0u8; 256 * 1024];
@@ -113,17 +117,20 @@ pub(crate) async fn verify_and_stream_from_path<W: AsyncWrite + Send + Unpin>(
     Ok(total_bytes)
 }
 
-/// Blocking version of [`verify_and_stream_from_path`] for use inside `spawn_blocking`.
-pub(crate) fn verify_and_stream_from_path_sync<W: Write>(
-    path: &Path,
+/// Blocking version of [`verify_and_stream_from_file`] for use inside `spawn_blocking`.
+pub(crate) fn verify_and_stream_from_file_sync<W: Write>(
+    mut file: std::fs::File,
     entry_name: &str,
     expected_crc: Option<u32>,
     expected_blake2: Option<[u8; 32]>,
     sink: &mut W,
     progress: &Arc<Mutex<dyn ProgressReporter>>,
 ) -> Result<u64, CoreError> {
-    let mut file = std::fs::File::open(path).map_err(|e| CoreError::BitstreamError {
-        detail: format!("failed to open temp file for sync verification: {e}"),
+    use std::io::Seek;
+    file.seek(std::io::SeekFrom::Start(0)).map_err(|e| {
+        CoreError::BitstreamError {
+            detail: format!("failed to seek temp file for sync verification: {e}"),
+        }
     })?;
 
     let mut crc_hasher = crc32fast::Hasher::new();
@@ -148,13 +155,16 @@ pub(crate) fn verify_and_stream_from_path_sync<W: Write>(
             blake_state.update(chunk);
         }
 
-        sink.write_all(chunk).map_err(|e| CoreError::BitstreamError {
-            detail: format!("failed to write to sync sink: {e}"),
+        sink.write_all(chunk).map_err(|e| {
+            CoreError::BitstreamError {
+                detail: format!("failed to write to sink (sync): {e}"),
+            }
         })?;
 
         total_bytes += n as u64;
     }
 
+    // Finalize hashes and compare.
     if let Some(expected) = expected_crc {
         let actual = crc_hasher.finalize();
         if actual != expected {
@@ -194,9 +204,9 @@ use serde::{Deserialize, Serialize};
 
 use tracing::info;
 
-use crate::archive_reader::ArchiveReader;
+use crate::archive_reader::{ArchiveReader, BatchResult};
 use crate::codec::CompressionMethod;
-use crate::io::LocalPath;
+use crate::io::{build_clusters, FetchRegion, LocalPath};
 use crate::rar::parse::{
     QoCachedBlock, parse_block_header, parse_file_header, parse_main_header, parse_quick_open_data,
 };
@@ -312,7 +322,8 @@ impl<R: ReadAt> RarArchive<R> {
     /// Open a RAR5 archive by verifying the signature and scanning file headers.
     ///
     /// Reads in 64 KiB chunks to minimise HTTP round trips for cloud sources.
-    /// Solid entries are skipped — only non-solid entries appear in the listing.
+    /// Solid entries are listed but rejected at extract (and reported as
+    /// failures in batch extraction) — user sees them, can't extract them.
     ///
     /// For local sources, always performs the sequential scan (or Quick Open).
     /// For HTTP sources without Quick Open, defers the scan — returns with
@@ -425,11 +436,10 @@ impl<R: ReadAt> RarArchive<R> {
         })
     }
 
-    /// All entries in the archive (non-solid only; solid entries are omitted).
+    /// All entries in the archive.
     ///
-    /// Returns an empty slice if the archive has not yet been scanned.
-    /// The [`Archive`] facade ensures via the type system that `entries()` is
-    /// only called after a successful scan, so this is a safety net only.
+    /// Solid entries are included in the index but cannot be extracted via
+    /// surgical cloud paths (surgical extraction requires random access).
     pub fn entries(&self) -> &[ArchiveEntry] {
         if self.scan_complete { &self.entries } else { &[] }
     }
@@ -578,139 +588,124 @@ impl<R: ReadAt> RarArchive<R> {
                 2 => {
                     // File block.
                     let file_hdr = parse_file_header(&buf[buf_pos..], block)?;
+                    let is_solid = file_hdr.compression.solid;
 
-                    if !file_hdr.compression.solid {
-                        let hdr_size = file_hdr.raw.total_size - file_hdr.raw.data_size;
-                        let entry = ArchiveEntry {
-                            name: file_hdr.name.clone(),
-                            compressed_size: file_hdr.raw.data_size,
-                            uncompressed_size: file_hdr.unpacked_size,
-                            is_directory: file_hdr.is_directory,
-                            is_encrypted: file_hdr.encryption.is_some(),
-                            modified_at: file_hdr.mtime.map(unix_to_system_time),
-                            compression_method: rar_method_to_codec(
-                                file_hdr.compression.method,
-                            ),
-                            index: entries.len(),
-                        };
-                        let location = RarEntryLocation {
-                            header_offset: offset,
-                            header_size: hdr_size,
-                            data_offset: offset + hdr_size,
-                            data_size: file_hdr.raw.data_size,
-                            method: file_hdr.compression.method,
-                            dict_size: file_hdr.compression.dict_size,
-                            crc32: file_hdr.data_crc32,
-                            blake2_hash: file_hdr.blake2_hash,
-                            is_solid: false,
-                            is_encrypted: file_hdr.encryption.is_some(),
-                        };
-                        let crc32 = location.crc32;
-                        let blake2_hash = location.blake2_hash;
-                        entries.push(entry.clone());
-                        locations.push(location);
+                    let hdr_size = file_hdr.raw.total_size - file_hdr.raw.data_size;
+                    let entry = ArchiveEntry {
+                        name: file_hdr.name.clone(),
+                        compressed_size: file_hdr.raw.data_size,
+                        uncompressed_size: file_hdr.unpacked_size,
+                        is_directory: file_hdr.is_directory,
+                        is_encrypted: file_hdr.encryption.is_some(),
+                        modified_at: file_hdr.mtime.map(unix_to_system_time),
+                        compression_method: rar_method_to_codec(file_hdr.compression.method),
+                        index: entries.len(),
+                    };
+                    let location = RarEntryLocation {
+                        header_offset: offset,
+                        header_size: hdr_size,
+                        data_offset: offset + hdr_size,
+                        data_size: file_hdr.raw.data_size,
+                        method: file_hdr.compression.method,
+                        dict_size: file_hdr.compression.dict_size,
+                        crc32: file_hdr.data_crc32,
+                        blake2_hash: file_hdr.blake2_hash,
+                        is_solid,
+                        is_encrypted: file_hdr.encryption.is_some(),
+                    };
+                    let crc32 = location.crc32;
+                    let blake2_hash = location.blake2_hash;
+                    entries.push(entry.clone());
+                    locations.push(location);
 
-                        // Snippet branch: produce a mini-archive for this entry.
-                        if let Some(ref config) = snippet_config
-                            && (config.filter)(&entry)
-                        {
-                            let hdr_bytes_owned =
-                                buf[buf_pos..buf_pos + hdr_bytes].to_vec();
+                    if !is_solid
+                        && let Some(ref config) = snippet_config
+                        && (config.filter)(&entry)
+                    {
+                        let hdr_bytes_owned = buf[buf_pos..buf_pos + hdr_bytes].to_vec();
 
-                                let temp_file = tokio::task::spawn_blocking(
-                                    tempfile::NamedTempFile::new,
-                                )
-                                .await
-                                .map_err(|e| CoreError::BitstreamError {
-                                    detail: format!("spawn temp: {e}"),
-                                })?
-                                .map_err(|e| CoreError::BitstreamError {
-                                    detail: format!("create temp: {e}"),
-                                })?;
+                        let temp_file = tokio::task::spawn_blocking(tempfile::NamedTempFile::new)
+                            .await
+                            .map_err(|e| CoreError::BitstreamError {
+                                detail: format!("spawn temp: {e}"),
+                            })?
+                            .map_err(|e| CoreError::BitstreamError {
+                                detail: format!("create temp: {e}"),
+                            })?;
 
-                                let std_file = temp_file.as_file().try_clone().map_err(
-                                    |e| CoreError::BitstreamError {
-                                        detail: format!("clone temp file: {e}"),
-                                    },
-                                )?;
-                                let mut snippet_writer =
-                                    tokio::io::BufWriter::with_capacity(
-                                        64 * 1024,
-                                        tokio::fs::File::from_std(std_file),
-                                    );
-
-                                snippet_writer
-                                    .write_all(&config.preamble)
-                                    .await
-                                    .map_err(snippet_write_err)?;
-                                snippet_writer
-                                    .write_all(&hdr_bytes_owned)
-                                    .await
-                                    .map_err(snippet_write_err)?;
-
-                                buf_pos += hdr_bytes;
-                                let data_in_buf =
-                                    (buf.len() - buf_pos).min(data_size as usize);
-                                if data_in_buf > 0 {
-                                    snippet_writer
-                                        .write_all(&buf[buf_pos..buf_pos + data_in_buf])
-                                        .await
-                                        .map_err(snippet_write_err)?;
-                                }
-                                buf_pos += data_in_buf;
-
-                                let data_remaining = data_size - data_in_buf as u64;
-                                if data_remaining > 0 {
-                                    buf.drain(..buf_pos);
-                                    buf_pos = 0;
-                                    tokio::io::copy(
-                                        &mut (&mut stream).take(data_remaining),
-                                        &mut snippet_writer,
-                                    )
-                                    .await
-                                    .map_err(|e| scan_stream_err(e, offset))?;
-                                }
-
-                                snippet_writer
-                                    .write_all(&config.end_block)
-                                    .await
-                                    .map_err(snippet_write_err)?;
-                                snippet_writer
-                                    .flush()
-                                    .await
-                                    .map_err(snippet_write_err)?;
-                                drop(snippet_writer);
-
-                                let (_, snippet_path) =
-                                    temp_file.keep().map_err(|e| CoreError::BitstreamError {
-                                        detail: format!("keep temp file: {e}"),
-                                    })?;
-                                if config
-                                    .sender
-                                    .send(SnippetMsg {
-                                        path: snippet_path.clone(),
-                                        entry: entry.clone(),
-                                        crc32,
-                                        blake2_hash,
-                                    })
-                                    .await
-                                    .is_err()
-                                {
-                                    let _ = std::fs::remove_file(&snippet_path);
-                                    return Err(CoreError::BitstreamError {
-                                        detail: "extraction consumer dropped unexpectedly"
-                                            .into(),
-                                    });
-                                }
-
-                                offset += total_size;
-                                progress
-                                    .lock()
-                                    .unwrap()
-                                    .on_scan_progress(offset, entries.len());
-                                continue;
+                        let std_file = temp_file.as_file().try_clone().map_err(|e| {
+                            CoreError::BitstreamError {
+                                detail: format!("clone temp file: {e}"),
                             }
+                        })?;
+                        let mut snippet_writer = tokio::io::BufWriter::with_capacity(
+                            64 * 1024,
+                            tokio::fs::File::from_std(std_file),
+                        );
+
+                        snippet_writer
+                            .write_all(&config.preamble)
+                            .await
+                            .map_err(snippet_write_err)?;
+                        snippet_writer
+                            .write_all(&hdr_bytes_owned)
+                            .await
+                            .map_err(snippet_write_err)?;
+
+                        buf_pos += hdr_bytes;
+                        let data_in_buf = (buf.len() - buf_pos).min(data_size as usize);
+                        if data_in_buf > 0 {
+                            snippet_writer
+                                .write_all(&buf[buf_pos..buf_pos + data_in_buf])
+                                .await
+                                .map_err(snippet_write_err)?;
                         }
+                        buf_pos += data_in_buf;
+
+                        let data_remaining = data_size - data_in_buf as u64;
+                        if data_remaining > 0 {
+                            buf.drain(..buf_pos);
+                            buf_pos = 0;
+                            tokio::io::copy(
+                                &mut (&mut stream).take(data_remaining),
+                                &mut snippet_writer,
+                            )
+                            .await
+                            .map_err(|e| scan_stream_err(e, offset))?;
+                        }
+
+                        snippet_writer
+                            .write_all(&config.end_block)
+                            .await
+                            .map_err(snippet_write_err)?;
+                        snippet_writer.flush().await.map_err(snippet_write_err)?;
+                        drop(snippet_writer);
+
+                        let (_, snippet_path) =
+                            temp_file.keep().map_err(|e| CoreError::BitstreamError {
+                                detail: format!("keep temp file: {e}"),
+                            })?;
+                        if config
+                            .sender
+                            .send(SnippetMsg {
+                                path: snippet_path.clone(),
+                                entry: entry.clone(),
+                                crc32,
+                                blake2_hash,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            let _ = std::fs::remove_file(&snippet_path);
+                            return Err(CoreError::BitstreamError {
+                                detail: "extraction consumer dropped unexpectedly".into(),
+                            });
+                        }
+
+                        offset += total_size;
+                        progress.lock().unwrap().on_scan_progress(offset, entries.len());
+                        continue;
+                    }
 
                     buf_pos += hdr_bytes; // advance past header
 
@@ -835,6 +830,207 @@ impl<R: ReadAt> RarArchive<R> {
             password,
         )
         .await
+    }
+
+    /// Extract multiple entries using stream coalescing for efficiency (Cloud only).
+    ///
+    /// For cloud archives, clusters nearby entries to reduce HTTP round trips.
+    /// For local archives, delegates to the default `extract_selected` loop.
+    pub async fn extract_selected<SinkFn>(
+        &self,
+        entries: &[&ArchiveEntry],
+        mut sink_factory: SinkFn,
+        progress: Arc<Mutex<dyn ProgressReporter>>,
+        password: Option<&[u8]>,
+    ) -> Result<BatchResult, CoreError>
+    where
+        R: Send + Sync + 'static,
+        SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn AsyncWrite + Send + Unpin>> + Send,
+    {
+        if entries.is_empty() {
+            return Ok(BatchResult { bytes_written: 0, succeeded: 0, failed: vec![] });
+        }
+
+        // 1. Local path: delegate to default loop (cheap already).
+        if self.local_path.is_some() {
+            return crate::archive_reader::extract_selected_default(
+                self,
+                entries,
+                sink_factory,
+                progress,
+                password,
+            )
+            .await;
+        }
+
+        // 2. Cloud path: build clusters.
+        let mut batch = BatchResult { bytes_written: 0, succeeded: 0, failed: vec![] };
+
+        let work: Vec<(&ArchiveEntry, &RarEntryLocation)> = entries
+            .iter()
+            .filter_map(|&e| {
+                let loc = &self.locations[e.index];
+                if e.is_directory {
+                    None
+                } else if loc.is_solid {
+                    batch.failed.push((
+                        e.name.clone(),
+                        "solid RAR entries are not supported for batch extraction".into(),
+                    ));
+                    None
+                } else {
+                    Some((e, loc))
+                }
+            })
+            .collect();
+
+        if work.is_empty() {
+            // Might have skipped all if they were solid or directories.
+            return Ok(batch);
+        }
+
+        let regions: Vec<FetchRegion<(&ArchiveEntry, &RarEntryLocation)>> = work
+            .into_iter()
+            .map(|(e, loc)| FetchRegion {
+                offset: loc.header_offset,
+                total_len: loc.header_size.saturating_add(loc.data_size),
+                payload: (e, loc),
+            })
+            .collect();
+
+        let clusters = build_clusters(regions);
+        let password_bytes = password.map(|p| p.to_vec());
+        let archive_size = self.archive_size;
+
+        for cluster in &clusters {
+            // Cancel check between clusters.
+            if progress.lock().unwrap().should_cancel() {
+                return Err(CoreError::Cancelled);
+            }
+
+            let first = &cluster[0];
+            let last = &cluster[cluster.len() - 1];
+            let cluster_start = first.offset;
+            let cluster_end = last.offset.saturating_add(last.total_len).min(archive_size);
+            let cluster_len = cluster_end.saturating_sub(cluster_start);
+
+            info!(
+                entries = cluster.len(),
+                cluster_start,
+                cluster_len,
+                "RAR extract_selected: opening cluster stream"
+            );
+
+            let stream = self
+                .reader
+                .read_stream(cluster_start, cluster_len)
+                .await
+                .map_err(CoreError::Io)?;
+
+            // Owned clones for spawn_blocking.
+            let cluster_data: Vec<(ArchiveEntry, RarEntryLocation)> = cluster
+                .iter()
+                .map(|r| (r.payload.0.clone(), r.payload.1.clone()))
+                .collect();
+            let preamble = self.archive_preamble.clone();
+            let eoa = self.end_block.clone();
+            let pw = password_bytes.clone();
+            let prog = progress.clone();
+            let handle = tokio::runtime::Handle::current();
+
+            let results: Vec<Result<tempfile::NamedTempFile, CoreError>> =
+                tokio::task::spawn_blocking(move || {
+                    let mut sync_reader = SyncIoBridge::new_with_handle(stream, handle);
+                    let mut stream_pos = cluster_start;
+                    let mut cluster_results = Vec::with_capacity(cluster_data.len());
+
+                    for (_entry, loc) in cluster_data {
+                        // Cancel check between entries.
+                        if prog.lock().unwrap().should_cancel() {
+                            return Err(CoreError::Cancelled);
+                        }
+
+                        // a. Skip gap.
+                        let gap = loc.header_offset.saturating_sub(stream_pos);
+                        if gap > 0 {
+                            std::io::copy(
+                                &mut (&mut sync_reader).take(gap),
+                                &mut std::io::sink(),
+                            )
+                            .map_err(|e| CoreError::BitstreamError {
+                                detail: format!("skip gap failed: {e}"),
+                            })?;
+                            stream_pos += gap;
+                        }
+
+                        // b. Read header.
+                        let mut header_bytes = vec![0u8; loc.header_size as usize];
+                        sync_reader.read_exact(&mut header_bytes).map_err(|e| {
+                            CoreError::BitstreamError {
+                                detail: format!("read header failed: {e}"),
+                            }
+                        })?;
+                        stream_pos += loc.header_size;
+
+                        // c-f. Assemble synthetic archive.
+                        let temp_res = assemble_and_unrar_synthetic(
+                            &preamble,
+                            &header_bytes,
+                            &mut sync_reader,
+                            loc.data_size,
+                            &eoa,
+                            pw.as_deref(),
+                            &prog,
+                        );
+
+                        match temp_res {
+                            Ok(tmp) => cluster_results.push(Ok(tmp)),
+                            Err(e) => cluster_results.push(Err(e)),
+                        }
+                        stream_pos += loc.data_size;
+                    }
+                    Ok(cluster_results)
+                })
+                .await
+                .map_err(|e| CoreError::BitstreamError {
+                    detail: format!("RAR cluster task panicked: {e}"),
+                })??;
+
+            // 7. Verification and streaming.
+            for (result, region) in results.into_iter().zip(cluster.iter()) {
+                let (entry, loc) = region.payload;
+                match result {
+                    Ok(out_tmp) => {
+                        if let Some(mut sink) = sink_factory(entry) {
+                            let verify_res = verify_and_stream_from_file(
+                                out_tmp.into_file(),
+                                &entry.name,
+                                loc.crc32,
+                                loc.blake2_hash,
+                                &mut sink,
+                                &progress,
+                            )
+                            .await;
+
+                            match verify_res {
+                                Ok(written) => {
+                                    batch.bytes_written += written;
+                                    batch.succeeded += 1;
+                                }
+                                Err(e) => {
+                                    batch.failed.push((entry.name.clone(), e.to_string()));
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        batch.failed.push((entry.name.clone(), e.to_string()));
+                    }
+                }
+            }
+        }
+
+        Ok(batch)
     }
 
     /// Bytes that must be transferred to produce this entry.
@@ -1185,18 +1381,15 @@ impl<R: ReadAt> RarArchive<R> {
                 detail: format!("extraction task panicked: {e}"),
             })??;
 
-        let result = verify_and_stream_from_path(
-            out_tmp.path(),
+        verify_and_stream_from_file(
+            out_tmp.into_file(),
             &entry_name,
             expected_crc,
             expected_blake2,
             sink,
             &progress,
         )
-        .await;
-
-        drop(out_tmp); // Ensure deletion.
-        result
+        .await
     }
 
     /// Extract a compressed (or encrypted) entry from a **cloud** archive via `unrar`.
@@ -1237,114 +1430,39 @@ impl<R: ReadAt> RarArchive<R> {
             .await
             .map_err(CoreError::Io)?;
 
-        // Snapshot preamble and end block for the blocking closure.
         let archive_preamble = self.archive_preamble.clone();
         let end_block = self.end_block.clone();
+        let data_size = loc.data_size;
 
-        let (cancel, on_progress) = build_unrar_progress_hooks(&progress);
         let handle = tokio::runtime::Handle::current();
+        let mut sync_reader = SyncIoBridge::new_with_handle(compressed_stream, handle);
+        let prog_clone = progress.clone();
 
-        // 3. Assemble synthetic archive, extract with unrar — all in spawn_blocking.
-        let out_tmp =
-            tokio::task::spawn_blocking(move || -> Result<tempfile::NamedTempFile, CoreError> {
-                // Create temp file for synthetic RAR5 archive.
-                let temp_file = tempfile::NamedTempFile::new().map_err(|e| {
-                    CoreError::BitstreamError {
-                        detail: format!("failed to create synthetic archive temp file: {e}"),
-                    }
-                })?;
+        let out_tmp = tokio::task::spawn_blocking(move || {
+            assemble_and_unrar_synthetic(
+                archive_preamble.as_ref(),
+                file_header_bytes.as_ref(),
+                &mut sync_reader,
+                data_size,
+                end_block.as_ref(),
+                password_bytes.as_deref(),
+                &prog_clone,
+            )
+        })
+        .await
+        .map_err(|e| CoreError::BitstreamError {
+            detail: format!("extraction task panicked: {e}"),
+        })??;
 
-                // Create second temp file for extraction output.
-                let out_tmp = tempfile::NamedTempFile::new().map_err(|e| {
-                    CoreError::BitstreamError {
-                        detail: format!("failed to create extraction temp file: {e}"),
-                    }
-                })?;
-                let out_path = out_tmp.path().to_path_buf();
-
-                {
-                    use std::io::Write;
-                    let mut writer =
-                        std::io::BufWriter::new(temp_file.as_file());
-                    for chunk in [
-                        archive_preamble.as_ref(),
-                        file_header_bytes.as_ref(),
-                    ] {
-                        writer.write_all(chunk).map_err(|e| {
-                            CoreError::BitstreamError {
-                                detail: format!("temp file write failed: {e}"),
-                            }
-                        })?;
-                    }
-
-                    // Stream compressed data from network to temp file (O(1) memory).
-                    let mut sync_reader = SyncIoBridge::new_with_handle(compressed_stream, handle);
-                    std::io::copy(&mut sync_reader, &mut writer).map_err(|e| {
-                        let detail = e.to_string();
-                        if let Some(inner) = e.into_inner()
-                            && let Ok(read_error) = inner.downcast::<crate::io::ReadError>()
-                        {
-                            return CoreError::Io(*read_error);
-                        }
-                        CoreError::BitstreamError {
-                            detail: format!("streaming compressed data to temp failed: {detail}"),
-                        }
-                    })?;
-
-                    writer.write_all(end_block.as_ref()).map_err(|e| {
-                        CoreError::BitstreamError {
-                            detail: format!("temp file write failed: {e}"),
-                        }
-                    })?;
-
-                    writer.flush().map_err(|e| CoreError::BitstreamError {
-                        detail: format!("temp file flush failed: {e}"),
-                    })?;
-                }
-
-                // Extract from the synthetic archive.
-                let temp_path = temp_file.path().to_path_buf();
-                let archive = match &password_bytes {
-                    Some(pw) => unrar::Archive::with_password(&temp_path, pw.as_slice())
-                        .open_for_processing()
-                        .map_err(map_unrar_error)?,
-                    None => unrar::Archive::new(&temp_path)
-                        .open_for_processing()
-                        .map_err(map_unrar_error)?,
-                };
-
-                let header = archive.read_header().map_err(map_unrar_error)?;
-                let header = header.ok_or_else(|| CoreError::BitstreamError {
-                    detail: "synthetic archive produced no entries".into(),
-                })?;
-                header
-                    .extract_to_with_progress(
-                        &out_path,
-                        Some(cancel),
-                        Some(on_progress),
-                    )
-                    .map_err(map_unrar_error)?;
-
-                // temp_file is dropped here → synthetic archive deleted.
-                Ok(out_tmp)
-            })
-            .await
-            .map_err(|e| CoreError::BitstreamError {
-                detail: format!("extraction task panicked: {e}"),
-            })??;
-
-        let result = verify_and_stream_from_path(
-            out_tmp.path(),
+        verify_and_stream_from_file(
+            out_tmp.into_file(),
             &entry_name,
             expected_crc,
             expected_blake2,
             sink,
             &progress,
         )
-        .await;
-
-        drop(out_tmp); // Ensure deletion.
-        result
+        .await
     }
 
     /// Attempt to build the entry list from the Quick Open (QO) service block.
@@ -1423,9 +1541,7 @@ impl<R: ReadAt> RarArchive<R> {
                 Err(_) => continue,
             };
 
-            if file_hdr.compression.solid {
-                continue; // skip solid entries
-            }
+            let is_solid = file_hdr.compression.solid;
 
             let hdr_size = file_hdr.raw.total_size - file_hdr.raw.data_size;
             let entry = ArchiveEntry {
@@ -1447,7 +1563,7 @@ impl<R: ReadAt> RarArchive<R> {
                 dict_size: file_hdr.compression.dict_size,
                 crc32: file_hdr.data_crc32,
                 blake2_hash: file_hdr.blake2_hash,
-                is_solid: false,
+                is_solid,
                 is_encrypted: file_hdr.encryption.is_some(),
             };
             entries.push(entry);
@@ -1484,6 +1600,19 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for RarArchive<R> {
         password: Option<&[u8]>,
     ) -> Result<u64, CoreError> {
         RarArchive::extract(self, entry, sink, progress, password).await
+    }
+
+    async fn extract_selected<SinkFn>(
+        &self,
+        entries: &[&ArchiveEntry],
+        sink_factory: SinkFn,
+        progress: Arc<Mutex<dyn ProgressReporter>>,
+        password: Option<&[u8]>,
+    ) -> Result<BatchResult, CoreError>
+    where
+        SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn AsyncWrite + Send + Unpin>> + Send,
+    {
+        RarArchive::extract_selected(self, entries, sink_factory, progress, password).await
     }
 
     async fn test(&self, entry: &ArchiveEntry, progress: Arc<Mutex<dyn ProgressReporter>>) -> Result<(), CoreError> {
@@ -1710,6 +1839,98 @@ pub(crate) fn map_unrar_error(e: unrar::error::UnrarError) -> CoreError {
     }
 }
 
+/// Assemble a synthetic standalone RAR archive and extract it.
+///
+/// Internal helper used by cloud extraction paths (single and batched)
+/// inside `spawn_blocking`.
+pub(crate) fn assemble_and_unrar_synthetic<R: Read>(
+    preamble: &[u8],
+    header_bytes: &[u8],
+    data_stream: &mut R,
+    data_size: u64,
+    eoa: &[u8],
+    password: Option<&[u8]>,
+    progress: &Arc<Mutex<dyn ProgressReporter>>,
+) -> Result<tempfile::NamedTempFile, CoreError> {
+    // 1. Create temp file for synthetic RAR5 archive.
+    let temp_file = tempfile::NamedTempFile::new().map_err(|e| CoreError::BitstreamError {
+        detail: format!("failed to create synthetic archive temp file: {e}"),
+    })?;
+
+    // 2. Assemble.
+    {
+        let mut writer = std::io::BufWriter::new(temp_file.as_file());
+        writer.write_all(preamble).map_err(|e| CoreError::BitstreamError {
+            detail: format!("temp file write preamble failed: {e}"),
+        })?;
+        writer.write_all(header_bytes).map_err(|e| CoreError::BitstreamError {
+            detail: format!("temp file write header failed: {e}"),
+        })?;
+
+        // Stream exactly data_size bytes from the bridged reader into writer.
+        std::io::copy(&mut data_stream.take(data_size), &mut writer).map_err(|e| {
+            let detail = e.to_string();
+            if let Some(inner) = e.into_inner()
+                && let Ok(read_error) = inner.downcast::<crate::io::ReadError>()
+            {
+                return CoreError::Io(*read_error);
+            }
+            CoreError::BitstreamError {
+                detail: format!("streaming compressed data to temp failed: {detail}"),
+            }
+        })?;
+
+        writer.write_all(eoa).map_err(|e| CoreError::BitstreamError {
+            detail: format!("temp file write EOA failed: {e}"),
+        })?;
+
+        writer.flush().map_err(|e| CoreError::BitstreamError {
+            detail: format!("temp file flush failed: {e}"),
+        })?;
+    }
+
+    // 3. Unrar.
+    let (cancel, on_progress) = build_unrar_progress_hooks(progress);
+    unrar_synthetic_to_tmp(temp_file.path(), password, cancel, on_progress)
+}
+
+/// Extract from a synthetic standalone RAR archive to a temp file.
+///
+/// Internal helper used by cloud extraction paths (single and batched).
+fn unrar_synthetic_to_tmp(
+    synthetic_path: &Path,
+    password: Option<&[u8]>,
+    cancel: Arc<AtomicBool>,
+    on_progress: Box<dyn Fn(usize) + Send>,
+) -> Result<tempfile::NamedTempFile, CoreError> {
+    // Create temp file for extraction output.
+    let out_tmp = tempfile::NamedTempFile::new().map_err(|e| CoreError::BitstreamError {
+        detail: format!("failed to create extraction temp file: {e}"),
+    })?;
+    let out_path = out_tmp.path().to_path_buf();
+
+    let archive = match password {
+        Some(pw) => unrar::Archive::with_password(synthetic_path, pw)
+            .open_for_processing()
+            .map_err(map_unrar_error)?,
+        None => unrar::Archive::new(synthetic_path)
+            .open_for_processing()
+            .map_err(map_unrar_error)?,
+    };
+
+    {
+        let header = archive.read_header().map_err(map_unrar_error)?;
+        let header = header.ok_or_else(|| CoreError::BitstreamError {
+            detail: "synthetic archive produced no entries".into(),
+        })?;
+        header
+            .extract_to_with_progress(&out_path, Some(cancel), Some(on_progress))
+            .map_err(map_unrar_error)?;
+    } // archive (and header) dropped here, releasing synthetic_path and out_path handles.
+
+    Ok(out_tmp)
+}
+
 /// Extract multiple entries from a RAR5 archive via `unrar` in a single pass.
 ///
 /// Opens the archive once and iterates through all headers, extracting entries
@@ -1781,8 +2002,9 @@ where
                     archive = next_archive;
 
                     // Verify and stream from temp file to sink using sync verifier.
-                    let bytes = verify_and_stream_from_path_sync(
-                        &out_path,
+                    // Passes the opened file handle to avoid Permission Denied on reopen.
+                    let bytes = verify_and_stream_from_file_sync(
+                        out_tmp.into_file(),
                         &name,
                         loc.crc32,
                         loc.blake2_hash,
@@ -1791,7 +2013,6 @@ where
                     )?;
 
                     total_bytes += bytes;
-                    drop(out_tmp); // Ensure deletion.
                 } else {
                     // Sink factory returned None — skip this entry.
                     archive = header.skip().map_err(map_unrar_error)?;
@@ -1892,17 +2113,15 @@ where
             .map_err(map_unrar_error)?;
 
         // Verify and stream from temp file to sink using sync verifier.
-        let bytes = verify_and_stream_from_path_sync(
-            &out_path,
+        // Passes the opened file handle to avoid Permission Denied on reopen.
+        verify_and_stream_from_file_sync(
+            out_tmp.into_file(),
             &entry_name,
             expected_crc,
             expected_blake2,
             &mut sink,
             &progress_sync,
-        );
-
-        drop(out_tmp); // Deletes temp file after verification.
-        bytes
+        )
     })
     .await
     .map_err(|e| CoreError::BitstreamError {
@@ -1966,89 +2185,77 @@ mod tests {
 
     // ── RarArchive::open — in-memory fixtures ─────────────────────────────────
 
-    /// Build a minimal valid RAR5 archive in memory: signature + main header +
-    /// one Store file entry + end-of-archive block.
+    /// Build a minimal valid RAR5 archive in memory with multiple Store entries.
     ///
-    /// Used to verify `RarArchive::open` without requiring a real `.rar` file.
+    /// Used to verify `RarArchive` behavior without requiring real `.rar` files.
+    pub(crate) fn build_minimal_rar5_multi(
+        entries: &[(&str, &[u8], bool)],
+    ) -> Vec<u8> {
+        // ── End-of-archive block ──────────────────────────────────────────────
+        let eoa = build_end_of_archive_block();
+
+        let mut archive = Vec::new();
+        archive.extend_from_slice(&RAR5_SIGNATURE);
+
+        // ── Main archive header (type 1) ──────────────────────────────────────
+        let archive_flags: u8 = 0;
+        let main_body = vec![archive_flags];
+        let main_header_content = 1 + 1 + main_body.len();
+        let mut main_crc_region = vec![
+            main_header_content as u8,
+            0x01u8, // main header
+            0x00u8, // no extra
+        ];
+        main_crc_region.extend_from_slice(&main_body);
+        let main_crc = crc32fast::hash(&main_crc_region);
+        archive.extend_from_slice(&main_crc.to_le_bytes());
+        archive.extend_from_slice(&main_crc_region);
+
+        // ── File entries ──────────────────────────────────────────────────────
+        for (filename, data, solid) in entries {
+            let solid_bit: u8 = if *solid { 1 } else { 0 };
+            let compression_info: u8 = solid_bit << 6;
+            let mtime: u32 = 1_700_000_000;
+            let crc32_val: u32 = crc32fast::hash(data);
+            let name_bytes = filename.as_bytes();
+
+            let mut body = Vec::new();
+            body.push(0x06u8); // mtime + crc32
+            body.push(data.len() as u8); // unpacked_size (assuming < 128)
+            body.push(0x20u8); // attributes
+            body.extend_from_slice(&mtime.to_le_bytes());
+            body.extend_from_slice(&crc32_val.to_le_bytes());
+            body.push(compression_info);
+            body.push(0x01u8); // host_os = Unix
+            body.push(name_bytes.len() as u8); // name_len
+            body.extend_from_slice(name_bytes);
+
+            let header_size = 1 + 1 + 1 + body.len();
+            let mut crc_region = vec![
+                header_size as u8,
+                0x02u8, // file header
+                0x02u8, // data area flag
+                data.len() as u8, // data size vint
+            ];
+            crc_region.extend_from_slice(&body);
+
+            let file_hdr_crc = crc32fast::hash(&crc_region);
+            archive.extend_from_slice(&file_hdr_crc.to_le_bytes());
+            archive.extend_from_slice(&crc_region);
+            archive.extend_from_slice(data);
+        }
+
+        archive.extend_from_slice(&eoa);
+        archive
+    }
+
+    /// Backwards compat for single entry.
     pub(crate) fn build_minimal_rar5(
         filename: &str,
         data: &[u8],
         solid: bool,
     ) -> Vec<u8> {
-        // ── End-of-archive block ──────────────────────────────────────────────
-        let eoa = build_end_of_archive_block();
-
-        // ── File header block (type 2) ────────────────────────────────────────
-        // file_flags: 0x06 (mtime + crc32 present, size known, not dir)
-        // Adjust compression_info for solid flag.
-        let solid_bit: u8 = if solid { 1 } else { 0 };
-        // compression_info bits: version=0, solid=solid_bit(bit6), method=0(bits7-9)
-        let compression_info: u8 = solid_bit << 6;
-
-        let mtime: u32 = 1_700_000_000;
-        let crc32_val: u32 = crc32fast::hash(data);
-        let data_len = data.len() as u8; // only correct for small test data
-
-        let name_bytes = filename.as_bytes();
-        let name_len = name_bytes.len() as u8;
-
-        let mut body = Vec::new();
-        body.push(0x06u8);                              // file_flags: mtime + crc32
-        body.push(data_len);                            // unpacked_size (vint, 1 byte)
-        body.push(0x20u8);                              // attributes
-        body.extend_from_slice(&mtime.to_le_bytes());   // mtime (4 bytes)
-        body.extend_from_slice(&crc32_val.to_le_bytes()); // data_crc32 (4 bytes)
-        body.push(compression_info);                    // compression_info (vint, 1 byte)
-        body.push(0x01u8);                              // host_os = Unix
-        body.push(name_len);                            // name_len (vint, 1 byte)
-        body.extend_from_slice(name_bytes);             // name
-
-        // block_type=2, flags=0x0002 (data area present), data_area_size = data.len()
-        let header_content_len = 1 + 1 + 1 + body.len(); // block_type + flags + data_size_vint + body
-        let header_size = header_content_len;
-
-        // Encode header_size as vint (1 byte, assuming < 128).
-        let mut crc_region = vec![
-            header_size as u8,
-            0x02u8,   // block_type = 2
-            0x02u8,   // flags = 0x0002 (data area flag)
-            data_len, // data_area_size vint
-        ];
-        crc_region.extend_from_slice(&body);
-
-        let file_hdr_crc = crc32fast::hash(&crc_region);
-        let mut file_block = Vec::new();
-        file_block.extend_from_slice(&file_hdr_crc.to_le_bytes());
-        file_block.extend_from_slice(&crc_region);
-        file_block.extend_from_slice(data); // data area
-
-        // ── Main archive header (type 1) ──────────────────────────────────────
-        // file_flags = 0 (no volume, no comment, no solid)
-        let archive_flags: u8 = 0;
-        let main_body = vec![archive_flags]; // archive_flags vint
-
-        let main_header_content = 1 + 1 + main_body.len(); // block_type + flags + body
-        let main_header_size = main_header_content;
-
-        let mut main_crc_region = vec![
-            main_header_size as u8, // header_size vint
-            0x01u8,                 // block_type = 1 (main header)
-            0x00u8,                 // flags = 0 (no extra, no data)
-        ];
-        main_crc_region.extend_from_slice(&main_body);
-
-        let main_crc = crc32fast::hash(&main_crc_region);
-        let mut main_block = Vec::new();
-        main_block.extend_from_slice(&main_crc.to_le_bytes());
-        main_block.extend_from_slice(&main_crc_region);
-
-        // ── Assemble ──────────────────────────────────────────────────────────
-        let mut archive = Vec::new();
-        archive.extend_from_slice(&RAR5_SIGNATURE);
-        archive.extend_from_slice(&main_block);
-        archive.extend_from_slice(&file_block);
-        archive.extend_from_slice(&eoa);
-        archive
+        build_minimal_rar5_multi(&[(filename, data, solid)])
     }
 
     #[tokio::test]
@@ -2112,7 +2319,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn solid_entry_skipped() {
+    async fn solid_entry_listed_but_marked_solid() {
         use crate::io::LocalReadAt;
 
         let data = b"solid data";
@@ -2124,8 +2331,9 @@ mod tests {
         let reader = LocalReadAt::new(tmp.path().to_str().unwrap());
         let rar = RarArchive::open(reader).await.unwrap();
 
-        // Solid entry must be silently omitted from the listing.
-        assert_eq!(rar.entries().len(), 0, "solid entries should be skipped");
+        // Solid entries are listed so the user can see them; extract() rejects.
+        assert_eq!(rar.entries().len(), 1);
+        assert!(rar.locations[0].is_solid);
     }
 
     #[tokio::test]
@@ -2450,11 +2658,18 @@ mod tests {
     #[tokio::test]
     async fn extract_solid_returns_unsupported_feature() {
         let data = b"solid data";
-        // build_minimal_rar5 with solid=true creates a solid entry — open() skips it,
-        // so entries() is empty. Verify that (solid entries are already filtered out).
         let archive_bytes = build_minimal_rar5("s.txt", data, true);
         let (_tmp, rar) = open_rar5_from_bytes(&archive_bytes).await;
-        assert_eq!(rar.entries().len(), 0, "solid entries must be omitted from listing");
+        assert_eq!(rar.entries().len(), 1);
+
+        let entry = rar.entries()[0].clone();
+        let mut out = Vec::new();
+        let progress = Arc::new(Mutex::new(()));
+        let err = rar.extract(&entry, &mut out, progress, None).await.unwrap_err();
+        assert!(
+            matches!(err, CoreError::UnsupportedFeature { .. }),
+            "expected UnsupportedFeature, got: {err:?}"
+        );
     }
 
     #[tokio::test]

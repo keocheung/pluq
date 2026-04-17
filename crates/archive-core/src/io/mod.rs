@@ -1,10 +1,12 @@
 mod caching_reader;
+pub mod cluster;
 pub(crate) mod http_reader;
 mod local_reader;
 mod read_at;
 pub mod read_error;
 
 pub use caching_reader::CachingReadAt;
+pub use cluster::{build_clusters, FetchRegion, COALESCE_GAP, MAX_WASTE_RATIO};
 pub use http_reader::HttpReadAt;
 pub use local_reader::LocalReadAt;
 pub use read_at::ReadAt;

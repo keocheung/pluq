@@ -4,6 +4,8 @@
 //! Extraction delegates to `unrar` — local shortcut or synthetic archive for cloud.
 
 pub(crate) mod parse;
+#[cfg(test)]
+mod batch_tests;
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -14,14 +16,14 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio_util::io::SyncIoBridge;
 
-use crate::archive_reader::ArchiveReader;
+use crate::archive_reader::{ArchiveReader, BatchResult, extract_selected_default};
 use crate::codec::CompressionMethod;
-use crate::io::LocalPath;
+use crate::io::{build_clusters, FetchRegion, LocalPath};
 use crate::junk;
 use crate::progress::ProgressReporter;
 use crate::rar::{
-    build_unrar_progress_hooks, consume_snippets, map_unrar_error, verify_and_stream_from_path,
-    SnippetConfig, SnippetMsg, RAR4_SIGNATURE,
+    assemble_and_unrar_synthetic, build_unrar_progress_hooks, consume_snippets, map_unrar_error,
+    verify_and_stream_from_file, SnippetConfig, SnippetMsg, RAR4_SIGNATURE,
 };
 use crate::rar4::parse::{
     build_rar4_end_block, parse_block_header, parse_file_header, parse_main_header, BLOCK_END,
@@ -803,18 +805,15 @@ impl<R: ReadAt> Rar4Archive<R> {
                 detail: format!("extraction task panicked: {e}"),
             })??;
 
-        let result = verify_and_stream_from_path(
-            out_tmp.path(),
+        verify_and_stream_from_file(
+            out_tmp.into_file(),
             &entry_name,
             Some(expected_crc),
             None,
             sink,
             &progress,
         )
-        .await;
-
-        drop(out_tmp); // Ensure deletion.
-        result
+        .await
     }
 
     /// Extract a compressed (or encrypted) entry from a **cloud** archive via `unrar`.
@@ -939,18 +938,187 @@ impl<R: ReadAt> Rar4Archive<R> {
                 detail: format!("extraction task panicked: {e}"),
             })??;
 
-        let result = verify_and_stream_from_path(
-            out_tmp.path(),
+        verify_and_stream_from_file(
+            out_tmp.into_file(),
             &entry_name,
             Some(expected_crc),
             None,
             sink,
             &progress,
         )
-        .await;
+        .await
+    }
 
-        drop(out_tmp); // Ensure deletion.
-        result
+    /// Extract multiple entries using stream coalescing for efficiency (Cloud only).
+    ///
+    /// For cloud archives, clusters nearby entries to reduce HTTP round trips.
+    /// For local archives, delegates to the default `extract_selected` loop.
+    pub async fn extract_selected<SinkFn>(
+        &self,
+        entries: &[&ArchiveEntry],
+        mut sink_factory: SinkFn,
+        progress: Arc<Mutex<dyn ProgressReporter>>,
+        password: Option<&[u8]>,
+    ) -> Result<BatchResult, CoreError>
+    where
+        R: Send + Sync + 'static,
+        SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn AsyncWrite + Send + Unpin>> + Send,
+    {
+        if entries.is_empty() {
+            return Ok(BatchResult { bytes_written: 0, succeeded: 0, failed: vec![] });
+        }
+
+        // Local path: delegate to default loop (unrar opens the real file directly).
+        if self.local_path.is_some() {
+            return extract_selected_default(self, entries, sink_factory, progress, password).await;
+        }
+
+        // Cloud path: build clusters.
+        let mut batch = BatchResult { bytes_written: 0, succeeded: 0, failed: vec![] };
+
+        let work: Vec<(&ArchiveEntry, &Rar4EntryLocation)> = entries
+            .iter()
+            .filter_map(|&e| {
+                if e.is_directory {
+                    None
+                } else {
+                    Some((e, &self.locations[e.index]))
+                }
+            })
+            .collect();
+
+        if work.is_empty() {
+            return Ok(batch);
+        }
+
+        let regions: Vec<FetchRegion<(&ArchiveEntry, &Rar4EntryLocation)>> = work
+            .into_iter()
+            .map(|(e, loc)| FetchRegion {
+                offset: loc.header_offset,
+                total_len: loc.header_size.saturating_add(loc.data_size),
+                payload: (e, loc),
+            })
+            .collect();
+
+        let clusters = build_clusters(regions);
+        let password_bytes = password.map(|p| p.to_vec());
+        let archive_size = self.archive_size;
+
+        for cluster in &clusters {
+            if progress.lock().unwrap().should_cancel() {
+                return Err(CoreError::Cancelled);
+            }
+
+            let first = &cluster[0];
+            let last = &cluster[cluster.len() - 1];
+            let cluster_start = first.offset;
+            let cluster_end = last.offset.saturating_add(last.total_len).min(archive_size);
+            let cluster_len = cluster_end.saturating_sub(cluster_start);
+
+            let stream = self
+                .reader
+                .read_stream(cluster_start, cluster_len)
+                .await
+                .map_err(CoreError::Io)?;
+
+            let cluster_data: Vec<(ArchiveEntry, Rar4EntryLocation)> = cluster
+                .iter()
+                .map(|r| (r.payload.0.clone(), r.payload.1.clone()))
+                .collect();
+            let preamble = self.archive_preamble.clone();
+            let eoa = self.end_block.clone();
+            let pw = password_bytes.clone();
+            let prog = progress.clone();
+            let handle = tokio::runtime::Handle::current();
+
+            let results: Vec<Result<tempfile::NamedTempFile, CoreError>> =
+                tokio::task::spawn_blocking(move || {
+                    let mut sync_reader = SyncIoBridge::new_with_handle(stream, handle);
+                    let mut stream_pos = cluster_start;
+                    let mut cluster_results = Vec::with_capacity(cluster_data.len());
+
+                    for (_entry, loc) in cluster_data {
+                        if prog.lock().unwrap().should_cancel() {
+                            return Err(CoreError::Cancelled);
+                        }
+
+                        let gap = loc.header_offset.saturating_sub(stream_pos);
+                        if gap > 0 {
+                            std::io::copy(
+                                &mut (&mut sync_reader).take(gap),
+                                &mut std::io::sink(),
+                            )
+                            .map_err(|e| CoreError::BitstreamError {
+                                detail: format!("skip gap failed: {e}"),
+                            })?;
+                            stream_pos += gap;
+                        }
+
+                        let mut header_bytes = vec![0u8; loc.header_size as usize];
+                        sync_reader.read_exact(&mut header_bytes).map_err(|e| {
+                            CoreError::BitstreamError {
+                                detail: format!("read header failed: {e}"),
+                            }
+                        })?;
+                        stream_pos += loc.header_size;
+
+                        let temp_res = assemble_and_unrar_synthetic(
+                            &preamble,
+                            &header_bytes,
+                            &mut sync_reader,
+                            loc.data_size,
+                            &eoa,
+                            pw.as_deref(),
+                            &prog,
+                        );
+
+                        match temp_res {
+                            Ok(tmp) => cluster_results.push(Ok(tmp)),
+                            Err(e) => cluster_results.push(Err(e)),
+                        }
+                        stream_pos += loc.data_size;
+                    }
+                    Ok(cluster_results)
+                })
+                .await
+                .map_err(|e| CoreError::BitstreamError {
+                    detail: format!("RAR4 cluster task panicked: {e}"),
+                })??;
+
+            for (result, region) in results.into_iter().zip(cluster.iter()) {
+                let (entry, loc) = region.payload;
+                match result {
+                    Ok(out_tmp) => {
+                        if let Some(mut sink) = sink_factory(entry) {
+                            let verify_res = verify_and_stream_from_file(
+                                out_tmp.into_file(),
+                                &entry.name,
+                                Some(loc.crc32),
+                                None,
+                                &mut sink,
+                                &progress,
+                            )
+                            .await;
+
+                            match verify_res {
+                                Ok(written) => {
+                                    batch.bytes_written += written;
+                                    batch.succeeded += 1;
+                                }
+                                Err(e) => {
+                                    batch.failed.push((entry.name.clone(), e.to_string()));
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        batch.failed.push((entry.name.clone(), e.to_string()));
+                    }
+                }
+            }
+        }
+
+        Ok(batch)
     }
 }
 
@@ -977,6 +1145,20 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for Rar4Archive<R> {
 
     async fn test(&self, entry: &ArchiveEntry, progress: Arc<Mutex<dyn ProgressReporter>>) -> Result<(), CoreError> {
         Rar4Archive::test(self, entry, progress).await
+    }
+
+    fn extract_selected<SinkFn>(
+        &self,
+        entries: &[&ArchiveEntry],
+        sink_factory: SinkFn,
+        progress: Arc<Mutex<dyn ProgressReporter>>,
+        password: Option<&[u8]>,
+    ) -> impl std::future::Future<Output = Result<BatchResult, CoreError>> + Send
+    where
+        SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn tokio::io::AsyncWrite + Send + Unpin>>
+            + Send,
+    {
+        Rar4Archive::extract_selected(self, entries, sink_factory, progress, password)
     }
 
     fn scan_info(&self) -> crate::scan::ScanInfo {

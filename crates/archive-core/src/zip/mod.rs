@@ -31,6 +31,7 @@ use tracing::{debug, info, trace, warn};
 
 use crate::archive_reader::{ArchiveReader, BatchResult};
 use crate::codec::{build_decoder, CompressionMethod};
+use crate::io::{build_clusters, FetchRegion};
 use crate::junk;
 use crate::progress::ProgressReporter;
 use crate::{ArchiveEntry, CoreError, ReadAt};
@@ -440,9 +441,9 @@ impl<R: ReadAt> ZipArchive<R> {
     /// Extract multiple entries using stream coalescing for efficiency.
     ///
     /// Sorts entries by physical offset, clusters nearby entries within
-    /// [`COALESCE_GAP`] (with [`MAX_WASTE_RATIO`] guard), then opens **one
-    /// `read_stream` per cluster** instead of one per entry. This reduces
-    /// HTTP round trips from O(2N) to O(M) where M = number of clusters.
+    /// [`crate::io::COALESCE_GAP`] (with [`crate::io::MAX_WASTE_RATIO`] guard),
+    /// then opens **one `read_stream` per cluster** instead of one per entry.
+    /// This reduces HTTP round trips from O(2N) to O(M) where M = number of clusters.
     ///
     /// `sink_factory` is called once per entry (in archive physical order)
     /// from async context. Return `Some(writer)` to extract, `None` to skip.
@@ -462,7 +463,7 @@ impl<R: ReadAt> ZipArchive<R> {
         SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn AsyncWrite + Send + Unpin>> + Send,
     {
         // 1. Filter directories, map to (entry, location) pairs.
-        let mut work: Vec<(&ArchiveEntry, &ZipEntryLocation)> = entries
+        let work: Vec<(&ArchiveEntry, &ZipEntryLocation)> = entries
             .iter()
             .filter_map(|&e| {
                 if e.is_directory {
@@ -477,11 +478,23 @@ impl<R: ReadAt> ZipArchive<R> {
             return Ok(BatchResult { bytes_written: 0, succeeded: 0, failed: vec![] });
         }
 
-        // 2. Sort by physical LFH offset.
-        work.sort_by_key(|(_, loc)| loc.offset);
+        // 2. Map to FetchRegion and cluster.
+        let regions: Vec<FetchRegion<(&ArchiveEntry, &ZipEntryLocation)>> = work
+            .into_iter()
+            .map(|(e, loc)| {
+                let total_len = 30u64
+                    .saturating_add(e.name.len() as u64)
+                    .saturating_add(1024)
+                    .saturating_add(e.compressed_size);
+                FetchRegion {
+                    offset: loc.offset,
+                    total_len,
+                    payload: (e, loc),
+                }
+            })
+            .collect();
 
-        // 3. Cluster nearby entries to minimise read_stream calls.
-        let clusters = build_clusters(&work);
+        let clusters = build_clusters(regions);
 
         let file_size = self.reader.size().await.map_err(CoreError::Io)?;
         let password_bytes: Option<Vec<u8>> = password.map(|p| p.to_vec());
@@ -496,19 +509,14 @@ impl<R: ReadAt> ZipArchive<R> {
                 }
             }
 
-            let (_, first_loc) = cluster[0];
-            let (last_entry, last_loc) = cluster[cluster.len() - 1];
+            let first_region = &cluster[0];
+            let last_region = &cluster[cluster.len() - 1];
 
-            let cluster_start = first_loc.offset;
-            // Generous estimate for the end of the last entry's data:
-            // LFH fixed(30) + name + extra(≤1024 in practice) + compressed data.
-            let estimated_end = last_loc
+            let cluster_start = first_region.offset;
+            let cluster_end = last_region
                 .offset
-                .saturating_add(30)
-                .saturating_add(last_entry.name.len() as u64)
-                .saturating_add(1024)
-                .saturating_add(last_entry.compressed_size);
-            let cluster_end = estimated_end.min(file_size);
+                .saturating_add(last_region.total_len)
+                .min(file_size);
             let cluster_len = cluster_end.saturating_sub(cluster_start);
 
             info!(
@@ -527,7 +535,7 @@ impl<R: ReadAt> ZipArchive<R> {
             // Owned copies for spawn_blocking.
             let cluster_data: Vec<(ArchiveEntry, ZipEntryLocation)> = cluster
                 .iter()
-                .map(|(e, loc)| ((*e).clone(), (*loc).clone()))
+                .map(|r| ((*r.payload.0).clone(), (*r.payload.1).clone()))
                 .collect();
             let pw = password_bytes.clone();
             let prog = progress.clone();
@@ -545,7 +553,8 @@ impl<R: ReadAt> ZipArchive<R> {
                 })??;
 
             // Write results asynchronously and accumulate BatchResult.
-            for (result, &(entry, _)) in decompressed.into_iter().zip(cluster.iter()) {
+            for (result, region) in decompressed.into_iter().zip(cluster.iter()) {
+                let (entry, _) = region.payload;
                 match result {
                     Ok(temp_file) => {
                         if let Some(mut sink) = sink_factory(entry) {
@@ -620,83 +629,6 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for ZipArchive<R> {
     {
         ZipArchive::extract_selected(self, entries, sink_factory, progress, password)
     }
-}
-
-// ── Stream coalescing constants ───────────────────────────────────────────────
-
-/// Gap threshold for stream coalescing.
-///
-/// Entries whose compressed data ranges are within this distance share one
-/// `read_stream` call. 2 MiB ≈ 400 ms at 5 MB/s — less than the RTT of an
-/// extra HTTP request (~900 ms for Google Drive).
-const COALESCE_GAP: u64 = 2 * 1024 * 1024;
-
-/// Maximum ratio of wasted (gap) bytes to useful (data) bytes in a cluster.
-///
-/// If adding the next entry would make the cluster download more than 10×
-/// the actual data, start a new cluster instead. Prevents degenerate cases
-/// where many tiny files spread just under the gap threshold cause
-/// pathological over-fetching.
-const MAX_WASTE_RATIO: u64 = 10;
-
-// ── Cluster builder ───────────────────────────────────────────────────────────
-
-/// Group a sorted (by LFH offset) entry list into coalesced clusters.
-///
-/// A new cluster is started when the gap to the next entry exceeds
-/// [`COALESCE_GAP`] **or** the cumulative waste ratio would exceed
-/// [`MAX_WASTE_RATIO`].
-fn build_clusters<'a>(
-    sorted_work: &[(&'a ArchiveEntry, &'a ZipEntryLocation)],
-) -> Vec<Vec<(&'a ArchiveEntry, &'a ZipEntryLocation)>> {
-    if sorted_work.is_empty() {
-        return vec![];
-    }
-
-    let mut clusters: Vec<Vec<(&ArchiveEntry, &ZipEntryLocation)>> = vec![];
-    let mut current: Vec<(&ArchiveEntry, &ZipEntryLocation)> = vec![sorted_work[0]];
-
-    // Conservative estimate of where the first entry's data ends.
-    // We ignore the LFH extra field length (not known until read), which means
-    // we may overestimate the gap slightly — leading to conservative (safe)
-    // cluster splits, never merges of entries that should be separate.
-    let first_data_end = |e: &ArchiveEntry, loc: &ZipEntryLocation| -> u64 {
-        loc.offset
-            .saturating_add(30)
-            .saturating_add(e.name.len() as u64)
-            .saturating_add(e.compressed_size)
-    };
-
-    let mut cluster_data_bytes: u64 = sorted_work[0].0.compressed_size;
-    let mut cluster_gap_bytes: u64 = 0;
-    let mut prev_data_end: u64 = first_data_end(sorted_work[0].0, sorted_work[0].1);
-
-    for &(entry, loc) in &sorted_work[1..] {
-        let gap = loc.offset.saturating_sub(prev_data_end);
-        let entry_data_bytes = entry.compressed_size;
-        let new_total_data = cluster_data_bytes.saturating_add(entry_data_bytes);
-        let new_total_gap = cluster_gap_bytes.saturating_add(gap);
-
-        let gap_ok = gap < COALESCE_GAP;
-        let ratio_ok =
-            new_total_gap < new_total_data.saturating_mul(MAX_WASTE_RATIO);
-
-        if gap_ok && ratio_ok {
-            current.push((entry, loc));
-            cluster_data_bytes = new_total_data;
-            cluster_gap_bytes = new_total_gap;
-        } else {
-            clusters.push(std::mem::take(&mut current));
-            current = vec![(entry, loc)];
-            cluster_data_bytes = entry_data_bytes;
-            cluster_gap_bytes = 0;
-        }
-
-        prev_data_end = first_data_end(entry, loc);
-    }
-
-    clusters.push(current);
-    clusters
 }
 
 // ── Cluster decompressor (runs inside spawn_blocking) ────────────────────────
