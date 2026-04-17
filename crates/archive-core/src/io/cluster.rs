@@ -88,7 +88,11 @@ mod tests {
     use super::*;
 
     fn r(offset: u64, total_len: u64, id: u32) -> FetchRegion<u32> {
-        FetchRegion { offset, total_len, payload: id }
+        FetchRegion {
+            offset,
+            total_len,
+            payload: id,
+        }
     }
 
     #[test]
@@ -114,10 +118,7 @@ mod tests {
 
     #[test]
     fn large_gap_splits_cluster() {
-        let out = build_clusters(vec![
-            r(0, 100, 1),
-            r(100 + COALESCE_GAP + 1, 100, 2),
-        ]);
+        let out = build_clusters(vec![r(0, 100, 1), r(100 + COALESCE_GAP + 1, 100, 2)]);
         assert_eq!(out.len(), 2);
     }
 

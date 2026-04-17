@@ -26,7 +26,6 @@ impl CountingReadAt {
             range_calls: Arc::new(AtomicUsize::new(0)),
         }
     }
-
 }
 
 impl ReadAt for CountingReadAt {

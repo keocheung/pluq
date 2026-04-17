@@ -1,6 +1,6 @@
-mod core_error;
 pub mod archive_reader;
 pub mod codec;
+mod core_error;
 mod entry;
 pub mod io;
 pub mod junk;
@@ -29,6 +29,6 @@ pub use scan::ScanInfo;
 
 // I/O building blocks (for power users / tests).
 pub use io::{CachingReadAt, HttpReadAt, LocalPath, LocalReadAt, ReadAt, ReadError};
-pub use rar::{RarArchive, RarEntryLocation, RAR4_SIGNATURE, RAR5_SIGNATURE};
+pub use rar::{RAR4_SIGNATURE, RAR5_SIGNATURE, RarArchive, RarEntryLocation};
 pub use rar4::{Rar4Archive, Rar4EntryLocation};
 pub use zip::{AesExtraInfo, ZipArchive, ZipEntryLocation, ZipIndex};

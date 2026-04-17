@@ -3,9 +3,9 @@
 //! v1 scope: RAR5 non-solid archives (listing + extraction).
 //! RAR4 archives are detected and rejected with a clear error.
 
-pub(crate) mod parse;
 #[cfg(test)]
 mod batch_tests;
+pub(crate) mod parse;
 
 pub use parse::{RAR4_SIGNATURE, RAR5_SIGNATURE};
 
@@ -41,11 +41,10 @@ pub(crate) async fn verify_and_stream_from_file<W: AsyncWrite + Send + Unpin>(
     progress: &Arc<Mutex<dyn ProgressReporter>>,
 ) -> Result<u64, CoreError> {
     use std::io::Seek;
-    file.seek(std::io::SeekFrom::Start(0)).map_err(|e| {
-        CoreError::BitstreamError {
+    file.seek(std::io::SeekFrom::Start(0))
+        .map_err(|e| CoreError::BitstreamError {
             detail: format!("failed to seek temp file for verification: {e}"),
-        }
-    })?;
+        })?;
 
     let mut file = tokio::fs::File::from_std(file);
     let mut crc_hasher = crc32fast::Hasher::new();
@@ -54,11 +53,12 @@ pub(crate) async fn verify_and_stream_from_file<W: AsyncWrite + Send + Unpin>(
     let mut total_bytes = 0u64;
 
     loop {
-        let n = file.read(&mut buf).await.map_err(|e| {
-            CoreError::BitstreamError {
+        let n = file
+            .read(&mut buf)
+            .await
+            .map_err(|e| CoreError::BitstreamError {
                 detail: format!("failed to read from temp file: {e}"),
-            }
-        })?;
+            })?;
 
         if n == 0 {
             break;
@@ -72,11 +72,11 @@ pub(crate) async fn verify_and_stream_from_file<W: AsyncWrite + Send + Unpin>(
             blake_state.update(chunk);
         }
 
-        sink.write_all(chunk).await.map_err(|e| {
-            CoreError::BitstreamError {
+        sink.write_all(chunk)
+            .await
+            .map_err(|e| CoreError::BitstreamError {
                 detail: format!("failed to write to sink: {e}"),
-            }
-        })?;
+            })?;
 
         total_bytes += n as u64;
     }
@@ -110,10 +110,7 @@ pub(crate) async fn verify_and_stream_from_file<W: AsyncWrite + Send + Unpin>(
         }
     }
 
-    progress
-        .lock()
-        .unwrap()
-        .on_entry_complete(entry_name, true);
+    progress.lock().unwrap().on_entry_complete(entry_name, true);
     Ok(total_bytes)
 }
 
@@ -127,11 +124,10 @@ pub(crate) fn verify_and_stream_from_file_sync<W: Write>(
     progress: &Arc<Mutex<dyn ProgressReporter>>,
 ) -> Result<u64, CoreError> {
     use std::io::Seek;
-    file.seek(std::io::SeekFrom::Start(0)).map_err(|e| {
-        CoreError::BitstreamError {
+    file.seek(std::io::SeekFrom::Start(0))
+        .map_err(|e| CoreError::BitstreamError {
             detail: format!("failed to seek temp file for sync verification: {e}"),
-        }
-    })?;
+        })?;
 
     let mut crc_hasher = crc32fast::Hasher::new();
     let mut blake_state = blake2sp::State::new();
@@ -155,11 +151,10 @@ pub(crate) fn verify_and_stream_from_file_sync<W: Write>(
             blake_state.update(chunk);
         }
 
-        sink.write_all(chunk).map_err(|e| {
-            CoreError::BitstreamError {
+        sink.write_all(chunk)
+            .map_err(|e| CoreError::BitstreamError {
                 detail: format!("failed to write to sink (sync): {e}"),
-            }
-        })?;
+            })?;
 
         total_bytes += n as u64;
     }
@@ -193,10 +188,7 @@ pub(crate) fn verify_and_stream_from_file_sync<W: Write>(
         }
     }
 
-    progress
-        .lock()
-        .unwrap()
-        .on_entry_complete(entry_name, true);
+    progress.lock().unwrap().on_entry_complete(entry_name, true);
     Ok(total_bytes)
 }
 
@@ -206,7 +198,7 @@ use tracing::info;
 
 use crate::archive_reader::{ArchiveReader, BatchResult};
 use crate::codec::CompressionMethod;
-use crate::io::{build_clusters, FetchRegion, LocalPath};
+use crate::io::{FetchRegion, LocalPath, build_clusters};
 use crate::rar::parse::{
     QoCachedBlock, parse_block_header, parse_file_header, parse_main_header, parse_quick_open_data,
 };
@@ -339,7 +331,11 @@ impl<R: ReadAt> RarArchive<R> {
         info!("opening RAR archive");
         let local_path = reader.local_path().map(|p| p.to_path_buf());
         let size = reader.size().await?;
-        debug!(size, local = local_path.is_some(), "RAR archive size determined");
+        debug!(
+            size,
+            local = local_path.is_some(),
+            "RAR archive size determined"
+        );
 
         // 1. Verify RAR5 signature (8 bytes at offset 0).
         let sig = reader.read_range(0, 8).await?;
@@ -366,8 +362,7 @@ impl<R: ReadAt> RarArchive<R> {
 
         // 3. Parse the main archive header (starts immediately after the 8-byte signature).
         let main_header = parse_main_header(&chunk, 8)?;
-        let preamble_end =
-            (main_header.raw.archive_offset + main_header.raw.total_size) as usize;
+        let preamble_end = (main_header.raw.archive_offset + main_header.raw.total_size) as usize;
         if preamble_end > chunk.len() {
             return Err(CoreError::CorruptHeader {
                 offset: 8,
@@ -441,7 +436,11 @@ impl<R: ReadAt> RarArchive<R> {
     /// Solid entries are included in the index but cannot be extracted via
     /// surgical cloud paths (surgical extraction requires random access).
     pub fn entries(&self) -> &[ArchiveEntry] {
-        if self.scan_complete { &self.entries } else { &[] }
+        if self.scan_complete {
+            &self.entries
+        } else {
+            &[]
+        }
     }
 
     /// Per-entry location data, parallel to `entries()`. Used by the cache layer.
@@ -545,8 +544,7 @@ impl<R: ReadAt> RarArchive<R> {
                 ($n:expr) => {
                     let needed = buf_pos + $n;
                     if buf.len() < needed {
-                        let stream_head =
-                            offset + (buf.len().saturating_sub(buf_pos)) as u64;
+                        let stream_head = offset + (buf.len().saturating_sub(buf_pos)) as u64;
                         let avail = size.saturating_sub(stream_head) as usize;
                         let to_read = (needed - buf.len()).min(avail);
                         if to_read > 0 {
@@ -703,7 +701,10 @@ impl<R: ReadAt> RarArchive<R> {
                         }
 
                         offset += total_size;
-                        progress.lock().unwrap().on_scan_progress(offset, entries.len());
+                        progress
+                            .lock()
+                            .unwrap()
+                            .on_scan_progress(offset, entries.len());
                         continue;
                     }
 
@@ -799,9 +800,7 @@ impl<R: ReadAt> RarArchive<R> {
         if let Some(path) = &self.local_path {
             let work: Vec<(ArchiveEntry, RarEntryLocation)> = entry_indices
                 .iter()
-                .filter(|&&idx| {
-                    !self.entries[idx].is_directory && !self.locations[idx].is_solid
-                })
+                .filter(|&&idx| !self.entries[idx].is_directory && !self.locations[idx].is_solid)
                 .map(|&idx| (self.entries[idx].clone(), self.locations[idx].clone()))
                 .collect();
 
@@ -810,19 +809,12 @@ impl<R: ReadAt> RarArchive<R> {
             }
 
             info!(entries = work.len(), "RAR extract_all: local path");
-            return extract_all_via_unrar(
-                path.clone(),
-                work,
-                sink_factory,
-                progress,
-                password,
-            )
-            .await;
+            return extract_all_via_unrar(path.clone(), work, sink_factory, progress, password)
+                .await;
         }
 
         // Cloud path: use streaming splitter pipeline.
-        let wanted: std::collections::HashSet<usize> =
-            entry_indices.iter().copied().collect();
+        let wanted: std::collections::HashSet<usize> = entry_indices.iter().copied().collect();
         self.extract_all_streaming(
             move |e: &ArchiveEntry| wanted.contains(&e.index),
             sink_factory,
@@ -848,7 +840,11 @@ impl<R: ReadAt> RarArchive<R> {
         SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn AsyncWrite + Send + Unpin>> + Send,
     {
         if entries.is_empty() {
-            return Ok(BatchResult { bytes_written: 0, succeeded: 0, failed: vec![] });
+            return Ok(BatchResult {
+                bytes_written: 0,
+                succeeded: 0,
+                failed: vec![],
+            });
         }
 
         // 1. Local path: delegate to default loop (cheap already).
@@ -864,7 +860,11 @@ impl<R: ReadAt> RarArchive<R> {
         }
 
         // 2. Cloud path: build clusters.
-        let mut batch = BatchResult { bytes_written: 0, succeeded: 0, failed: vec![] };
+        let mut batch = BatchResult {
+            bytes_written: 0,
+            succeeded: 0,
+            failed: vec![],
+        };
 
         let work: Vec<(&ArchiveEntry, &RarEntryLocation)> = entries
             .iter()
@@ -916,9 +916,7 @@ impl<R: ReadAt> RarArchive<R> {
 
             info!(
                 entries = cluster.len(),
-                cluster_start,
-                cluster_len,
-                "RAR extract_selected: opening cluster stream"
+                cluster_start, cluster_len, "RAR extract_selected: opening cluster stream"
             );
 
             let stream = self
@@ -953,13 +951,10 @@ impl<R: ReadAt> RarArchive<R> {
                         // a. Skip gap.
                         let gap = loc.header_offset.saturating_sub(stream_pos);
                         if gap > 0 {
-                            std::io::copy(
-                                &mut (&mut sync_reader).take(gap),
-                                &mut std::io::sink(),
-                            )
-                            .map_err(|e| CoreError::BitstreamError {
-                                detail: format!("skip gap failed: {e}"),
-                            })?;
+                            std::io::copy(&mut (&mut sync_reader).take(gap), &mut std::io::sink())
+                                .map_err(|e| CoreError::BitstreamError {
+                                    detail: format!("skip gap failed: {e}"),
+                                })?;
                             stream_pos += gap;
                         }
 
@@ -1092,7 +1087,9 @@ impl<R: ReadAt> RarArchive<R> {
         // Encrypted entries must go through unrar (it handles AES decryption).
         if loc.is_encrypted {
             debug!(name = %entry.name, "encrypted entry — routing to unrar");
-            return self.extract_compressed(entry, loc, sink, progress, password).await;
+            return self
+                .extract_compressed(entry, loc, sink, progress, password)
+                .await;
         }
 
         match loc.method {
@@ -1102,7 +1099,8 @@ impl<R: ReadAt> RarArchive<R> {
             }
             1..=5 => {
                 debug!(name = %entry.name, method = loc.method, "compressed extraction via unrar");
-                self.extract_compressed(entry, loc, sink, progress, None).await
+                self.extract_compressed(entry, loc, sink, progress, None)
+                    .await
             }
             m => Err(CoreError::UnsupportedCompression {
                 algorithm: format!("RAR method {m}"),
@@ -1154,7 +1152,8 @@ impl<R: ReadAt> RarArchive<R> {
         let mut sync_reader = SyncIoBridge::new_with_handle(stream, handle);
 
         use std::io::Write;
-        let temp_file = tokio::task::spawn_blocking(move || -> Result<tempfile::NamedTempFile, CoreError> {
+        let temp_file =
+            tokio::task::spawn_blocking(move || -> Result<tempfile::NamedTempFile, CoreError> {
                 const CHUNK_SIZE: usize = 64 * 1024;
 
                 let mut crc_hasher = crc32fast::Hasher::new();
@@ -1166,12 +1165,11 @@ impl<R: ReadAt> RarArchive<R> {
 
                 let mut total_written: u64 = 0;
                 let mut chunk_buf = vec![0u8; CHUNK_SIZE];
-                
-                let temp_file = tempfile::NamedTempFile::new().map_err(|e| {
-                    CoreError::BitstreamError {
+
+                let temp_file =
+                    tempfile::NamedTempFile::new().map_err(|e| CoreError::BitstreamError {
                         detail: format!("failed to create temp file: {e}"),
-                    }
-                })?;
+                    })?;
                 let mut temp_writer = std::io::BufWriter::new(temp_file.as_file());
 
                 {
@@ -1198,7 +1196,7 @@ impl<R: ReadAt> RarArchive<R> {
                     if let Some(ref mut state) = blake2_state {
                         state.update(&chunk_buf[..n]);
                     }
-                    
+
                     temp_writer.write_all(&chunk_buf[..n]).map_err(|e| {
                         CoreError::BitstreamError {
                             detail: format!("temp file write failed for '{entry_name}': {e}"),
@@ -1217,10 +1215,8 @@ impl<R: ReadAt> RarArchive<R> {
                     }
                 }
 
-                temp_writer.flush().map_err(|e| {
-                    CoreError::BitstreamError {
-                        detail: format!("temp file flush failed for '{entry_name}': {e}"),
-                    }
+                temp_writer.flush().map_err(|e| CoreError::BitstreamError {
+                    detail: format!("temp file flush failed for '{entry_name}': {e}"),
                 })?;
                 drop(temp_writer);
 
@@ -1264,16 +1260,16 @@ impl<R: ReadAt> RarArchive<R> {
 
         // Step 3 (async): write verified bytes to the sink.
         // Copy verified temp file to the final sink.
-        let mut temp_reader = tokio::fs::File::open(temp_file.path())
-            .await
-            .map_err(|e| CoreError::BitstreamError {
+        let mut temp_reader = tokio::fs::File::open(temp_file.path()).await.map_err(|e| {
+            CoreError::BitstreamError {
                 detail: format!("failed to reopen temp file: {e}"),
-            })?;
-        let written = tokio::io::copy(&mut temp_reader, sink)
-            .await
-            .map_err(|e| CoreError::BitstreamError {
+            }
+        })?;
+        let written = tokio::io::copy(&mut temp_reader, sink).await.map_err(|e| {
+            CoreError::BitstreamError {
                 detail: format!("copy to sink failed: {e}"),
-            })?;
+            }
+        })?;
         // temp_file dropped here → auto-deleted.
         Ok(written)
     }
@@ -1332,11 +1328,10 @@ impl<R: ReadAt> RarArchive<R> {
         let (cancel, on_progress) = build_unrar_progress_hooks(&progress);
         let out_tmp =
             tokio::task::spawn_blocking(move || -> Result<tempfile::NamedTempFile, CoreError> {
-                let out_tmp = tempfile::NamedTempFile::new().map_err(|e| {
-                    CoreError::BitstreamError {
+                let out_tmp =
+                    tempfile::NamedTempFile::new().map_err(|e| CoreError::BitstreamError {
                         detail: format!("failed to create extraction temp file: {e}"),
-                    }
-                })?;
+                    })?;
                 let out_path = out_tmp.path().to_path_buf();
 
                 let mut archive = match &password_bytes {
@@ -1354,22 +1349,15 @@ impl<R: ReadAt> RarArchive<R> {
                         Some(h) => h,
                         None => {
                             return Err(CoreError::InvalidFormat {
-                                message: format!(
-                                    "entry '{target_name}' not found in archive"
-                                ),
-                            })
+                                message: format!("entry '{target_name}' not found in archive"),
+                            });
                         }
                     };
 
-                    let name =
-                        header.entry().filename.to_string_lossy().replace('\\', "/");
+                    let name = header.entry().filename.to_string_lossy().replace('\\', "/");
                     if name == target_name {
                         header
-                            .extract_to_with_progress(
-                                &out_path,
-                                Some(cancel),
-                                Some(on_progress),
-                            )
+                            .extract_to_with_progress(&out_path, Some(cancel), Some(on_progress))
                             .map_err(map_unrar_error)?;
                         return Ok(out_tmp);
                     }
@@ -1521,7 +1509,11 @@ impl<R: ReadAt> RarArchive<R> {
         let mut entries: Vec<ArchiveEntry> = Vec::with_capacity(cached.len());
         let mut locations: Vec<RarEntryLocation> = Vec::with_capacity(cached.len());
 
-        for QoCachedBlock { original_archive_offset, data } in cached {
+        for QoCachedBlock {
+            original_archive_offset,
+            data,
+        } in cached
+        {
             // Parse common block header from cached bytes.
             let raw_block = match parse_block_header(&data, original_archive_offset) {
                 Ok(b) => b,
@@ -1615,7 +1607,11 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for RarArchive<R> {
         RarArchive::extract_selected(self, entries, sink_factory, progress, password).await
     }
 
-    async fn test(&self, entry: &ArchiveEntry, progress: Arc<Mutex<dyn ProgressReporter>>) -> Result<(), CoreError> {
+    async fn test(
+        &self,
+        entry: &ArchiveEntry,
+        progress: Arc<Mutex<dyn ProgressReporter>>,
+    ) -> Result<(), CoreError> {
         RarArchive::test(self, entry, progress).await
     }
 
@@ -1696,8 +1692,12 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for RarArchive<R> {
 
         // Spawn consumer.
         let consumer_progress = progress.clone();
-        let consumer =
-            tokio::spawn(consume_snippets(rx, sink_factory, consumer_progress, password_owned));
+        let consumer = tokio::spawn(consume_snippets(
+            rx,
+            sink_factory,
+            consumer_progress,
+            password_owned,
+        ));
 
         // Build snippet config.
         let config = SnippetConfig {
@@ -1708,7 +1708,9 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for RarArchive<R> {
         };
 
         // Signal scan start.
-        { progress.lock().unwrap().on_scan_start(size); }
+        {
+            progress.lock().unwrap().on_scan_start(size);
+        }
 
         // Run producer (in current task — borrows self.reader).
         // When run_elastic_scan returns, config is dropped, tx is dropped,
@@ -1718,11 +1720,9 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for RarArchive<R> {
                 .await?;
 
         // Await consumer.
-        let total_bytes = consumer
-            .await
-            .map_err(|e| CoreError::BitstreamError {
-                detail: format!("consumer panicked: {e}"),
-            })??;
+        let total_bytes = consumer.await.map_err(|e| CoreError::BitstreamError {
+            detail: format!("consumer panicked: {e}"),
+        })??;
 
         // Populate self with harvested metadata.
         let entry_count = entries.len();
@@ -1730,7 +1730,9 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for RarArchive<R> {
         self.locations = locations;
         self.scan_complete = true;
 
-        { progress.lock().unwrap().on_scan_complete(entry_count); }
+        {
+            progress.lock().unwrap().on_scan_complete(entry_count);
+        }
 
         Ok(total_bytes)
     }
@@ -1756,7 +1758,9 @@ fn scan_stream_err(e: std::io::Error, offset: u64) -> CoreError {
 }
 
 fn snippet_write_err(e: std::io::Error) -> CoreError {
-    CoreError::BitstreamError { detail: format!("snippet write: {e}") }
+    CoreError::BitstreamError {
+        detail: format!("snippet write: {e}"),
+    }
 }
 
 /// Convert a Unix timestamp (seconds since 1970-01-01) to `SystemTime`.
@@ -1860,12 +1864,16 @@ pub(crate) fn assemble_and_unrar_synthetic<R: Read>(
     // 2. Assemble.
     {
         let mut writer = std::io::BufWriter::new(temp_file.as_file());
-        writer.write_all(preamble).map_err(|e| CoreError::BitstreamError {
-            detail: format!("temp file write preamble failed: {e}"),
-        })?;
-        writer.write_all(header_bytes).map_err(|e| CoreError::BitstreamError {
-            detail: format!("temp file write header failed: {e}"),
-        })?;
+        writer
+            .write_all(preamble)
+            .map_err(|e| CoreError::BitstreamError {
+                detail: format!("temp file write preamble failed: {e}"),
+            })?;
+        writer
+            .write_all(header_bytes)
+            .map_err(|e| CoreError::BitstreamError {
+                detail: format!("temp file write header failed: {e}"),
+            })?;
 
         // Stream exactly data_size bytes from the bridged reader into writer.
         std::io::copy(&mut data_stream.take(data_size), &mut writer).map_err(|e| {
@@ -1880,9 +1888,11 @@ pub(crate) fn assemble_and_unrar_synthetic<R: Read>(
             }
         })?;
 
-        writer.write_all(eoa).map_err(|e| CoreError::BitstreamError {
-            detail: format!("temp file write EOA failed: {e}"),
-        })?;
+        writer
+            .write_all(eoa)
+            .map_err(|e| CoreError::BitstreamError {
+                detail: format!("temp file write EOA failed: {e}"),
+            })?;
 
         writer.flush().map_err(|e| CoreError::BitstreamError {
             detail: format!("temp file flush failed: {e}"),
@@ -1992,7 +2002,9 @@ where
                     // Create extraction temp file.
                     let out_tmp =
                         tempfile::NamedTempFile::new().map_err(|e| CoreError::BitstreamError {
-                            detail: format!("failed to create extraction temp file for '{name}': {e}"),
+                            detail: format!(
+                                "failed to create extraction temp file for '{name}': {e}"
+                            ),
                         })?;
                     let out_path = out_tmp.path().to_path_buf();
 
@@ -2081,17 +2093,20 @@ where
     let snippet_path = msg.path.clone();
     let password_bytes = password.map(|p| p.to_vec());
 
-    { progress.lock().unwrap().on_entry_start(&entry_name, uncompressed_size); }
+    {
+        progress
+            .lock()
+            .unwrap()
+            .on_entry_start(&entry_name, uncompressed_size);
+    }
 
     let (cancel, on_progress) = build_unrar_progress_hooks(progress);
 
     // Extract and verify via unrar in a single blocking task.
     let progress_sync = progress.clone();
     tokio::task::spawn_blocking(move || -> Result<u64, CoreError> {
-        let out_tmp = tempfile::NamedTempFile::new().map_err(|e| {
-            CoreError::BitstreamError {
-                detail: format!("failed to create extraction temp file: {e}"),
-            }
+        let out_tmp = tempfile::NamedTempFile::new().map_err(|e| CoreError::BitstreamError {
+            detail: format!("failed to create extraction temp file: {e}"),
         })?;
         let out_path = out_tmp.path().to_path_buf();
 
@@ -2162,10 +2177,7 @@ mod tests {
     fn unix_timestamp_nonzero() {
         let ts: u32 = 1_700_000_000;
         let t = unix_to_system_time(ts);
-        let secs = t
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let secs = t.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
         assert_eq!(secs, ts as u64);
     }
 
@@ -2179,7 +2191,11 @@ mod tests {
     #[test]
     fn compressed_methods_map_to_none() {
         for m in 1u8..=5 {
-            assert_eq!(rar_method_to_codec(m), None, "method {m} should map to None");
+            assert_eq!(
+                rar_method_to_codec(m),
+                None,
+                "method {m} should map to None"
+            );
         }
     }
 
@@ -2188,9 +2204,7 @@ mod tests {
     /// Build a minimal valid RAR5 archive in memory with multiple Store entries.
     ///
     /// Used to verify `RarArchive` behavior without requiring real `.rar` files.
-    pub(crate) fn build_minimal_rar5_multi(
-        entries: &[(&str, &[u8], bool)],
-    ) -> Vec<u8> {
+    pub(crate) fn build_minimal_rar5_multi(entries: &[(&str, &[u8], bool)]) -> Vec<u8> {
         // ── End-of-archive block ──────────────────────────────────────────────
         let eoa = build_end_of_archive_block();
 
@@ -2233,8 +2247,8 @@ mod tests {
             let header_size = 1 + 1 + 1 + body.len();
             let mut crc_region = vec![
                 header_size as u8,
-                0x02u8, // file header
-                0x02u8, // data area flag
+                0x02u8,           // file header
+                0x02u8,           // data area flag
                 data.len() as u8, // data size vint
             ];
             crc_region.extend_from_slice(&body);
@@ -2250,11 +2264,7 @@ mod tests {
     }
 
     /// Backwards compat for single entry.
-    pub(crate) fn build_minimal_rar5(
-        filename: &str,
-        data: &[u8],
-        solid: bool,
-    ) -> Vec<u8> {
+    pub(crate) fn build_minimal_rar5(filename: &str, data: &[u8], solid: bool) -> Vec<u8> {
         build_minimal_rar5_multi(&[(filename, data, solid)])
     }
 
@@ -2404,14 +2414,18 @@ mod tests {
         assert_eq!(loc.dict_size, 128 * 1024); // dict_exponent=0 → 128 KiB
     }
 
-
     // ── Quick Open helpers ────────────────────────────────────────────────────
 
     fn encode_vint_test(mut value: u64, buf: &mut Vec<u8>) {
         loop {
             let byte = (value & 0x7F) as u8;
             value >>= 7;
-            if value == 0 { buf.push(byte); break; } else { buf.push(byte | 0x80); }
+            if value == 0 {
+                buf.push(byte);
+                break;
+            } else {
+                buf.push(byte | 0x80);
+            }
         }
     }
 
@@ -2421,11 +2435,11 @@ mod tests {
     fn build_file_header_bytes(name: &str, data_size: u64) -> Vec<u8> {
         let name_bytes = name.as_bytes();
         let mut body = Vec::new();
-        body.push(0x00u8);                          // file_flags = 0 (size known, no mtime, no crc)
-        encode_vint_test(data_size, &mut body);     // unpacked_size
-        body.push(0x00u8);                          // attributes
-        body.push(0x00u8);                          // compression_info = 0 (Store)
-        body.push(0x01u8);                          // host_os = Unix
+        body.push(0x00u8); // file_flags = 0 (size known, no mtime, no crc)
+        encode_vint_test(data_size, &mut body); // unpacked_size
+        body.push(0x00u8); // attributes
+        body.push(0x00u8); // compression_info = 0 (Store)
+        body.push(0x01u8); // host_os = Unix
         encode_vint_test(name_bytes.len() as u64, &mut body);
         body.extend_from_slice(name_bytes);
 
@@ -2436,8 +2450,8 @@ mod tests {
         let header_size = 1 + 1 + data_size_vint.len() + body.len();
         let mut crc_region = Vec::new();
         encode_vint_test(header_size as u64, &mut crc_region);
-        crc_region.push(0x02u8);                    // block_type = 2
-        crc_region.push(0x02u8);                    // flags = 0x0002 (data area present)
+        crc_region.push(0x02u8); // block_type = 2
+        crc_region.push(0x02u8); // flags = 0x0002 (data area present)
         crc_region.extend_from_slice(&data_size_vint);
         crc_region.extend_from_slice(&body);
 
@@ -2456,8 +2470,8 @@ mod tests {
         let header_size = 1 + 1 + data_size_vint.len();
         let mut crc_region = Vec::new();
         encode_vint_test(header_size as u64, &mut crc_region);
-        crc_region.push(0x03u8);                    // block_type = 3 (service)
-        crc_region.push(0x02u8);                    // flags = 0x0002 (data area present)
+        crc_region.push(0x03u8); // block_type = 3 (service)
+        crc_region.push(0x02u8); // flags = 0x0002 (data area present)
         crc_region.extend_from_slice(&data_size_vint);
         let crc = crc32fast::hash(&crc_region);
         let mut out = Vec::new();
@@ -2470,7 +2484,7 @@ mod tests {
     /// Build a single QO cache entry (same layout as parse.rs test helper).
     fn build_qo_entry_mod(relative_offset: u64, data: &[u8]) -> Vec<u8> {
         let mut structure = Vec::new();
-        structure.push(0x00u8);                     // flags = 0
+        structure.push(0x00u8); // flags = 0
         encode_vint_test(relative_offset, &mut structure);
         encode_vint_test(data.len() as u64, &mut structure);
         structure.extend_from_slice(data);
@@ -2528,12 +2542,18 @@ mod tests {
 
         assert!(result.is_ok());
         let opt = result.unwrap();
-        assert!(opt.is_some(), "try_quick_open must return Some for a valid QO block");
+        assert!(
+            opt.is_some(),
+            "try_quick_open must return Some for a valid QO block"
+        );
 
         let (entries, locations) = opt.unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "qo_file.txt");
-        assert_eq!(entries[0].compression_method, Some(CompressionMethod::Store));
+        assert_eq!(
+            entries[0].compression_method,
+            Some(CompressionMethod::Store)
+        );
         assert_eq!(locations[0].data_size, 10);
         assert_eq!(locations[0].method, 0); // Store
         assert!(!locations[0].is_solid);
@@ -2665,7 +2685,10 @@ mod tests {
         let entry = rar.entries()[0].clone();
         let mut out = Vec::new();
         let progress = Arc::new(Mutex::new(()));
-        let err = rar.extract(&entry, &mut out, progress, None).await.unwrap_err();
+        let err = rar
+            .extract(&entry, &mut out, progress, None)
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, CoreError::UnsupportedFeature { .. }),
             "expected UnsupportedFeature, got: {err:?}"
@@ -2687,7 +2710,10 @@ mod tests {
 
         let mut out = Vec::new();
         let progress = Arc::new(Mutex::new(()));
-        let n = rar.extract(&dir_entry, &mut out, progress, None).await.unwrap();
+        let n = rar
+            .extract(&dir_entry, &mut out, progress, None)
+            .await
+            .unwrap();
         assert_eq!(n, 0);
         assert!(out.is_empty());
     }
@@ -2700,7 +2726,11 @@ mod tests {
     }
     impl RecordingReporter {
         fn new() -> Self {
-            Self { started: vec![], progress_updates: vec![], completed: vec![] }
+            Self {
+                started: vec![],
+                progress_updates: vec![],
+                completed: vec![],
+            }
         }
     }
     impl crate::ProgressReporter for RecordingReporter {
@@ -2732,17 +2762,25 @@ mod tests {
         assert_eq!(r.started.len(), 1);
         assert_eq!(r.started[0].0, "progress.txt");
         assert_eq!(r.started[0].1, data.len() as u64);
-        assert!(!r.progress_updates.is_empty(), "on_bytes_progress must be called");
+        assert!(
+            !r.progress_updates.is_empty(),
+            "on_bytes_progress must be called"
+        );
         assert_eq!(r.completed.len(), 1);
         assert_eq!(r.completed[0].0, "progress.txt");
-        assert!(r.completed[0].1, "on_entry_complete must report success=true");
+        assert!(
+            r.completed[0].1,
+            "on_entry_complete must report success=true"
+        );
     }
 
     // Cancelling reporter: cancels after the first progress callback.
     struct CancelAfterFirstUpdate;
     impl crate::ProgressReporter for CancelAfterFirstUpdate {
         fn on_bytes_progress(&mut self, _: u64) {} // first call lands here
-        fn should_cancel(&self) -> bool { true }
+        fn should_cancel(&self) -> bool {
+            true
+        }
     }
 
     #[tokio::test]
@@ -2762,4 +2800,3 @@ mod tests {
         );
     }
 }
-

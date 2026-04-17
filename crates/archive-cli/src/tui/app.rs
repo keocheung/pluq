@@ -5,10 +5,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use crate::home::complete::{complete_path, looks_like_url};
 use archive::{
     Archive, ArchiveEntry, ArchiveError, BatchResult, EntryTree, Opened, ProgressReporter, ScanInfo,
 };
-use archive_source::{resolve, ResolvedSource, SourceConfig};
+use archive_source::{ResolvedSource, SourceConfig, resolve};
 use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::TableState;
@@ -160,6 +161,33 @@ pub enum HomeFocus {
     Recent,
 }
 
+#[derive(Debug, Clone)]
+pub enum OverlayMode {
+    /// Create a new bookmark. Carries everything needed to build the entry.
+    Save {
+        source: String,
+        provider: crate::home::provider::Provider,
+        size: u64,
+    },
+    /// Rename the bookmark at `index` in `home_bookmarks`.
+    Rename { index: usize },
+}
+
+#[derive(Debug, Clone)]
+pub enum OverlayState {
+    /// User is typing the name. No collision yet.
+    Editing,
+    /// Enter hit a name collision. Waiting on o/r/c.
+    Collision,
+}
+
+#[derive(Debug, Clone)]
+pub struct BookmarkOverlay {
+    pub mode: OverlayMode,
+    pub input: String,
+    pub state: OverlayState,
+}
+
 impl HomeFocus {
     fn next(self) -> Self {
         match self {
@@ -305,9 +333,16 @@ pub struct App {
     /// Consumed by `record_recent_on_open` in Step 6.
     pub home_pending_name: Option<String>,
 
+    // NEW — Bookmark state. Only meaningful while `phase == Home` or an overlay is active.
+    pub home_bookmarks: crate::home::bookmarks::BookmarkList,
+    pub home_bookmarks_selected: usize,
+
     /// True if the session originally started in Home. Controls whether Esc at
     /// browse root should return to Home (step 7 wires this).
     pub launched_from_home: bool,
+
+    /// Bookmark overlay state. None when not active.
+    pub bookmark_overlay: Option<BookmarkOverlay>,
 }
 
 impl App {
@@ -325,6 +360,7 @@ impl App {
         let mut app = Self::default_state();
         app.phase = AppPhase::Home;
         app.home_recent = crate::home::recent::RecentList::load();
+        app.home_bookmarks = crate::home::bookmarks::BookmarkList::load();
         app.launched_from_home = true;
         app
     }
@@ -364,7 +400,10 @@ impl App {
             home_input_error: None,
             home_pending_provider: None,
             home_pending_name: None,
+            home_bookmarks: crate::home::bookmarks::BookmarkList::default(),
+            home_bookmarks_selected: 0,
             launched_from_home: false,
+            bookmark_overlay: None,
         }
     }
 
@@ -383,10 +422,8 @@ impl App {
     /// Resolve the chosen extraction strategy into an output directory path.
     pub fn resolve_output_dir(&self, strategy: &ExtractionStrategy) -> std::path::PathBuf {
         match strategy {
-            ExtractionStrategy::ArchiveName => {
-                crate::default_output_folder(&self.source)
-                    .unwrap_or_else(|| std::path::PathBuf::from("extracted"))
-            }
+            ExtractionStrategy::ArchiveName => crate::default_output_folder(&self.source)
+                .unwrap_or_else(|| std::path::PathBuf::from("extracted")),
             ExtractionStrategy::Here => std::path::PathBuf::from("."),
             ExtractionStrategy::Custom(name) => std::path::PathBuf::from(name),
         }
@@ -466,20 +503,14 @@ impl App {
 
         self.visible_items = items;
         self.selected = new_selected;
-        self.table_state.select(
-            if self.visible_items.is_empty() {
-                None
-            } else {
-                Some(new_selected)
-            },
-        );
+        self.table_state.select(if self.visible_items.is_empty() {
+            None
+        } else {
+            Some(new_selected)
+        });
     }
 
-    pub fn handle_message(
-        &mut self,
-        msg: AppMessage,
-        tx: &mpsc::UnboundedSender<AppMessage>,
-    ) {
+    pub fn handle_message(&mut self, msg: AppMessage, tx: &mpsc::UnboundedSender<AppMessage>) {
         // Sync latest progress from shared atomics before processing state transitions.
         self.poll_progress();
 
@@ -500,7 +531,9 @@ impl App {
                     }
                     Opened::NeedsScan(pending) => {
                         let total_bytes = match pending.scan_info() {
-                            ScanInfo::Required { estimated_bytes, .. } => *estimated_bytes,
+                            ScanInfo::Required {
+                                estimated_bytes, ..
+                            } => *estimated_bytes,
                             ScanInfo::Ready => 0,
                         };
                         info!(total_bytes, "archive needs scan → Scanning");
@@ -562,8 +595,11 @@ impl App {
                 info!(name = %name, bytes, "extraction complete → Browsing");
                 self.chosen_output_dir = None;
                 self.phase = AppPhase::Browsing;
-                self.status_message =
-                    Some(format!("Extracted '{}' ({})", name, crate::format_size(bytes)));
+                self.status_message = Some(format!(
+                    "Extracted '{}' ({})",
+                    name,
+                    crate::format_size(bytes)
+                ));
             }
             AppMessage::ExtractionComplete(Err(e)) => {
                 if matches!(e, ArchiveError::PasswordNeeded) {
@@ -572,15 +608,18 @@ impl App {
                     self.password_input.clear();
 
                     // Figure out the entry index from the current phase.
-                    let entry_index = if let AppPhase::Extracting { ref entry_name, .. } = self.phase
-                    {
-                        self.entries.iter().position(|e| e.name == *entry_name)
-                    } else {
-                        None
-                    };
+                    let entry_index =
+                        if let AppPhase::Extracting { ref entry_name, .. } = self.phase {
+                            self.entries.iter().position(|e| e.name == *entry_name)
+                        } else {
+                            None
+                        };
 
                     self.password_error = Some("Wrong password. Try again.".into());
-                    self.phase = AppPhase::PasswordPrompt { is_batch: false, entry_index };
+                    self.phase = AppPhase::PasswordPrompt {
+                        is_batch: false,
+                        entry_index,
+                    };
                     return;
                 }
                 if matches!(e, ArchiveError::Cancelled) {
@@ -636,7 +675,10 @@ impl App {
                 let n = batch.succeeded;
                 let bytes = batch.bytes_written;
                 let failed = batch.failed.len();
-                info!(succeeded = n, failed, bytes, "batch extraction complete → Browsing");
+                info!(
+                    succeeded = n,
+                    failed, bytes, "batch extraction complete → Browsing"
+                );
                 self.toggled.clear();
                 self.chosen_output_dir = None;
                 self.phase = AppPhase::Browsing;
@@ -679,6 +721,16 @@ impl App {
         }
     }
 
+    /// Returns the Recent entries that should be shown in the Home Screen,
+    /// filtering out entries whose source is already bookmarked (design spec §3.3).
+    pub fn recent_visible(&self) -> Vec<&crate::home::recent::RecentEntry> {
+        self.home_recent
+            .entries()
+            .iter()
+            .filter(|r| !self.home_bookmarks.has_source(&r.source))
+            .collect()
+    }
+
     /// Update the Recent list if we launched from Home.
     fn record_recent_on_open(&mut self, _opened: &Opened<ResolvedSource>) {
         if !self.launched_from_home {
@@ -689,7 +741,10 @@ impl App {
             .home_pending_provider
             .take()
             .unwrap_or(crate::home::provider::Provider::Local);
-        let name = self.home_pending_name.take().unwrap_or_else(|| source.clone());
+        let name = self
+            .home_pending_name
+            .take()
+            .unwrap_or_else(|| source.clone());
 
         // Size: MVP ships size=0 (see SESSION_PLAN_STEP_6 Design).
         let size = 0u64;
@@ -754,6 +809,8 @@ impl App {
         self.status_message = Some("Returned to Home".into());
         self.table_state = TableState::default().with_selected(Some(0));
         self.home_recent = crate::home::recent::RecentList::load();
+        self.home_bookmarks = crate::home::bookmarks::BookmarkList::load();
+        self.home_bookmarks_selected = 0;
         self.home_input_error = None;
         self.home_pending_provider = None;
         self.home_pending_name = None;
@@ -763,7 +820,7 @@ impl App {
 
     /// Formats an ArchiveError for display in the Home screen error row.
     fn format_home_error(&self, e: &ArchiveError) -> String {
-        use archive_source::{classify_transport, ProviderError};
+        use archive_source::{ProviderError, classify_transport};
         match e {
             ArchiveError::Transport(inner) => match classify_transport(inner.as_ref()) {
                 Some(ProviderError::NotPublic { provider }) => {
@@ -772,7 +829,10 @@ impl App {
                 Some(ProviderError::FileNotFound { provider }) => {
                     format!("{provider}: file not found.")
                 }
-                Some(ProviderError::RateLimited { provider, retry_after }) => {
+                Some(ProviderError::RateLimited {
+                    provider,
+                    retry_after,
+                }) => {
                     let when = retry_after
                         .map(|d| format!(" (retry in ~{}s)", d.as_secs()))
                         .unwrap_or_default();
@@ -790,9 +850,160 @@ impl App {
         }
     }
 
+    fn handle_overlay_key(&mut self, key: KeyEvent) {
+        let Some(overlay) = self.bookmark_overlay.as_mut() else {
+            return;
+        };
+        match overlay.state {
+            OverlayState::Editing => match key.code {
+                KeyCode::Esc => self.bookmark_overlay = None,
+                KeyCode::Enter => self.overlay_submit(),
+                KeyCode::Backspace => {
+                    overlay.input.pop();
+                }
+                KeyCode::Char(c)
+                    if !key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(crossterm::event::KeyModifiers::ALT) =>
+                {
+                    overlay.input.push(c);
+                }
+                _ => {}
+            },
+            OverlayState::Collision => match key.code {
+                KeyCode::Char('o') | KeyCode::Char('O') => self.overlay_overwrite(),
+                KeyCode::Char('r') | KeyCode::Char('R') => {
+                    overlay.state = OverlayState::Editing;
+                }
+                KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => {
+                    self.bookmark_overlay = None;
+                }
+                _ => {}
+            },
+        }
+    }
+
+    fn overlay_submit(&mut self) {
+        let Some(overlay) = self.bookmark_overlay.as_mut() else {
+            return;
+        };
+        let name = overlay.input.trim().to_string();
+        if name.is_empty() {
+            // Keep overlay open; empty names are rejected silently. No error slot yet.
+            return;
+        }
+        match &overlay.mode {
+            OverlayMode::Save {
+                source,
+                provider,
+                size,
+            } => {
+                if self.home_bookmarks.has_name(&name) {
+                    overlay.state = OverlayState::Collision;
+                    return;
+                }
+                self.home_bookmarks
+                    .add(crate::home::bookmarks::BookmarkEntry {
+                        name,
+                        source: source.clone(),
+                        provider: *provider,
+                        size: *size,
+                        last_opened: Utc::now(),
+                    });
+                self.home_bookmarks.save();
+                self.bookmark_overlay = None;
+                self.status_message = Some("Bookmarked.".into());
+            }
+            OverlayMode::Rename { index } => {
+                let target_index = *index;
+                match self.home_bookmarks.rename(target_index, name.clone()) {
+                    Ok(()) => {
+                        self.home_bookmarks.save();
+                        self.bookmark_overlay = None;
+                        self.status_message = Some("Bookmark renamed.".into());
+                    }
+                    Err(()) => {
+                        overlay.state = OverlayState::Collision;
+                    }
+                }
+            }
+        }
+    }
+
+    fn overlay_overwrite(&mut self) {
+        let Some(overlay) = self.bookmark_overlay.as_ref() else {
+            return;
+        };
+        let name = overlay.input.trim().to_string();
+        match &overlay.mode {
+            OverlayMode::Save {
+                source,
+                provider,
+                size,
+            } => {
+                let entry = crate::home::bookmarks::BookmarkEntry {
+                    name,
+                    source: source.clone(),
+                    provider: *provider,
+                    size: *size,
+                    last_opened: Utc::now(),
+                };
+                self.home_bookmarks.overwrite_by_name(entry);
+                self.home_bookmarks.save();
+                self.bookmark_overlay = None;
+                self.status_message = Some("Bookmark overwritten.".into());
+            }
+            OverlayMode::Rename { index } => {
+                let target_index = *index;
+                // Find the conflicting entry (different index, same name).
+                let conflict_index = self
+                    .home_bookmarks
+                    .entries()
+                    .iter()
+                    .enumerate()
+                    .find(|(i, e)| *i != target_index && e.name == name)
+                    .map(|(i, _)| i);
+
+                if let Some(conflict_idx) = conflict_index {
+                    // Remove the conflict first. If it was before target, target_index shifts down by 1.
+                    self.home_bookmarks.remove(conflict_idx);
+                    let new_target = if conflict_idx < target_index {
+                        target_index - 1
+                    } else {
+                        target_index
+                    };
+                    // Now rename (guaranteed no collision).
+                    let _ = self.home_bookmarks.rename(new_target, name.clone());
+                    self.home_bookmarks.save();
+                    self.bookmark_overlay = None;
+                    self.status_message = Some("Bookmark renamed (conflict overwritten).".into());
+                } else {
+                    // Shouldn't reach here — collision state implies conflict exists.
+                    // Defensive: just close.
+                    self.bookmark_overlay = None;
+                }
+            }
+        }
+    }
+
     /// Process a keypress while in the Home phase.
     fn handle_home_key(&mut self, key: KeyEvent, _tx: &mpsc::UnboundedSender<AppMessage>) {
         match key.code {
+            KeyCode::Tab
+                if self.home_focus == HomeFocus::SnipeInput
+                    && !self.snipe_input.is_empty()
+                    && !looks_like_url(&self.snipe_input) =>
+            {
+                if let Some((new_input, hits)) = complete_path(&self.snipe_input) {
+                    self.snipe_input = new_input;
+                    if hits > 1 {
+                        self.status_message = Some(format!("{} matches", hits));
+                    } else if hits == 0 {
+                        self.status_message = Some("no match".into());
+                    }
+                }
+            }
             KeyCode::Tab => {
                 self.home_focus = self.home_focus.next();
             }
@@ -808,7 +1019,7 @@ impl App {
 
             // Recent list navigation (only if focused on Recent)
             KeyCode::Down | KeyCode::Char('j') if self.home_focus == HomeFocus::Recent => {
-                let count = self.home_recent.len();
+                let count = self.recent_visible().len();
                 if count > 0 {
                     self.home_recent_selected = (self.home_recent_selected + 1).min(count - 1);
                 }
@@ -820,21 +1031,92 @@ impl App {
                 self.home_recent_selected = 0;
             }
             KeyCode::End | KeyCode::Char('G') if self.home_focus == HomeFocus::Recent => {
-                let count = self.home_recent.len();
+                let count = self.recent_visible().len();
                 if count > 0 {
                     self.home_recent_selected = count - 1;
                 }
             }
 
+            KeyCode::Char('b') if self.home_focus == HomeFocus::Recent => {
+                let visible = self.recent_visible();
+                if let Some(entry) = visible.get(self.home_recent_selected) {
+                    let entry = (*entry).clone();
+                    drop(visible);
+                    self.bookmark_overlay = Some(BookmarkOverlay {
+                        mode: OverlayMode::Save {
+                            source: entry.source.clone(),
+                            provider: entry.provider,
+                            size: entry.size,
+                        },
+                        input: entry.name.clone(),
+                        state: OverlayState::Editing,
+                    });
+                }
+            }
+
+            // Bookmarks list navigation
+            KeyCode::Down | KeyCode::Char('j') if self.home_focus == HomeFocus::Bookmarks => {
+                let count = self.home_bookmarks.len();
+                if count > 0 {
+                    self.home_bookmarks_selected =
+                        (self.home_bookmarks_selected + 1).min(count - 1);
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') if self.home_focus == HomeFocus::Bookmarks => {
+                self.home_bookmarks_selected = self.home_bookmarks_selected.saturating_sub(1);
+            }
+            KeyCode::Home | KeyCode::Char('g') if self.home_focus == HomeFocus::Bookmarks => {
+                self.home_bookmarks_selected = 0;
+            }
+            KeyCode::End | KeyCode::Char('G') if self.home_focus == HomeFocus::Bookmarks => {
+                let count = self.home_bookmarks.len();
+                if count > 0 {
+                    self.home_bookmarks_selected = count - 1;
+                }
+            }
+            KeyCode::Char('r') if self.home_focus == HomeFocus::Bookmarks => {
+                if let Some(entry) = self
+                    .home_bookmarks
+                    .entries()
+                    .get(self.home_bookmarks_selected)
+                {
+                    self.bookmark_overlay = Some(BookmarkOverlay {
+                        mode: OverlayMode::Rename {
+                            index: self.home_bookmarks_selected,
+                        },
+                        input: entry.name.clone(),
+                        state: OverlayState::Editing,
+                    });
+                }
+            }
+
             // Recent delete
             KeyCode::Char('d') if self.home_focus == HomeFocus::Recent => {
-                if !self.home_recent.is_empty() {
-                    self.home_recent.remove(self.home_recent_selected);
-                    // Persist change.
-                    self.home_recent.save();
-                    // Clamp cursor.
-                    let max = self.home_recent.len().saturating_sub(1);
+                let visible = self.recent_visible();
+                if let Some(target) = visible.get(self.home_recent_selected) {
+                    let source_to_remove = target.source.clone();
+                    drop(visible);
+                    if let Some(raw_idx) = self
+                        .home_recent
+                        .entries()
+                        .iter()
+                        .position(|e| e.source == source_to_remove)
+                    {
+                        self.home_recent.remove(raw_idx);
+                        self.home_recent.save();
+                    }
+                    let max = self.recent_visible().len().saturating_sub(1);
                     self.home_recent_selected = self.home_recent_selected.min(max);
+                }
+            }
+
+            // Bookmark delete
+            KeyCode::Char('d') if self.home_focus == HomeFocus::Bookmarks => {
+                if !self.home_bookmarks.is_empty() {
+                    self.home_bookmarks.remove(self.home_bookmarks_selected);
+                    self.home_bookmarks.save();
+                    let max = self.home_bookmarks.len().saturating_sub(1);
+                    self.home_bookmarks_selected = self.home_bookmarks_selected.min(max);
                 }
             }
 
@@ -849,26 +1131,43 @@ impl App {
                     self.submit_home_source(source, _tx);
                 }
                 HomeFocus::Recent => {
-                    if let Some(entry) = self.home_recent.entries().get(self.home_recent_selected) {
+                    let visible = self.recent_visible();
+                    if let Some(entry) = visible.get(self.home_recent_selected) {
                         let source = entry.source.clone();
+                        drop(visible);
                         self.snipe_input.clear();
                         self.submit_home_source(source, _tx);
                     }
                 }
                 HomeFocus::Bookmarks => {
-                    // MVP: no bookmarks yet.
+                    if let Some(entry) = self
+                        .home_bookmarks
+                        .entries()
+                        .get(self.home_bookmarks_selected)
+                    {
+                        let source = entry.source.clone();
+                        self.snipe_input.clear();
+                        self.submit_home_source(source, _tx);
+                    }
                 }
             },
 
             // Snipe Input editing (only if focused)
-            KeyCode::Char('u') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
-                && self.home_focus == HomeFocus::SnipeInput =>
+            KeyCode::Char('u')
+                if key
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::CONTROL)
+                    && self.home_focus == HomeFocus::SnipeInput =>
             {
                 self.snipe_input.clear();
             }
-            KeyCode::Char(c) if self.home_focus == HomeFocus::SnipeInput
-                && !key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
-                && !key.modifiers.contains(crossterm::event::KeyModifiers::ALT) => {
+            KeyCode::Char(c)
+                if self.home_focus == HomeFocus::SnipeInput
+                    && !key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(crossterm::event::KeyModifiers::ALT) =>
+            {
                 self.snipe_input.push(c);
                 self.home_input_error = None;
             }
@@ -884,11 +1183,18 @@ impl App {
     /// Called on each tick (50 ms) — no channel messages needed.
     pub fn poll_progress(&mut self) {
         match self.phase {
-            AppPhase::Scanning { ref mut bytes_scanned, ref mut entries_found, .. } => {
+            AppPhase::Scanning {
+                ref mut bytes_scanned,
+                ref mut entries_found,
+                ..
+            } => {
                 *bytes_scanned = self.progress.bytes_scanned.load(Ordering::Relaxed);
                 *entries_found = self.progress.entries_found.load(Ordering::Relaxed);
             }
-            AppPhase::Extracting { ref mut bytes_extracted, .. } => {
+            AppPhase::Extracting {
+                ref mut bytes_extracted,
+                ..
+            } => {
                 *bytes_extracted = self.progress.bytes_extracted.load(Ordering::Relaxed);
                 self.speed_tracker.record(*bytes_extracted);
             }
@@ -908,14 +1214,15 @@ impl App {
         }
     }
 
-    pub fn handle_key(
-        &mut self,
-        key: KeyEvent,
-        tx: &mpsc::UnboundedSender<AppMessage>,
-    ) {
+    pub fn handle_key(&mut self, key: KeyEvent, tx: &mpsc::UnboundedSender<AppMessage>) {
         // Any keypress clears status message and home input error.
         self.status_message = None;
         self.home_input_error = None;
+
+        if self.bookmark_overlay.is_some() {
+            self.handle_overlay_key(key);
+            return;
+        }
 
         if matches!(self.phase, AppPhase::Home) {
             self.handle_home_key(key, tx);
@@ -1144,6 +1451,29 @@ impl App {
         }
 
         match key.code {
+            KeyCode::Char('b') if matches!(self.phase, AppPhase::Browsing) => {
+                // Only if we have a source (always true in Browsing, but guard anyway).
+                if !self.source.is_empty() {
+                    // Use the best available name/provider/size from current archive state.
+                    let provider = self
+                        .home_pending_provider
+                        .unwrap_or(crate::home::provider::Provider::Local);
+                    let name = self
+                        .home_pending_name
+                        .clone()
+                        .unwrap_or_else(|| self.source.clone());
+                    // MVP keeps size=0 for Recent; bookmarks inherit the same placeholder.
+                    self.bookmark_overlay = Some(BookmarkOverlay {
+                        mode: OverlayMode::Save {
+                            source: self.source.clone(),
+                            provider,
+                            size: 0,
+                        },
+                        input: name,
+                        state: OverlayState::Editing,
+                    });
+                }
+            }
             KeyCode::Char('q') => {
                 if matches!(
                     self.phase,
@@ -1165,7 +1495,8 @@ impl App {
                 } else if matches!(self.phase, AppPhase::ConfirmExtract { .. }) {
                     debug!("Esc during ConfirmExtract → Browsing");
                     self.phase = AppPhase::Browsing;
-                } else if matches!(self.phase, AppPhase::Browsing) && !self.current_path.is_empty() {
+                } else if matches!(self.phase, AppPhase::Browsing) && !self.current_path.is_empty()
+                {
                     debug!("Esc in subdirectory → parent");
                     let old_path = self.current_path.join("/");
                     self.selection_history.insert(old_path, self.selected);
@@ -1450,8 +1781,9 @@ impl App {
             }
             match tokio::fs::File::create(&output_path).await {
                 Ok(mut file) => {
-                    let result =
-                        archive.extract(&entry, &mut file, progress, password.as_deref()).await;
+                    let result = archive
+                        .extract(&entry, &mut file, progress, password.as_deref())
+                        .await;
                     if matches!(&result, Err(ArchiveError::Cancelled)) {
                         drop(file);
                         let _ = tokio::fs::remove_file(&output_path).await;
@@ -1461,10 +1793,7 @@ impl App {
                 Err(e) => {
                     let _ = tx_extract.send(AppMessage::ExtractionComplete(Err(
                         archive::ArchiveError::Internal {
-                            detail: format!(
-                                "Failed to create {}: {e}",
-                                output_path.display()
-                            ),
+                            detail: format!("Failed to create {}: {e}", output_path.display()),
                         },
                     )));
                 }
@@ -1494,7 +1823,10 @@ impl App {
         let total_bytes: u64 = selected_entries.iter().map(|e| e.uncompressed_size).sum();
         let total_files = selected_entries.len();
 
-        info!(total_files, total_bytes, "starting batch extraction → ExtractingBatch");
+        info!(
+            total_files,
+            total_bytes, "starting batch extraction → ExtractingBatch"
+        );
 
         self.phase = AppPhase::ExtractingBatch {
             total_files,
@@ -1544,8 +1876,9 @@ impl App {
                 }
             };
 
-            let result =
-                archive.extract_selected(&entry_refs, sink_factory, progress, password.as_deref()).await;
+            let result = archive
+                .extract_selected(&entry_refs, sink_factory, progress, password.as_deref())
+                .await;
 
             // Clean up output files on cancel or per-entry failures.
             match &result {
@@ -1584,14 +1917,23 @@ pub struct TuiProgressReporter {
 
 impl TuiProgressReporter {
     pub fn new(shared: Arc<SharedProgress>, cancel: Arc<AtomicBool>) -> Self {
-        Self { shared, cancel, cumulative_bytes: 0, current_entry_bytes: 0 }
+        Self {
+            shared,
+            cancel,
+            cumulative_bytes: 0,
+            current_entry_bytes: 0,
+        }
     }
 }
 
 impl ProgressReporter for TuiProgressReporter {
     fn on_scan_progress(&mut self, bytes_scanned: u64, entries_found: usize) {
-        self.shared.bytes_scanned.store(bytes_scanned, Ordering::Relaxed);
-        self.shared.entries_found.store(entries_found, Ordering::Relaxed);
+        self.shared
+            .bytes_scanned
+            .store(bytes_scanned, Ordering::Relaxed);
+        self.shared
+            .entries_found
+            .store(entries_found, Ordering::Relaxed);
     }
 
     fn on_entry_start(&mut self, name: &str, _size: u64) {
@@ -1622,10 +1964,11 @@ impl ProgressReporter for TuiProgressReporter {
 #[cfg(test)]
 mod home_tests {
     use super::*;
-    use crate::home::recent::{RecentEntry, RecentList};
+    use crate::home::bookmarks::{BookmarkEntry, BookmarkList};
     use crate::home::provider::Provider;
+    use crate::home::recent::{RecentEntry, RecentList};
     use chrono::Utc;
-    use crossterm::event::{KeyEvent, KeyCode, KeyModifiers, KeyEventKind, KeyEventState};
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
 
     fn make_key(code: KeyCode) -> KeyEvent {
         KeyEvent {
@@ -1678,7 +2021,7 @@ mod home_tests {
     fn test_home_focus_cycling() {
         let mut app = App::new_home();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        
+
         // Tab cycles forwards
         app.handle_key(make_key(KeyCode::Tab), &tx);
         assert_eq!(app.home_focus, HomeFocus::Bookmarks);
@@ -1721,6 +2064,59 @@ mod home_tests {
     }
 
     #[test]
+    fn test_tab_cycles_focus_when_empty() {
+        let mut app = App::new_home();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        assert_eq!(app.home_focus, HomeFocus::SnipeInput);
+        assert!(app.snipe_input.is_empty());
+
+        app.handle_key(make_key(KeyCode::Tab), &tx);
+        assert_eq!(app.home_focus, HomeFocus::Bookmarks);
+    }
+
+    #[test]
+    fn test_tab_cycles_focus_when_url() {
+        let mut app = App::new_home();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.snipe_input = "https://google.com".to_string();
+
+        app.handle_key(make_key(KeyCode::Tab), &tx);
+        assert_eq!(app.home_focus, HomeFocus::Bookmarks);
+    }
+
+    #[test]
+    fn test_tab_completes_when_local_path() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("foo.zip");
+        std::fs::File::create(&file_path).unwrap();
+
+        let mut app = App::new_home();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.snipe_input = format!("{}/f", dir.path().to_string_lossy());
+
+        app.handle_key(make_key(KeyCode::Tab), &tx);
+        // Focus stays on SnipeInput
+        assert_eq!(app.home_focus, HomeFocus::SnipeInput);
+        // Input is completed
+        assert_eq!(
+            app.snipe_input,
+            format!("{}/foo.zip", dir.path().to_string_lossy())
+        );
+    }
+
+    #[test]
+    fn test_backtab_always_cycles_focus() {
+        let mut app = App::new_home();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.snipe_input = "/tmp/foo".to_string();
+
+        // Shift+Tab (BackTab) cycles focus even with text in SnipeInput
+        app.handle_key(make_key(KeyCode::BackTab), &tx);
+        assert_eq!(app.home_focus, HomeFocus::Recent);
+    }
+
+    #[test]
     fn test_home_snipe_input_accepts_shift_chars() {
         let mut app = App::new_home();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1738,11 +2134,25 @@ mod home_tests {
     fn test_home_recent_navigation() {
         let mut app = App::new_home();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        
+        // Clear bookmarks to ensure Recent entries are visible
+        app.home_bookmarks = BookmarkList::default();
+
         // Populate recent
         let entries = vec![
-            RecentEntry { name: "a.zip".into(), source: "s1".into(), provider: Provider::Local, size: 10, last_opened: Utc::now() },
-            RecentEntry { name: "b.zip".into(), source: "s2".into(), provider: Provider::Local, size: 20, last_opened: Utc::now() },
+            RecentEntry {
+                name: "a.zip".into(),
+                source: "s1".into(),
+                provider: Provider::Local,
+                size: 10,
+                last_opened: Utc::now(),
+            },
+            RecentEntry {
+                name: "b.zip".into(),
+                source: "s2".into(),
+                provider: Provider::Local,
+                size: 20,
+                last_opened: Utc::now(),
+            },
         ];
         app.home_recent = RecentList::from_entries(entries);
         app.home_focus = HomeFocus::Recent;
@@ -1773,11 +2183,25 @@ mod home_tests {
     fn test_home_recent_delete() {
         let mut app = App::new_home();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        
+        // Clear bookmarks to ensure Recent entries are visible
+        app.home_bookmarks = BookmarkList::default();
+
         // Populate recent with 2 entries
         let entries = vec![
-            RecentEntry { name: "a.zip".into(), source: "s1".into(), provider: Provider::Local, size: 10, last_opened: Utc::now() },
-            RecentEntry { name: "b.zip".into(), source: "s2".into(), provider: Provider::Local, size: 20, last_opened: Utc::now() },
+            RecentEntry {
+                name: "a.zip".into(),
+                source: "s1".into(),
+                provider: Provider::Local,
+                size: 10,
+                last_opened: Utc::now(),
+            },
+            RecentEntry {
+                name: "b.zip".into(),
+                source: "s2".into(),
+                provider: Provider::Local,
+                size: 20,
+                last_opened: Utc::now(),
+            },
         ];
         app.home_recent = RecentList::from_entries(entries);
         app.home_focus = HomeFocus::Recent;
@@ -1799,7 +2223,7 @@ mod home_tests {
     fn test_home_esc_noop() {
         let mut app = App::new_home();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        
+
         app.handle_key(make_key(KeyCode::Esc), &tx);
         assert!(matches!(app.phase, AppPhase::Home));
         assert!(!app.should_quit);
@@ -1904,10 +2328,10 @@ mod home_tests {
     fn test_esc_to_home_from_browsing_root() {
         let mut app = App::new_home(); // sets launched_from_home = true
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        
+
         app.phase = AppPhase::Browsing;
         app.current_path = vec![];
-        
+
         app.handle_key(make_key(KeyCode::Esc), &tx);
         assert!(matches!(app.phase, AppPhase::Home));
     }
@@ -1916,10 +2340,10 @@ mod home_tests {
     fn test_esc_noop_from_browsing_root_not_launched_from_home() {
         let mut app = App::new_with_source("test.zip".into());
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        
+
         app.phase = AppPhase::Browsing;
         app.current_path = vec![];
-        
+
         app.handle_key(make_key(KeyCode::Esc), &tx);
         assert!(matches!(app.phase, AppPhase::Browsing));
         assert!(!app.should_quit);
@@ -1929,9 +2353,9 @@ mod home_tests {
     fn test_esc_to_home_from_error() {
         let mut app = App::new_home(); // sets launched_from_home = true
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        
+
         app.phase = AppPhase::Error("bad".into());
-        
+
         app.handle_key(make_key(KeyCode::Esc), &tx);
         assert!(matches!(app.phase, AppPhase::Home));
     }
@@ -1940,17 +2364,21 @@ mod home_tests {
     async fn test_recent_enter_opens() {
         let mut app = App::new_home();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        
-        let entries = vec![
-            RecentEntry { name: "a.zip".into(), source: "s1.zip".into(), provider: Provider::Local, size: 10, last_opened: Utc::now() },
-        ];
+
+        let entries = vec![RecentEntry {
+            name: "a.zip".into(),
+            source: "s1.zip".into(),
+            provider: Provider::Local,
+            size: 10,
+            last_opened: Utc::now(),
+        }];
         app.home_recent = RecentList::from_entries(entries);
         app.home_focus = HomeFocus::Recent;
         app.home_recent_selected = 0;
         app.snipe_input = "garbage".into();
 
         app.handle_key(make_key(KeyCode::Enter), &tx);
-        
+
         // Should transition to Opening and clear snipe_input
         assert!(matches!(app.phase, AppPhase::Opening));
         assert_eq!(app.source, "s1.zip");
@@ -1961,9 +2389,664 @@ mod home_tests {
     fn test_q_from_home_quits() {
         let mut app = App::new_home();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        
+
         app.home_focus = HomeFocus::Recent;
         app.handle_key(make_key(KeyCode::Char('q')), &tx);
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn test_new_home_init_state() {
+        let app = App::new_home();
+        assert_eq!(app.home_bookmarks_selected, 0);
+        assert_eq!(app.home_recent_selected, 0);
+        assert_eq!(app.home_focus, HomeFocus::SnipeInput);
+    }
+
+    #[test]
+    fn test_recent_visible_filters_bookmarks() {
+        let mut app = App::default_state();
+        let r1 = RecentEntry {
+            name: "r1".into(),
+            source: "s1".into(),
+            provider: Provider::Local,
+            size: 0,
+            last_opened: Utc::now(),
+        };
+        let r2 = RecentEntry {
+            name: "r2".into(),
+            source: "s2".into(),
+            provider: Provider::Local,
+            size: 0,
+            last_opened: Utc::now(),
+        };
+        let r3 = RecentEntry {
+            name: "r3".into(),
+            source: "s3".into(),
+            provider: Provider::Local,
+            size: 0,
+            last_opened: Utc::now(),
+        };
+
+        app.home_recent = RecentList::from_entries(vec![r1, r2, r3]);
+
+        let b2 = crate::home::bookmarks::BookmarkEntry {
+            name: "b2".into(),
+            source: "s2".into(),
+            provider: Provider::Local,
+            size: 0,
+            last_opened: Utc::now(),
+        };
+        app.home_bookmarks = crate::home::bookmarks::BookmarkList::from_entries(vec![b2]);
+
+        let visible = app.recent_visible();
+        assert_eq!(visible.len(), 2);
+        assert_eq!(visible[0].source, "s1");
+        assert_eq!(visible[1].source, "s3");
+    }
+
+    #[test]
+    fn test_recent_visible_empty_bookmarks() {
+        let mut app = App::default_state();
+        let r1 = RecentEntry {
+            name: "r1".into(),
+            source: "s1".into(),
+            provider: Provider::Local,
+            size: 0,
+            last_opened: Utc::now(),
+        };
+        app.home_recent = RecentList::from_entries(vec![r1]);
+        app.home_bookmarks = crate::home::bookmarks::BookmarkList::default();
+
+        let visible = app.recent_visible();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].source, "s1");
+    }
+
+    #[test]
+    fn test_recent_visible_empty_recent() {
+        let mut app = App::default_state();
+        app.home_recent = RecentList::default();
+        let b1 = crate::home::bookmarks::BookmarkEntry {
+            name: "b1".into(),
+            source: "s1".into(),
+            provider: Provider::Local,
+            size: 0,
+            last_opened: Utc::now(),
+        };
+        app.home_bookmarks = crate::home::bookmarks::BookmarkList::from_entries(vec![b1]);
+
+        let visible = app.recent_visible();
+        assert!(visible.is_empty());
+    }
+
+    #[test]
+    fn test_bookmarks_focus_nav() {
+        let mut app = App::new_home();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let b1 = BookmarkEntry {
+            name: "b1".into(),
+            source: "s1".into(),
+            provider: Provider::Local,
+            size: 0,
+            last_opened: Utc::now(),
+        };
+        let b2 = BookmarkEntry {
+            name: "b2".into(),
+            source: "s2".into(),
+            provider: Provider::Local,
+            size: 0,
+            last_opened: Utc::now(),
+        };
+        let b3 = BookmarkEntry {
+            name: "b3".into(),
+            source: "s3".into(),
+            provider: Provider::Local,
+            size: 0,
+            last_opened: Utc::now(),
+        };
+
+        app.home_bookmarks = BookmarkList::from_entries(vec![b1, b2, b3]);
+        app.home_focus = HomeFocus::Bookmarks;
+        app.home_bookmarks_selected = 0;
+
+        app.handle_key(make_key(KeyCode::Char('j')), &tx);
+        assert_eq!(app.home_bookmarks_selected, 1);
+
+        app.handle_key(make_key(KeyCode::Char('j')), &tx);
+        assert_eq!(app.home_bookmarks_selected, 2);
+
+        app.handle_key(make_key(KeyCode::Char('k')), &tx);
+        assert_eq!(app.home_bookmarks_selected, 1);
+    }
+
+    #[test]
+    fn test_bookmarks_delete() {
+        let mut app = App::new_home();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let b1 = BookmarkEntry {
+            name: "b1".into(),
+            source: "s1".into(),
+            provider: Provider::Local,
+            size: 0,
+            last_opened: Utc::now(),
+        };
+        let b2 = BookmarkEntry {
+            name: "b2".into(),
+            source: "s2".into(),
+            provider: Provider::Local,
+            size: 0,
+            last_opened: Utc::now(),
+        };
+
+        app.home_bookmarks = BookmarkList::from_entries(vec![b1, b2]);
+        app.home_focus = HomeFocus::Bookmarks;
+        app.home_bookmarks_selected = 0;
+
+        app.handle_key(make_key(KeyCode::Char('d')), &tx);
+        assert_eq!(app.home_bookmarks.len(), 1);
+        assert_eq!(app.home_bookmarks.entries()[0].name, "b2");
+        assert_eq!(app.home_bookmarks_selected, 0);
+    }
+
+    #[tokio::test]
+    async fn test_recent_enter_uses_visible_index() {
+        let mut app = App::new_home();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let r1 = RecentEntry {
+            name: "r1".into(),
+            source: "s1".into(),
+            provider: Provider::Local,
+            size: 0,
+            last_opened: Utc::now(),
+        };
+        let r2 = RecentEntry {
+            name: "r2".into(),
+            source: "s2".into(),
+            provider: Provider::Local,
+            size: 0,
+            last_opened: Utc::now(),
+        };
+        app.home_recent = RecentList::from_entries(vec![r1, r2]);
+
+        // Bookmark r1's source so it's filtered out from Recent visible
+        let b1 = BookmarkEntry {
+            name: "b1".into(),
+            source: "s1".into(),
+            provider: Provider::Local,
+            size: 0,
+            last_opened: Utc::now(),
+        };
+        app.home_bookmarks = BookmarkList::from_entries(vec![b1]);
+
+        app.home_focus = HomeFocus::Recent;
+        app.home_recent_selected = 0; // Targets r2 because r1 is hidden
+
+        app.handle_key(make_key(KeyCode::Enter), &tx);
+
+        assert_eq!(app.source, "s2");
+    }
+
+    #[test]
+    fn test_recent_delete_uses_visible_index() {
+        let mut app = App::new_home();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let r1 = RecentEntry {
+            name: "r1".into(),
+            source: "s1".into(),
+            provider: Provider::Local,
+            size: 0,
+            last_opened: Utc::now(),
+        };
+        let r2 = RecentEntry {
+            name: "r2".into(),
+            source: "s2".into(),
+            provider: Provider::Local,
+            size: 0,
+            last_opened: Utc::now(),
+        };
+        app.home_recent = RecentList::from_entries(vec![r1, r2]);
+
+        // Bookmark r1's source so it's filtered out from Recent visible
+        let b1 = BookmarkEntry {
+            name: "b1".into(),
+            source: "s1".into(),
+            provider: Provider::Local,
+            size: 0,
+            last_opened: Utc::now(),
+        };
+        app.home_bookmarks = BookmarkList::from_entries(vec![b1]);
+
+        app.home_focus = HomeFocus::Recent;
+        app.home_recent_selected = 0; // Targets r2
+
+        app.handle_key(make_key(KeyCode::Char('d')), &tx);
+
+        assert_eq!(app.home_recent.len(), 1);
+        assert_eq!(app.home_recent.entries()[0].source, "s1"); // r2 was removed, r1 remains (but is hidden)
+    }
+
+    #[test]
+    fn test_overlay_open_from_recent() {
+        let mut app = App::new_home();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.home_bookmarks = BookmarkList::default();
+
+        let entries = vec![RecentEntry {
+            name: "test.zip".into(),
+            source: "s1".into(),
+            provider: Provider::Local,
+            size: 10,
+            last_opened: Utc::now(),
+        }];
+        app.home_recent = RecentList::from_entries(entries);
+        app.home_focus = HomeFocus::Recent;
+        app.home_recent_selected = 0;
+
+        app.handle_key(make_key(KeyCode::Char('b')), &tx);
+
+        assert!(app.bookmark_overlay.is_some());
+        let overlay = app.bookmark_overlay.unwrap();
+        assert!(matches!(overlay.mode, OverlayMode::Save { .. }));
+        assert_eq!(overlay.input, "test.zip");
+        assert!(matches!(overlay.state, OverlayState::Editing));
+    }
+    #[test]
+    fn test_overlay_esc_closes() {
+        let mut app = App::new_home();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.bookmark_overlay = Some(BookmarkOverlay {
+            mode: OverlayMode::Save {
+                source: "s".into(),
+                provider: Provider::Local,
+                size: 0,
+            },
+            input: "test".into(),
+            state: OverlayState::Editing,
+        });
+
+        app.handle_key(make_key(KeyCode::Esc), &tx);
+        assert!(app.bookmark_overlay.is_none());
+    }
+
+    #[test]
+    fn test_overlay_enter_saves_new() {
+        let mut app = App::new_home();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.home_bookmarks = BookmarkList::default();
+        app.bookmark_overlay = Some(BookmarkOverlay {
+            mode: OverlayMode::Save {
+                source: "s1".into(),
+                provider: Provider::Local,
+                size: 100,
+            },
+            input: "New Bookmark".into(),
+            state: OverlayState::Editing,
+        });
+
+        app.handle_key(make_key(KeyCode::Enter), &tx);
+
+        assert!(app.bookmark_overlay.is_none());
+        assert_eq!(app.home_bookmarks.len(), 1);
+        let b = &app.home_bookmarks.entries()[0];
+        assert_eq!(b.name, "New Bookmark");
+        assert_eq!(b.source, "s1");
+        assert_eq!(app.status_message, Some("Bookmarked.".into()));
+    }
+
+    #[test]
+    fn test_overlay_enter_triggers_collision() {
+        let mut app = App::new_home();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let b1 = BookmarkEntry {
+            name: "Existing".into(),
+            source: "s1".into(),
+            provider: Provider::Local,
+            size: 10,
+            last_opened: Utc::now(),
+        };
+        app.home_bookmarks = BookmarkList::from_entries(vec![b1]);
+
+        app.bookmark_overlay = Some(BookmarkOverlay {
+            mode: OverlayMode::Save {
+                source: "s2".into(),
+                provider: Provider::Local,
+                size: 20,
+            },
+            input: "Existing".into(),
+            state: OverlayState::Editing,
+        });
+
+        app.handle_key(make_key(KeyCode::Enter), &tx);
+
+        assert!(app.bookmark_overlay.is_some());
+        let overlay = app.bookmark_overlay.as_ref().unwrap();
+        assert!(matches!(overlay.state, OverlayState::Collision));
+        assert_eq!(app.home_bookmarks.len(), 1);
+    }
+
+    #[test]
+    fn test_overlay_collision_overwrite() {
+        let mut app = App::new_home();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let b1 = BookmarkEntry {
+            name: "Existing".into(),
+            source: "s1".into(),
+            provider: Provider::Local,
+            size: 10,
+            last_opened: Utc::now(),
+        };
+        app.home_bookmarks = BookmarkList::from_entries(vec![b1]);
+
+        app.bookmark_overlay = Some(BookmarkOverlay {
+            mode: OverlayMode::Save {
+                source: "new_source".into(),
+                provider: Provider::Local,
+                size: 20,
+            },
+            input: "Existing".into(),
+            state: OverlayState::Collision,
+        });
+
+        app.handle_key(make_key(KeyCode::Char('o')), &tx);
+
+        assert!(app.bookmark_overlay.is_none());
+        assert_eq!(app.home_bookmarks.len(), 1);
+        assert_eq!(app.home_bookmarks.entries()[0].source, "new_source");
+        assert_eq!(app.status_message, Some("Bookmark overwritten.".into()));
+    }
+
+    #[test]
+    fn test_overlay_collision_cancel() {
+        let mut app = App::new_home();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        app.bookmark_overlay = Some(BookmarkOverlay {
+            mode: OverlayMode::Save {
+                source: "s".into(),
+                provider: Provider::Local,
+                size: 0,
+            },
+            input: "Existing".into(),
+            state: OverlayState::Collision,
+        });
+
+        app.handle_key(make_key(KeyCode::Char('c')), &tx);
+        assert!(app.bookmark_overlay.is_none());
+    }
+
+    #[test]
+    fn test_overlay_collision_rename_reopens_editing() {
+        let mut app = App::new_home();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        app.bookmark_overlay = Some(BookmarkOverlay {
+            mode: OverlayMode::Save {
+                source: "s".into(),
+                provider: Provider::Local,
+                size: 0,
+            },
+            input: "Existing".into(),
+            state: OverlayState::Collision,
+        });
+
+        app.handle_key(make_key(KeyCode::Char('r')), &tx);
+        assert!(app.bookmark_overlay.is_some());
+        assert!(matches!(
+            app.bookmark_overlay.as_ref().unwrap().state,
+            OverlayState::Editing
+        ));
+    }
+
+    #[test]
+    fn test_overlay_from_browse() {
+        let mut app = App::new_with_source("foo.zip".into());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.phase = AppPhase::Browsing;
+
+        app.handle_key(make_key(KeyCode::Char('b')), &tx);
+
+        assert!(app.bookmark_overlay.is_some());
+        let overlay = app.bookmark_overlay.unwrap();
+        let OverlayMode::Save { source, .. } = &overlay.mode else {
+            panic!("Expected OverlayMode::Save");
+        };
+        assert_eq!(source, "foo.zip");
+        assert_eq!(overlay.input, "foo.zip");
+    }
+
+    #[test]
+    fn test_overlay_accepts_shift_chars() {
+        let mut app = App::new_home();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.bookmark_overlay = Some(BookmarkOverlay {
+            mode: OverlayMode::Save {
+                source: "s".into(),
+                provider: Provider::Local,
+                size: 0,
+            },
+            input: "".into(),
+            state: OverlayState::Editing,
+        });
+
+        app.handle_key(make_shift_key(KeyCode::Char('H')), &tx);
+        app.handle_key(make_shift_key(KeyCode::Char('?')), &tx);
+        app.handle_key(make_shift_key(KeyCode::Char('&')), &tx);
+
+        assert_eq!(app.bookmark_overlay.as_ref().unwrap().input, "H?&");
+    }
+
+    #[test]
+    fn test_overlay_intercepts_keys() {
+        let mut app = App::new_with_source("foo.zip".into());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.phase = AppPhase::Browsing;
+        app.bookmark_overlay = Some(BookmarkOverlay {
+            mode: OverlayMode::Save {
+                source: "s".into(),
+                provider: Provider::Local,
+                size: 0,
+            },
+            input: "test".into(),
+            state: OverlayState::Editing,
+        });
+
+        app.handle_key(make_key(KeyCode::Char('q')), &tx);
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn test_rename_opens_overlay() {
+        let mut app = App::new_home();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let b1 = BookmarkEntry {
+            name: "MyArchive".into(),
+            source: "source1".into(),
+            provider: crate::home::provider::Provider::Local,
+            size: 100,
+            last_opened: Utc::now(),
+        };
+        app.home_bookmarks = BookmarkList::from_entries(vec![b1]);
+        app.home_focus = HomeFocus::Bookmarks;
+        app.home_bookmarks_selected = 0;
+
+        app.handle_key(make_key(KeyCode::Char('r')), &tx);
+
+        let overlay = app.bookmark_overlay.as_ref().unwrap();
+        assert!(matches!(overlay.mode, OverlayMode::Rename { index: 0 }));
+        assert_eq!(overlay.input, "MyArchive");
+        assert!(matches!(overlay.state, OverlayState::Editing));
+    }
+
+    #[test]
+    fn test_rename_submit_ok() {
+        let mut app = App::new_home();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let b1 = BookmarkEntry {
+            name: "A".into(),
+            source: "s1".into(),
+            provider: crate::home::provider::Provider::Local,
+            size: 100,
+            last_opened: Utc::now(),
+        };
+        app.home_bookmarks = BookmarkList::from_entries(vec![b1]);
+        app.home_focus = HomeFocus::Bookmarks;
+        app.home_bookmarks_selected = 0;
+
+        // Open overlay
+        app.handle_key(make_key(KeyCode::Char('r')), &tx);
+
+        // Change name
+        let mut overlay = app.bookmark_overlay.take().unwrap();
+        overlay.input = "NewName".into();
+        app.bookmark_overlay = Some(overlay);
+
+        // Submit
+        app.handle_key(make_key(KeyCode::Enter), &tx);
+
+        assert!(app.bookmark_overlay.is_none());
+        assert_eq!(app.home_bookmarks.entries()[0].name, "NewName");
+        assert!(app.status_message.as_ref().unwrap().contains("renamed"));
+    }
+
+    #[test]
+    fn test_rename_submit_collision() {
+        let mut app = App::new_home();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let b1 = BookmarkEntry {
+            name: "A".into(),
+            source: "s1".into(),
+            provider: crate::home::provider::Provider::Local,
+            size: 100,
+            last_opened: Utc::now(),
+        };
+        let b2 = BookmarkEntry {
+            name: "B".into(),
+            source: "s2".into(),
+            provider: crate::home::provider::Provider::Local,
+            size: 200,
+            last_opened: Utc::now(),
+        };
+        app.home_bookmarks = BookmarkList::from_entries(vec![b1, b2]);
+        app.home_focus = HomeFocus::Bookmarks;
+        app.home_bookmarks_selected = 1; // Focus "B"
+
+        // Open overlay on "B"
+        app.handle_key(make_key(KeyCode::Char('r')), &tx);
+
+        // Rename "B" to "A" (collision)
+        let mut overlay = app.bookmark_overlay.take().unwrap();
+        overlay.input = "A".into();
+        app.bookmark_overlay = Some(overlay);
+
+        // Submit
+        app.handle_key(make_key(KeyCode::Enter), &tx);
+
+        let overlay = app.bookmark_overlay.as_ref().unwrap();
+        assert!(matches!(overlay.state, OverlayState::Collision));
+        assert_eq!(app.home_bookmarks.entries()[1].name, "B"); // Unchanged
+    }
+
+    #[test]
+    fn test_rename_overwrite_removes_conflict() {
+        let mut app = App::new_home();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let b1 = BookmarkEntry {
+            name: "A".into(),
+            source: "s1".into(),
+            provider: crate::home::provider::Provider::Local,
+            size: 100,
+            last_opened: Utc::now(),
+        };
+        let b2 = BookmarkEntry {
+            name: "B".into(),
+            source: "s2".into(),
+            provider: crate::home::provider::Provider::Local,
+            size: 200,
+            last_opened: Utc::now(),
+        };
+        app.home_bookmarks = BookmarkList::from_entries(vec![b1, b2]);
+        app.home_focus = HomeFocus::Bookmarks;
+        app.home_bookmarks_selected = 0; // Focus "A"
+
+        // Open overlay on "A", rename to "B", hit collision
+        app.handle_key(make_key(KeyCode::Char('r')), &tx);
+        let mut overlay = app.bookmark_overlay.take().unwrap();
+        overlay.input = "B".into();
+        app.bookmark_overlay = Some(overlay);
+        app.handle_key(make_key(KeyCode::Enter), &tx);
+
+        assert!(matches!(
+            app.bookmark_overlay.as_ref().unwrap().state,
+            OverlayState::Collision
+        ));
+
+        // Overwrite
+        app.handle_key(make_key(KeyCode::Char('o')), &tx);
+
+        assert!(app.bookmark_overlay.is_none());
+        assert_eq!(app.home_bookmarks.len(), 1);
+        assert_eq!(app.home_bookmarks.entries()[0].name, "B");
+        assert_eq!(app.home_bookmarks.entries()[0].source, "s1"); // The original A
+    }
+
+    #[test]
+    fn test_rename_overwrite_when_conflict_after_target() {
+        let mut app = App::new_home();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let b1 = BookmarkEntry {
+            name: "A".into(),
+            source: "s1".into(),
+            provider: crate::home::provider::Provider::Local,
+            size: 100,
+            last_opened: Utc::now(),
+        };
+        let b2 = BookmarkEntry {
+            name: "B".into(),
+            source: "s2".into(),
+            provider: crate::home::provider::Provider::Local,
+            size: 200,
+            last_opened: Utc::now(),
+        };
+        app.home_bookmarks = BookmarkList::from_entries(vec![b1, b2]);
+        app.home_focus = HomeFocus::Bookmarks;
+        app.home_bookmarks_selected = 0; // Focus "A"
+
+        // Open overlay on "A", rename to "B", hit collision
+        app.handle_key(make_key(KeyCode::Char('r')), &tx);
+        let mut overlay = app.bookmark_overlay.take().unwrap();
+        overlay.input = "B".into();
+        app.bookmark_overlay = Some(overlay);
+        app.handle_key(make_key(KeyCode::Enter), &tx);
+
+        // Overwrite
+        app.handle_key(make_key(KeyCode::Char('o')), &tx);
+
+        assert_eq!(app.home_bookmarks.len(), 1);
+        assert_eq!(app.home_bookmarks.entries()[0].name, "B");
+        assert_eq!(app.home_bookmarks.entries()[0].source, "s1");
+    }
+
+    #[test]
+    fn test_rename_out_of_range_noop() {
+        let mut app = App::new_home();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        app.home_bookmarks = BookmarkList::default();
+        app.bookmark_overlay = Some(BookmarkOverlay {
+            mode: OverlayMode::Rename { index: 99 },
+            input: "X".into(),
+            state: OverlayState::Editing,
+        });
+
+        app.handle_key(make_key(KeyCode::Enter), &tx);
+
+        assert!(app.bookmark_overlay.is_none());
+        assert!(app.home_bookmarks.is_empty());
     }
 }

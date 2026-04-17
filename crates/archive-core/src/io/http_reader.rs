@@ -108,7 +108,9 @@ async fn send_range_request(
             RANGE,
             HeaderValue::from_str(&range_value).map_err(|e| {
                 ReadError::Failed(Box::new(ReadFailure {
-                    source: SourceInfo::Http { url: url.to_string() },
+                    source: SourceInfo::Http {
+                        url: url.to_string(),
+                    },
                     operation: op.clone(),
                     kind: ReadErrorKind::NetworkReset,
                     diagnostic: format!("invalid range header: {e}"),
@@ -145,7 +147,9 @@ async fn send_range_request(
             );
 
             Err(ReadError::Failed(Box::new(ReadFailure {
-                source: SourceInfo::Http { url: url.to_string() },
+                source: SourceInfo::Http {
+                    url: url.to_string(),
+                },
                 operation: op,
                 kind: ReadErrorKind::HttpStatus {
                     code: status.as_u16(),
@@ -174,7 +178,12 @@ impl ReadAt for HttpReadAt {
             .await
             .map_err(|e| classify_reqwest_error(e, &self.url, op))?;
 
-        trace!(offset, len, received = body.len(), "http read_range complete");
+        trace!(
+            offset,
+            len,
+            received = body.len(),
+            "http read_range complete"
+        );
         Ok(body)
     }
 
@@ -193,11 +202,8 @@ impl ReadAt for HttpReadAt {
 
         let url = self.url.clone();
         let stream = response.bytes_stream().map_err(move |e| {
-            let read_error = classify_reqwest_error(
-                e,
-                &url,
-                ReadOperation::ReadRange { offset, len },
-            );
+            let read_error =
+                classify_reqwest_error(e, &url, ReadOperation::ReadRange { offset, len });
             std::io::Error::other(read_error)
         });
         let async_read = StreamReader::new(stream);
@@ -238,10 +244,14 @@ impl ReadAt for HttpReadAt {
         {
             warn!(url = %self.url, "server returned Accept-Ranges: none");
             return Err(ReadError::Failed(Box::new(ReadFailure {
-                source: SourceInfo::Http { url: self.url.clone() },
+                source: SourceInfo::Http {
+                    url: self.url.clone(),
+                },
                 operation: op.clone(),
                 kind: ReadErrorKind::RangeNotSupported,
-                diagnostic: "server returned Accept-Ranges: none — surgical extraction is not possible".into(),
+                diagnostic:
+                    "server returned Accept-Ranges: none — surgical extraction is not possible"
+                        .into(),
             })));
         }
 
@@ -251,7 +261,9 @@ impl ReadAt for HttpReadAt {
             .ok_or_else(|| {
                 warn!(url = %self.url, "server did not return Content-Length header");
                 ReadError::Failed(Box::new(ReadFailure {
-                    source: SourceInfo::Http { url: self.url.clone() },
+                    source: SourceInfo::Http {
+                        url: self.url.clone(),
+                    },
                     operation: op.clone(),
                     kind: ReadErrorKind::RangeNotSupported,
                     diagnostic: "server did not return Content-Length header".into(),
@@ -260,7 +272,9 @@ impl ReadAt for HttpReadAt {
             .to_str()
             .map_err(|e| {
                 ReadError::Failed(Box::new(ReadFailure {
-                    source: SourceInfo::Http { url: self.url.clone() },
+                    source: SourceInfo::Http {
+                        url: self.url.clone(),
+                    },
                     operation: op.clone(),
                     kind: ReadErrorKind::RangeNotSupported,
                     diagnostic: format!("invalid Content-Length: {e}"),
@@ -269,7 +283,9 @@ impl ReadAt for HttpReadAt {
             .parse::<u64>()
             .map_err(|e| {
                 ReadError::Failed(Box::new(ReadFailure {
-                    source: SourceInfo::Http { url: self.url.clone() },
+                    source: SourceInfo::Http {
+                        url: self.url.clone(),
+                    },
                     operation: op,
                     kind: ReadErrorKind::RangeNotSupported,
                     diagnostic: format!("Content-Length not a number: {e}"),

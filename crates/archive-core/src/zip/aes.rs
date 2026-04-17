@@ -85,7 +85,7 @@ pub(crate) fn decrypt_winzip_aes(
         _ => {
             return Err(CoreError::InvalidFormat {
                 message: format!("unknown AES strength byte: {strength}"),
-            })
+            });
         }
     };
     let salt_len = key_len / 2; // 8 / 12 / 16 bytes
@@ -130,8 +130,7 @@ pub(crate) fn decrypt_winzip_aes(
     let mut cipher = AesCtrCipher::new(aes_key, &iv, strength)?;
 
     // ── HMAC-SHA1 over ciphertext ─────────────────────────────────────────
-    let mut mac = Hmac::<Sha1>::new_from_slice(hmac_key)
-        .expect("HMAC-SHA1 accepts any key size");
+    let mut mac = Hmac::<Sha1>::new_from_slice(hmac_key).expect("HMAC-SHA1 accepts any key size");
 
     // ── Decrypt in 64 KB chunks ───────────────────────────────────────────
     let mut decrypted = Vec::with_capacity(encrypted_data_len as usize);
@@ -170,9 +169,11 @@ pub(crate) fn decrypt_winzip_aes(
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 fn read_exact(reader: &mut impl Read, buf: &mut [u8], context: &str) -> Result<(), CoreError> {
-    reader.read_exact(buf).map_err(|e| CoreError::InvalidFormat {
-        message: format!("truncated {context}: {e}"),
-    })
+    reader
+        .read_exact(buf)
+        .map_err(|e| CoreError::InvalidFormat {
+            message: format!("truncated {context}: {e}"),
+        })
 }
 
 fn map_io_err(e: io::Error) -> CoreError {

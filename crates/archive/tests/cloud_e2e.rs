@@ -46,7 +46,7 @@
 //! for interactive listing + targeted extraction sessions on these.
 
 use archive::{Archive, ArchiveError};
-use archive_source::{resolve, SourceConfig};
+use archive_source::{SourceConfig, resolve};
 
 fn open_url(url: &str) -> Result<archive_source::ResolvedSource, archive_source::SourceError> {
     resolve(url, &SourceConfig::default())
@@ -92,8 +92,12 @@ fn dev_link(key: &str) -> Option<String> {
     // 2. Try dev_links.json (workspace root or crate root)
     let paths = ["dev_links.json", "../../dev_links.json"];
     for path in paths {
-        let Ok(content) = std::fs::read_to_string(path) else { continue };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) else { continue };
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) else {
+            continue;
+        };
         if let Some(val) = v.get(key).and_then(|v| v.as_str()) {
             return Some(val.to_string());
         }
@@ -115,7 +119,12 @@ fn dev_link(key: &str) -> Option<String> {
 #[ignore = "requires network; run: cargo test -p archive --test cloud_e2e cloud_rar5_github_plain -- --ignored --nocapture"]
 async fn cloud_rar5_github_plain_listing_and_extraction() {
     let url = gh("testfile.rar5.rar");
-    let archive = Archive::open_reader(&url, open_url(&url).unwrap()).await.unwrap().ready().await.unwrap();
+    let archive = Archive::open_reader(&url, open_url(&url).unwrap())
+        .await
+        .unwrap()
+        .ready()
+        .await
+        .unwrap();
 
     let entries = archive.entries();
     assert_eq!(entries.len(), 1, "should have exactly 1 entry");
@@ -144,14 +153,25 @@ async fn cloud_rar5_github_plain_listing_and_extraction() {
 #[ignore = "requires network; run: cargo test -p archive --test cloud_e2e cloud_rar5_github_cbr -- --ignored --nocapture"]
 async fn cloud_rar5_github_cbr_listing_and_extraction() {
     let url = gh("testfile.rar5.cbr");
-    let archive = Archive::open_reader(&url, open_url(&url).unwrap()).await.unwrap().ready().await.unwrap();
+    let archive = Archive::open_reader(&url, open_url(&url).unwrap())
+        .await
+        .unwrap()
+        .ready()
+        .await
+        .unwrap();
 
     let entries = archive.entries();
     assert_eq!(entries.len(), 2, "CBR should have 2 image entries");
 
     let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
-    assert!(names.contains(&"testfile.jpg"), "should contain testfile.jpg");
-    assert!(names.contains(&"testfile.png"), "should contain testfile.png");
+    assert!(
+        names.contains(&"testfile.jpg"),
+        "should contain testfile.jpg"
+    );
+    assert!(
+        names.contains(&"testfile.png"),
+        "should contain testfile.png"
+    );
 
     println!("✅  listing OK: {names:?}");
 
@@ -161,7 +181,11 @@ async fn cloud_rar5_github_cbr_listing_and_extraction() {
             .extract_to_bytes(entry, None)
             .await
             .expect("extraction should succeed");
-        assert!(!data.is_empty(), "{} must have non-empty content", entry.name);
+        assert!(
+            !data.is_empty(),
+            "{} must have non-empty content",
+            entry.name
+        );
         println!("✅  extracted {} ({} bytes)", entry.name, data.len());
     }
 }
@@ -175,10 +199,19 @@ async fn cloud_rar5_github_cbr_listing_and_extraction() {
 #[ignore = "requires network; run: cargo test -p archive --test cloud_e2e cloud_rar5_github_rr -- --ignored --nocapture"]
 async fn cloud_rar5_github_recovery_record_listing_and_extraction() {
     let url = gh("testfile.rar5.rr.rar");
-    let archive = Archive::open_reader(&url, open_url(&url).unwrap()).await.unwrap().ready().await.unwrap();
+    let archive = Archive::open_reader(&url, open_url(&url).unwrap())
+        .await
+        .unwrap()
+        .ready()
+        .await
+        .unwrap();
 
     let entries = archive.entries();
-    assert_eq!(entries.len(), 1, "should have 1 file entry (RR service block skipped)");
+    assert_eq!(
+        entries.len(),
+        1,
+        "should have 1 file entry (RR service block skipped)"
+    );
     assert_eq!(entries[0].name, "testfile.txt");
 
     let data = archive
@@ -204,10 +237,19 @@ async fn cloud_rar5_github_recovery_record_listing_and_extraction() {
 #[ignore = "requires network; run: cargo test -p archive --test cloud_e2e cloud_rar5_github_solid -- --ignored --nocapture"]
 async fn cloud_rar5_github_solid_first_entry_accessible() {
     let url = gh("testfile.rar5.solid.rar");
-    let archive = Archive::open_reader(&url, open_url(&url).unwrap()).await.unwrap().ready().await.unwrap();
+    let archive = Archive::open_reader(&url, open_url(&url).unwrap())
+        .await
+        .unwrap()
+        .ready()
+        .await
+        .unwrap();
 
     let entries = archive.entries();
-    assert_eq!(entries.len(), 1, "first entry of a solid archive is accessible (per-file solid = 0)");
+    assert_eq!(
+        entries.len(),
+        1,
+        "first entry of a solid archive is accessible (per-file solid = 0)"
+    );
     assert_eq!(entries[0].name, "testfile.txt");
 
     let data = archive
@@ -249,10 +291,19 @@ async fn cloud_rar3_github_unsupported_format() {
 #[ignore = "requires network; run: cargo test -p archive --test cloud_e2e cloud_rar5_unrar_comment -- --ignored --nocapture"]
 async fn cloud_rar5_unrar_comment_listing_and_extraction() {
     let url = unrar("comment.rar");
-    let archive = Archive::open_reader(&url, open_url(&url).unwrap()).await.unwrap().ready().await.unwrap();
+    let archive = Archive::open_reader(&url, open_url(&url).unwrap())
+        .await
+        .unwrap()
+        .ready()
+        .await
+        .unwrap();
 
     let entries = archive.entries();
-    assert_eq!(entries.len(), 1, "CMT service block must be skipped; 1 file entry expected");
+    assert_eq!(
+        entries.len(),
+        1,
+        "CMT service block must be skipped; 1 file entry expected"
+    );
     assert_eq!(entries[0].name, ".gitignore");
     assert_eq!(entries[0].uncompressed_size, 18);
 
@@ -276,7 +327,12 @@ async fn cloud_rar5_unrar_comment_listing_and_extraction() {
 #[ignore = "requires network; run: cargo test -p archive --test cloud_e2e cloud_rar5_unrar_locked -- --ignored --nocapture"]
 async fn cloud_rar5_unrar_locked_listing_and_extraction() {
     let url = unrar("locked.rar");
-    let archive = Archive::open_reader(&url, open_url(&url).unwrap()).await.unwrap().ready().await.unwrap();
+    let archive = Archive::open_reader(&url, open_url(&url).unwrap())
+        .await
+        .unwrap()
+        .ready()
+        .await
+        .unwrap();
 
     let entries = archive.entries();
     assert_eq!(entries.len(), 1, "locked archive should list normally");
@@ -303,7 +359,12 @@ async fn cloud_rar5_unrar_locked_listing_and_extraction() {
 #[ignore = "requires network; run: cargo test -p archive --test cloud_e2e cloud_rar5_unrar_unicode -- --ignored --nocapture"]
 async fn cloud_rar5_unrar_unicode_filename() {
     let url = unrar("unicode.rar");
-    let archive = Archive::open_reader(&url, open_url(&url).unwrap()).await.unwrap().ready().await.unwrap();
+    let archive = Archive::open_reader(&url, open_url(&url).unwrap())
+        .await
+        .unwrap()
+        .ready()
+        .await
+        .unwrap();
 
     let entries = archive.entries();
     assert_eq!(entries.len(), 1);
@@ -349,7 +410,8 @@ async fn cloud_rar5_unrar_encrypted_headers_graceful() {
 
     // The important thing: no panic, no hang. Either outcome is acceptable.
     match result {
-        Err(ArchiveError::FileCorrupted { .. }) => { /* expected: CorruptHeader → FileCorrupted */ }
+        Err(ArchiveError::FileCorrupted { .. }) => { /* expected: CorruptHeader → FileCorrupted */
+        }
         Ok(opened) => {
             // If somehow it opened, scan and check.
             match opened.ready().await {
@@ -437,7 +499,9 @@ async fn cloud_rar_google_drive_listing() {
     let reader = match open_url(&url) {
         Ok(r) => r,
         Err(e) => {
-            println!("ℹ️  Could not resolve Google Drive URL (expected — needs credentials): {e:?}");
+            println!(
+                "ℹ️  Could not resolve Google Drive URL (expected — needs credentials): {e:?}"
+            );
             return;
         }
     };
@@ -448,7 +512,10 @@ async fn cloud_rar_google_drive_listing() {
             // If this ever passes, Phase 4 must have landed or the URL changed.
             let archive = opened.ready().await.expect("scan should succeed");
             let entries = archive.entries();
-            println!("✅  Google Drive RAR listing OK — {} entries", entries.len());
+            println!(
+                "✅  Google Drive RAR listing OK — {} entries",
+                entries.len()
+            );
             for e in entries.iter().take(10) {
                 println!(
                     "    {} ({} → {} B, dir: {}, encrypted: {})",
@@ -463,7 +530,9 @@ async fn cloud_rar_google_drive_listing() {
             println!();
             println!("   Google Drive returns 200 OK (full HTML / full file) instead of 206");
             println!("   for Range requests on files > ~100 MB. Phase 4 will handle this via:");
-            println!("   Drive API URL detection → resolve to googleapis.com/drive/v3/files/ID?alt=media");
+            println!(
+                "   Drive API URL detection → resolve to googleapis.com/drive/v3/files/ID?alt=media"
+            );
             println!("   + inject OAuth Bearer token → proper 206 range responses.");
             // Soft fail: do NOT panic. The test documents the requirement.
         }

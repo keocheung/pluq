@@ -4,7 +4,7 @@ mod error;
 mod resolve;
 mod resolved;
 
-pub use classify::{classify_transport, ProviderError};
+pub use classify::{ProviderError, classify_transport};
 pub use config::SourceConfig;
 pub use error::SourceError;
 pub use resolve::resolve;

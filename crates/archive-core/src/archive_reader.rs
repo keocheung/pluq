@@ -129,8 +129,8 @@ pub trait ArchiveReader {
         password: Option<&[u8]>,
     ) -> impl std::future::Future<Output = Result<BatchResult, CoreError>> + Send
     where
-        SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn tokio::io::AsyncWrite + Send + Unpin>>
-            + Send,
+        SinkFn:
+            FnMut(&ArchiveEntry) -> Option<Box<dyn tokio::io::AsyncWrite + Send + Unpin>> + Send,
         Self: Send + Sync + Sized,
     {
         extract_selected_default(self, entries, sink_factory, progress, password)
@@ -211,7 +211,10 @@ where
             p.on_entry_start(&entry.name, entry.uncompressed_size);
         }
 
-        match reader.extract(entry, &mut sink, progress.clone(), password).await {
+        match reader
+            .extract(entry, &mut sink, progress.clone(), password)
+            .await
+        {
             Ok(bytes) => {
                 bytes_written += bytes;
                 succeeded += 1;
@@ -233,5 +236,9 @@ where
         }
     }
 
-    Ok(BatchResult { bytes_written, succeeded, failed })
+    Ok(BatchResult {
+        bytes_written,
+        succeeded,
+        failed,
+    })
 }

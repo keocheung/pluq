@@ -1,7 +1,7 @@
-use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use directories::ProjectDirs;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 use super::provider::Provider;
 
@@ -32,32 +32,42 @@ impl RecentList {
         if let Some(path) = recent_path() {
             Self::load_from(&path)
         } else {
-            Self { entries: Vec::new() }
+            Self {
+                entries: Vec::new(),
+            }
         }
     }
 
     /// Internal load helper for testing and main load.
     fn load_from(path: &Path) -> Self {
         if !path.exists() {
-            return Self { entries: Vec::new() };
+            return Self {
+                entries: Vec::new(),
+            };
         }
 
         match std::fs::read_to_string(path) {
             Ok(content) => {
                 if content.trim().is_empty() {
-                    return Self { entries: Vec::new() };
+                    return Self {
+                        entries: Vec::new(),
+                    };
                 }
                 match serde_json::from_str::<Vec<RecentEntry>>(&content) {
                     Ok(entries) => Self { entries },
                     Err(e) => {
                         tracing::warn!("Failed to parse recent.json at {}: {}", path.display(), e);
-                        Self { entries: Vec::new() }
+                        Self {
+                            entries: Vec::new(),
+                        }
                     }
                 }
             }
             Err(e) => {
                 tracing::warn!("Failed to read recent.json at {}: {}", path.display(), e);
-                Self { entries: Vec::new() }
+                Self {
+                    entries: Vec::new(),
+                }
             }
         }
     }
@@ -80,9 +90,8 @@ impl RecentList {
         }
 
         let tmp = path.with_extension("json.tmp");
-        let content = serde_json::to_vec_pretty(&self.entries)
-            .map_err(std::io::Error::other)?;
-        
+        let content = serde_json::to_vec_pretty(&self.entries).map_err(std::io::Error::other)?;
+
         std::fs::write(&tmp, content)?;
         std::fs::rename(&tmp, path)?;
         Ok(())
@@ -154,7 +163,9 @@ mod tests {
 
     #[test]
     fn test_push_new_entry() {
-        let mut list = RecentList { entries: Vec::new() };
+        let mut list = RecentList {
+            entries: Vec::new(),
+        };
         list.push(make_entry("a", "source_a"));
         assert_eq!(list.entries().len(), 1);
         assert_eq!(list.entries()[0].source, "source_a");
@@ -167,7 +178,9 @@ mod tests {
 
     #[test]
     fn test_push_promotes_existing() {
-        let mut list = RecentList { entries: Vec::new() };
+        let mut list = RecentList {
+            entries: Vec::new(),
+        };
         list.push(make_entry("a", "source_a"));
         list.push(make_entry("b", "source_b"));
         assert_eq!(list.entries()[0].source, "source_b");
@@ -180,7 +193,9 @@ mod tests {
 
     #[test]
     fn test_push_caps_at_max() {
-        let mut list = RecentList { entries: Vec::new() };
+        let mut list = RecentList {
+            entries: Vec::new(),
+        };
         for i in 0..MAX_RECENT + 5 {
             list.push(make_entry(&format!("n{}", i), &format!("s{}", i)));
         }
@@ -191,10 +206,12 @@ mod tests {
 
     #[test]
     fn test_remove() {
-        let mut list = RecentList { entries: Vec::new() };
+        let mut list = RecentList {
+            entries: Vec::new(),
+        };
         list.push(make_entry("a", "s_a"));
         list.push(make_entry("b", "s_b"));
-        
+
         list.remove(5); // no-op
         assert_eq!(list.len(), 2);
 
@@ -207,13 +224,15 @@ mod tests {
     fn test_round_trip() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("recent.json");
-        
-        let mut list = RecentList { entries: Vec::new() };
+
+        let mut list = RecentList {
+            entries: Vec::new(),
+        };
         let e1 = make_entry("a", "s_a");
         list.push(e1.clone());
-        
+
         list.save_to(&path).unwrap();
-        
+
         let loaded = RecentList::load_from(&path);
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded.entries()[0].source, e1.source);

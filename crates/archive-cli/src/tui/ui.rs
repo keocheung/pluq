@@ -6,6 +6,7 @@ use ratatui::{
 };
 
 use super::app::{App, AppPhase, HomeFocus};
+use crate::home::complete::looks_like_url;
 
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let area = frame.area();
@@ -25,8 +26,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             .split(area);
 
             // Header
-            let header = Paragraph::new(" Opening archive...")
-                .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+            let header = Paragraph::new(" Opening archive...").style(
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            );
             frame.render_widget(header, chunks[0]);
 
             // Separators
@@ -49,8 +53,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             frame.render_widget(source_text, content_chunks[1]);
 
             // Footer
-            let footer = Paragraph::new(" Please wait...")
-                .style(Style::default().fg(Color::DarkGray));
+            let footer =
+                Paragraph::new(" Please wait...").style(Style::default().fg(Color::DarkGray));
             frame.render_widget(footer, chunks[4]);
         }
         AppPhase::Scanning {
@@ -71,8 +75,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             .split(area);
 
             // Header
-            let header = Paragraph::new(" Scanning archive...")
-                .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+            let header = Paragraph::new(" Scanning archive...").style(
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            );
             frame.render_widget(header, chunks[0]);
 
             // Separators
@@ -125,8 +132,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             frame.render_widget(Paragraph::new(found_text), content_chunks[5]);
 
             // Footer
-            let footer = Paragraph::new("  Press q to cancel")
-                .style(Style::default().fg(Color::DarkGray));
+            let footer =
+                Paragraph::new("  Press q to cancel").style(Style::default().fg(Color::DarkGray));
             frame.render_widget(footer, chunks[4]);
         }
         AppPhase::Browsing => {
@@ -153,8 +160,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             .split(area);
 
             // Header
-            let header = Paragraph::new(" Large Dictionary Warning")
-                .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+            let header = Paragraph::new(" Large Dictionary Warning").style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            );
             frame.render_widget(header, chunks[0]);
 
             // Separators
@@ -196,7 +206,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 content_chunks[4],
             );
             frame.render_widget(
-                Paragraph::new(format!("  Dictionary size: {}", crate::format_size(dict_size))),
+                Paragraph::new(format!(
+                    "  Dictionary size: {}",
+                    crate::format_size(dict_size)
+                )),
                 content_chunks[6],
             );
 
@@ -256,8 +269,17 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             let custom_input = custom_input.clone();
             let archive_stem = app.archive_stem();
 
-            // Render the browse screen as backdrop (dimmed).
+            // Render the browse screen as backdrop.
             draw_browsing(frame, app, area);
+
+            // Polish: Dim the backdrop to make the modal pop.
+            let buffer = frame.buffer_mut();
+            for y in area.top()..area.bottom() {
+                for x in area.left()..area.right() {
+                    let cell = &mut buffer[(x, y)];
+                    cell.set_style(cell.style().fg(Color::DarkGray));
+                }
+            }
 
             // Draw the modal overlay.
             draw_extraction_strategy_modal(
@@ -287,8 +309,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             .split(area);
 
             // Header
-            let header = Paragraph::new(" Extracting")
-                .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+            let header = Paragraph::new(" Extracting").style(
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            );
             frame.render_widget(header, chunks[0]);
 
             // Separators
@@ -317,7 +342,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 ])
                 .split(chunks[2]);
 
-            frame.render_widget(Paragraph::new(format!("  {}", entry_name)), content_chunks[1]);
+            frame.render_widget(
+                Paragraph::new(format!("  {}", entry_name)),
+                content_chunks[1],
+            );
 
             let gauge = Gauge::default()
                 .gauge_style(Style::default().fg(Color::Cyan))
@@ -326,7 +354,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
 
             let speed_str = app.speed_tracker.format_speed().unwrap_or_default();
             let eta_str = if total_bytes > 0 {
-                app.speed_tracker.format_eta(total_bytes, bytes_extracted).unwrap_or_default()
+                app.speed_tracker
+                    .format_eta(total_bytes, bytes_extracted)
+                    .unwrap_or_default()
             } else {
                 String::new()
             };
@@ -377,8 +407,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
 
             // Header
             let title = format!(" Extracting ({} of {} files)", files_done, total_files);
-            let header = Paragraph::new(title)
-                .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+            let header = Paragraph::new(title).style(
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            );
             frame.render_widget(header, chunks[0]);
 
             // Separators
@@ -421,7 +454,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
 
             let speed_str = app.speed_tracker.format_speed().unwrap_or_default();
             let eta_str = if total_bytes > 0 {
-                app.speed_tracker.format_eta(total_bytes, bytes_extracted).unwrap_or_default()
+                app.speed_tracker
+                    .format_eta(total_bytes, bytes_extracted)
+                    .unwrap_or_default()
             } else {
                 String::new()
             };
@@ -479,14 +514,26 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             frame.render_widget(para, chunks[2]);
 
             // Footer
-            let footer = Paragraph::new(" Press q to quit")
-                .style(Style::default().fg(Color::DarkGray));
+            let footer =
+                Paragraph::new(" Press q to quit").style(Style::default().fg(Color::DarkGray));
             frame.render_widget(footer, chunks[4]);
         }
     }
 
     if app.show_help {
         draw_help_popup(frame, area);
+    }
+
+    if app.bookmark_overlay.is_some() {
+        // Polish: Dim the backdrop to make the modal pop.
+        let buffer = frame.buffer_mut();
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                let cell = &mut buffer[(x, y)];
+                cell.set_style(cell.style().fg(Color::DarkGray));
+            }
+        }
+        draw_bookmark_overlay(frame, app, area);
     }
 }
 
@@ -524,13 +571,19 @@ fn draw_browsing(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         breadcrumb
     };
 
-    let header = Paragraph::new(header_text)
-        .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+    let header = Paragraph::new(header_text).style(
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    );
     frame.render_widget(header, chunks[0]);
 
     let sep = "─".repeat(area.width as usize);
     let separator_style = Style::default().fg(Color::DarkGray);
-    frame.render_widget(Paragraph::new(sep.clone()).style(separator_style), chunks[1]);
+    frame.render_widget(
+        Paragraph::new(sep.clone()).style(separator_style),
+        chunks[1],
+    );
     frame.render_widget(Paragraph::new(sep).style(separator_style), chunks[3]);
 
     let rows: Vec<Row> = app
@@ -615,8 +668,11 @@ fn draw_review(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     .split(area);
 
     // Header
-    let header = Paragraph::new(" Review Selection (Tab/Esc to return)")
-        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+    let header = Paragraph::new(" Review Selection (Tab/Esc to return)").style(
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    );
     frame.render_widget(header, chunks[0]);
 
     // Separators
@@ -792,7 +848,8 @@ fn draw_footer(frame: &mut Frame<'_>, app: &App, area: ratatui::layout::Rect) {
             if n == 1 { "" } else { "s" },
             crate::format_size(total_size),
             crate::format_size(total_cost),
-        )    } else if let Some(item) = app.visible_items.get(app.selected) {
+        )
+    } else if let Some(item) = app.visible_items.get(app.selected) {
         if item.is_directory {
             format!(" {}/", item.full_path)
         } else {
@@ -875,13 +932,12 @@ fn draw_home(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     .split(area);
 
     // Header: Solid cyan bar with black bold text
-    let header = Paragraph::new(" Archive Sniper — Home ")
-        .style(
-            Style::default()
-                .bg(Color::Cyan)
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD),
-        );
+    let header = Paragraph::new(" Archive Sniper — Home ").style(
+        Style::default()
+            .bg(Color::Cyan)
+            .fg(Color::Black)
+            .add_modifier(Modifier::BOLD),
+    );
     frame.render_widget(header, chunks[0]);
 
     // Separators
@@ -891,26 +947,37 @@ fn draw_home(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     frame.render_widget(Paragraph::new(sep).style(sep_style), chunks[3]);
 
     // Content
+    let bookmark_count = app.home_bookmarks.len();
+    // Header + rows (or 1-line placeholder if empty), cap at 6 visible rows.
+    let bookmarks_body_rows: u16 = if bookmark_count == 0 {
+        1
+    } else {
+        bookmark_count.min(6) as u16
+    };
+    let bookmarks_height: u16 = 1 /* header */ + bookmarks_body_rows;
+
     let content_chunks = Layout::vertical([
-        Constraint::Length(2), // Snipe Input + optional inline error
-        Constraint::Length(1), // blank spacer
-        Constraint::Length(3), // Bookmarks (header + placeholder + blank)
-        Constraint::Length(1), // blank spacer
-        Constraint::Min(1),    // Recent (header + list)
+        Constraint::Length(2),                // Snipe Input + optional inline error
+        Constraint::Length(1),                // blank spacer
+        Constraint::Length(bookmarks_height), // Bookmarks (header + body)
+        Constraint::Length(1),                // blank spacer
+        Constraint::Min(1),                   // Recent (header + list)
     ])
     .split(chunks[2]);
 
     let section_style = |focused: bool| {
         if focused {
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::DarkGray)
         }
     };
 
     // 1. Snipe Input
-    let snipe_chunks = Layout::vertical([Constraint::Length(1), Constraint::Length(1)])
-        .split(content_chunks[0]);
+    let snipe_chunks =
+        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(content_chunks[0]);
 
     let snipe_focused = app.home_focus == HomeFocus::SnipeInput;
     let label_style = if snipe_focused {
@@ -919,9 +986,7 @@ fn draw_home(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         Style::default().fg(Color::DarkGray)
     };
 
-    let mut snipe_text = vec![
-        ratatui::text::Span::styled("[ Snipe: ] ", label_style),
-    ];
+    let mut snipe_text = vec![ratatui::text::Span::styled("[ Snipe: ] ", label_style)];
 
     if app.snipe_input.is_empty() && !snipe_focused {
         snipe_text.push(ratatui::text::Span::styled(
@@ -934,11 +999,17 @@ fn draw_home(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             Style::default().fg(Color::White),
         ));
         if snipe_focused {
-            snipe_text.push(ratatui::text::Span::styled("_", Style::default().fg(Color::White)));
+            snipe_text.push(ratatui::text::Span::styled(
+                "_",
+                Style::default().fg(Color::White),
+            ));
         }
     }
 
-    frame.render_widget(Paragraph::new(ratatui::text::Line::from(snipe_text)), snipe_chunks[0]);
+    frame.render_widget(
+        Paragraph::new(ratatui::text::Line::from(snipe_text)),
+        snipe_chunks[0],
+    );
 
     if let Some(ref err) = app.home_input_error {
         frame.render_widget(
@@ -947,54 +1018,110 @@ fn draw_home(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         );
     }
 
-    // 2. Bookmarks (MVP Placeholder)
+    // 2. Bookmarks
     let bookmarks_focused = app.home_focus == HomeFocus::Bookmarks;
+    let bookmark_chunks =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(content_chunks[2]);
+
     frame.render_widget(
         Paragraph::new("─── BOOKMARKS ───").style(section_style(bookmarks_focused)),
-        content_chunks[2],
+        bookmark_chunks[0],
     );
-    let bookmarks_body_area = Rect {
-        x: content_chunks[2].x,
-        y: content_chunks[2].y + 1,
-        width: content_chunks[2].width,
-        height: 1,
-    };
-    frame.render_widget(
-        Paragraph::new("  — no bookmarks —").style(Style::default().fg(Color::DarkGray)),
-        bookmarks_body_area,
-    );
+
+    if app.home_bookmarks.is_empty() {
+        frame.render_widget(
+            Paragraph::new("  — no bookmarks —").style(Style::default().fg(Color::DarkGray)),
+            bookmark_chunks[1],
+        );
+    } else {
+        let rows: Vec<Row> = app
+            .home_bookmarks
+            .entries()
+            .iter()
+            .map(|item| {
+                let size_str = crate::format_size(item.size);
+                let name_str = item.name.clone();
+                let provider_tag = item.provider.tag();
+
+                let name_style = if bookmarks_focused {
+                    Style::default().fg(Color::White)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+
+                let name_line = ratatui::text::Line::from(vec![
+                    ratatui::text::Span::styled(format!(" {}  ", name_str), name_style),
+                    ratatui::text::Span::styled(provider_tag, Style::default().fg(Color::DarkGray)),
+                ]);
+
+                Row::new([
+                    Cell::from(format!(" {}", size_str))
+                        .style(Style::default().fg(Color::DarkGray)),
+                    Cell::from(name_line),
+                ])
+            })
+            .collect();
+
+        let mut table_state = ratatui::widgets::TableState::default();
+        table_state.select(Some(app.home_bookmarks_selected));
+
+        let highlight_style = if bookmarks_focused {
+            Style::default()
+                .bg(Color::Cyan)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+
+        let table = Table::new(rows, [Constraint::Length(10), Constraint::Min(1)])
+            .row_highlight_style(highlight_style);
+
+        frame.render_stateful_widget(table, bookmark_chunks[1], &mut table_state);
+    }
 
     // 3. Recent Archives
     let recent_focused = app.home_focus == HomeFocus::Recent;
-    let recent_chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(0)])
-        .split(content_chunks[4]);
+    let recent_chunks =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(content_chunks[4]);
 
     frame.render_widget(
         Paragraph::new("─── RECENT ───").style(section_style(recent_focused)),
         recent_chunks[0],
     );
 
-    if app.home_recent.is_empty() {
+    let visible_recent = app.recent_visible();
+    if visible_recent.is_empty() {
         frame.render_widget(
             Paragraph::new("  — no recent archives —").style(Style::default().fg(Color::DarkGray)),
             recent_chunks[1],
         );
     } else {
-        let rows: Vec<Row> = app.home_recent.entries().iter().map(|item| {
-            let size_str = crate::format_size(item.size);
-            let name_str = item.name.clone();
-            let provider_tag = item.provider.tag();
+        let rows: Vec<Row> = visible_recent
+            .iter()
+            .map(|item| {
+                let size_str = crate::format_size(item.size);
+                let name_str = item.name.clone();
+                let provider_tag = item.provider.tag();
 
-            let name_line = ratatui::text::Line::from(vec![
-                ratatui::text::Span::styled(format!(" {}  ", name_str), Style::default().fg(Color::White)),
-                ratatui::text::Span::styled(provider_tag, Style::default().fg(Color::DarkGray)),
-            ]);
+                let name_style = if recent_focused {
+                    Style::default().fg(Color::White)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
 
-            Row::new([
-                Cell::from(format!(" {}", size_str)).style(Style::default().fg(Color::DarkGray)),
-                Cell::from(name_line),
-            ])
-        }).collect();
+                let name_line = ratatui::text::Line::from(vec![
+                    ratatui::text::Span::styled(format!(" {}  ", name_str), name_style),
+                    ratatui::text::Span::styled(provider_tag, Style::default().fg(Color::DarkGray)),
+                ]);
+
+                Row::new([
+                    Cell::from(format!(" {}", size_str))
+                        .style(Style::default().fg(Color::DarkGray)),
+                    Cell::from(name_line),
+                ])
+            })
+            .collect();
 
         let mut table_state = ratatui::widgets::TableState::default();
         table_state.select(Some(app.home_recent_selected));
@@ -1019,9 +1146,18 @@ fn draw_home(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         format!("  {}", msg)
     } else {
         match app.home_focus {
-            HomeFocus::SnipeInput => "  Enter open  Tab cycle  q quit".into(),
-            HomeFocus::Recent if !app.home_recent.is_empty() => {
-                "  Enter open  d delete  Tab cycle  q quit".into()
+            HomeFocus::SnipeInput if app.snipe_input.is_empty() => {
+                "  Paste a link or path. Tab cycle  q quit".into()
+            }
+            HomeFocus::SnipeInput if looks_like_url(&app.snipe_input) => {
+                "  Enter open  Tab cycle  q quit".into()
+            }
+            HomeFocus::SnipeInput => "  Enter open  Tab complete  q quit".into(),
+            HomeFocus::Recent if !visible_recent.is_empty() => {
+                "  Enter open  b bookmark  d delete  Tab cycle  q quit".into()
+            }
+            HomeFocus::Bookmarks if !app.home_bookmarks.is_empty() => {
+                "  Enter open  r rename  d delete  Tab cycle  q quit".into()
             }
             _ => "  Tab cycle  q quit".into(),
         }
@@ -1030,17 +1166,172 @@ fn draw_home(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     frame.render_widget(footer, chunks[4]);
 }
 
+fn draw_bookmark_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let Some(overlay) = app.bookmark_overlay.as_ref() else {
+        return;
+    };
+
+    use crate::tui::app::{OverlayMode, OverlayState};
+    use ratatui::widgets::Clear;
+
+    let modal_w = 60.min(area.width.saturating_sub(4));
+    let modal_h = match overlay.state {
+        OverlayState::Editing => 5,   // border + title + input + spacer + hint
+        OverlayState::Collision => 6, // border + title + message + hint + spacer
+    };
+    let modal_x = area.x + (area.width.saturating_sub(modal_w)) / 2;
+    let modal_y = area.y + (area.height.saturating_sub(modal_h)) / 2;
+    let modal_area = Rect {
+        x: modal_x,
+        y: modal_y,
+        width: modal_w,
+        height: modal_h,
+    };
+
+    frame.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(match overlay.state {
+            OverlayState::Editing => match &overlay.mode {
+                OverlayMode::Save { .. } => " Bookmark ",
+                OverlayMode::Rename { .. } => " Rename Bookmark ",
+            },
+            OverlayState::Collision => " Name Conflict ",
+        })
+        .title_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    let inner = block.inner(modal_area);
+    frame.render_widget(block, modal_area);
+
+    match overlay.state {
+        OverlayState::Editing => {
+            let chunks = Layout::vertical([
+                Constraint::Length(1), // "Name:" + input
+                Constraint::Length(1), // spacer
+                Constraint::Length(1), // hint
+            ])
+            .split(inner);
+
+            let line = ratatui::text::Line::from(vec![
+                ratatui::text::Span::styled(" Name: ", Style::default().fg(Color::White)),
+                ratatui::text::Span::styled(
+                    overlay.input.as_str(),
+                    Style::default().fg(Color::Cyan),
+                ),
+                ratatui::text::Span::styled("_", Style::default().fg(Color::White)),
+            ]);
+            frame.render_widget(Paragraph::new(line), chunks[0]);
+
+            frame.render_widget(
+                Paragraph::new(" Enter save  Esc cancel")
+                    .style(Style::default().fg(Color::DarkGray)),
+                chunks[2],
+            );
+        }
+        OverlayState::Collision => {
+            let chunks = Layout::vertical([
+                Constraint::Length(1), // "[!] Bookmark \"X\" already exists."
+                Constraint::Length(1), // spacer
+                Constraint::Length(1), // "(o) Overwrite (r) Rename (c) Cancel"
+            ])
+            .split(inner);
+            let msg = format!(" [!] Bookmark \"{}\" already exists.", overlay.input);
+            frame.render_widget(
+                Paragraph::new(msg).style(Style::default().fg(Color::Yellow)),
+                chunks[0],
+            );
+            frame.render_widget(
+                Paragraph::new(" (o) Overwrite  (r) Rename  (c) Cancel")
+                    .style(Style::default().fg(Color::DarkGray)),
+                chunks[2],
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod ui_tests {
     use super::*;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     #[test]
     fn home_renders_empty() {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut app = App::new_home();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+    }
+
+    #[test]
+    fn home_renders_with_bookmarks() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new_home();
+
+        use crate::home::bookmarks::{BookmarkEntry, BookmarkList};
+        use crate::home::provider::Provider;
+        use chrono::Utc;
+
+        let b1 = BookmarkEntry {
+            name: "b1".into(),
+            source: "s1".into(),
+            provider: Provider::Local,
+            size: 100,
+            last_opened: Utc::now(),
+        };
+        app.home_bookmarks = BookmarkList::from_entries(vec![b1]);
+
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+    }
+
+    #[test]
+    fn home_renders_with_overlay_editing() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new_home();
+
+        use crate::home::provider::Provider;
+        use crate::tui::app::{BookmarkOverlay, OverlayMode, OverlayState};
+
+        app.bookmark_overlay = Some(BookmarkOverlay {
+            mode: OverlayMode::Save {
+                source: "s1".into(),
+                provider: Provider::Local,
+                size: 0,
+            },
+            input: "New".into(),
+            state: OverlayState::Editing,
+        });
+
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+    }
+
+    #[test]
+    fn home_renders_with_overlay_collision() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new_home();
+
+        use crate::home::provider::Provider;
+        use crate::tui::app::{BookmarkOverlay, OverlayMode, OverlayState};
+
+        app.bookmark_overlay = Some(BookmarkOverlay {
+            mode: OverlayMode::Save {
+                source: "s1".into(),
+                provider: Provider::Local,
+                size: 0,
+            },
+            input: "Existing".into(),
+            state: OverlayState::Collision,
+        });
+
         terminal.draw(|f| draw(f, &mut app)).unwrap();
     }
 }

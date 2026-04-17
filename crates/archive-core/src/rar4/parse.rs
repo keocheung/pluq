@@ -189,7 +189,10 @@ pub(crate) fn parse_file_header(
     let name = if block.head_flags & FLAG_UNICODE != 0 {
         // RAR4 Unicode: ASCII base up to null terminator, followed by a delta-encoded
         // Unicode suffix. For now, use the ASCII portion only.
-        let ascii_end = name_bytes.iter().position(|&b| b == 0).unwrap_or(name_bytes.len());
+        let ascii_end = name_bytes
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(name_bytes.len());
         String::from_utf8_lossy(&name_bytes[..ascii_end]).into_owned()
     } else {
         String::from_utf8_lossy(name_bytes).into_owned()
@@ -200,8 +203,7 @@ pub(crate) fn parse_file_header(
 
     // Detect directory: Windows ATTR bit 4 (0x10) = directory, or name ends with '/'.
     // HOST_OS 0x00 = MS-DOS, 0x02 = Windows — both use ATTR.
-    let is_directory = name.ends_with('/')
-        || (host_os <= 2 && attr & 0x10 != 0);
+    let is_directory = name.ends_with('/') || (host_os <= 2 && attr & 0x10 != 0);
 
     let is_encrypted = block.head_flags & FLAG_ENCRYPTED != 0;
 

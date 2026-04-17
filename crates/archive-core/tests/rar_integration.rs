@@ -7,11 +7,15 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use archive_core::{
+    ArchiveEntry, ArchiveReader, CoreError, LocalReadAt, ProgressReporter, RarArchive,
+};
 use bytes::Bytes;
-use archive_core::{ArchiveEntry, ArchiveReader, CoreError, LocalReadAt, ProgressReporter, RarArchive};
 
 async fn open_rar(path: &str) -> RarArchive<LocalReadAt> {
-    RarArchive::open(LocalReadAt::new(path)).await.expect("open RAR")
+    RarArchive::open(LocalReadAt::new(path))
+        .await
+        .expect("open RAR")
 }
 
 async fn extract_bytes(
@@ -73,9 +77,7 @@ async fn rar5_extract_unicode_entry_content() {
     // unicodefilename❤️.txt contains "foobar\n" (verified against unrar test suite).
     let archive = open_rar(&fixture("rar5_unicode_entry.rar")).await;
     let entry = &archive.entries()[0];
-    let data: Bytes = extract_bytes(&archive, entry, None)
-    .await
-    .expect("extract");
+    let data: Bytes = extract_bytes(&archive, entry, None).await.expect("extract");
     assert_eq!(data.as_ref(), b"foobar\n");
 }
 
@@ -87,7 +89,11 @@ async fn rar5_extraction_cost_includes_header() {
     let entry = &archive.entries()[0];
     let cost = archive.extraction_cost(entry);
     let loc = &archive.locations()[0];
-    assert_eq!(cost, loc.header_size + loc.data_size, "RAR5 cost must be header + data");
+    assert_eq!(
+        cost,
+        loc.header_size + loc.data_size,
+        "RAR5 cost must be header + data"
+    );
     assert!(loc.header_size > 0);
 }
 
@@ -169,9 +175,7 @@ async fn rar5_utf8_filename_listing() {
 async fn rar5_utf8_store_extraction_empty_file() {
     let archive = open_rar(&fixture("rar5_utf8.rar")).await;
     let entry = &archive.entries()[0];
-    let data = extract_bytes(&archive, entry, None)
-    .await
-    .expect("extract");
+    let data = extract_bytes(&archive, entry, None).await.expect("extract");
     assert_eq!(data.as_ref(), b"");
 }
 
@@ -207,15 +211,15 @@ fn build_rar5_store_archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
 
         // File-specific body
         let mut body = Vec::new();
-        body.push(0x06u8);                               // file_flags: mtime + crc32
-        body.push(data.len() as u8);                     // unpacked_size (1-byte vint)
-        body.push(0x20u8);                               // attributes
-        body.extend_from_slice(&mtime.to_le_bytes());    // mtime (4 bytes)
+        body.push(0x06u8); // file_flags: mtime + crc32
+        body.push(data.len() as u8); // unpacked_size (1-byte vint)
+        body.push(0x20u8); // attributes
+        body.extend_from_slice(&mtime.to_le_bytes()); // mtime (4 bytes)
         body.extend_from_slice(&data_crc.to_le_bytes()); // data_crc32 (4 bytes)
-        body.push(0x00u8);                               // compression_info: Store, not solid
-        body.push(0x01u8);                               // host_os: Unix
-        body.push(name_bytes.len() as u8);               // name_length (1-byte vint)
-        body.extend_from_slice(name_bytes);              // name
+        body.push(0x00u8); // compression_info: Store, not solid
+        body.push(0x01u8); // host_os: Unix
+        body.push(name_bytes.len() as u8); // name_length (1-byte vint)
+        body.extend_from_slice(name_bytes); // name
 
         // header_content_len = block_type(1) + flags(1) + data_size(1) + body
         let header_content_len = 1 + 1 + 1 + body.len();
@@ -289,13 +293,13 @@ async fn rar5_store_extraction_exact_content() {
     let archive = open_rar(&path).await;
 
     let data1 = extract_bytes(&archive, &archive.entries()[0], None)
-    .await
-    .expect("extract file1");
+        .await
+        .expect("extract file1");
     assert_eq!(data1.as_ref(), file1_data as &[u8]);
 
     let data2 = extract_bytes(&archive, &archive.entries()[1], None)
-    .await
-    .expect("extract file2");
+        .await
+        .expect("extract file2");
     assert_eq!(data2.as_ref(), file2_data as &[u8]);
 }
 
@@ -323,13 +327,13 @@ async fn rar5_real_store_extraction() {
     let archive = open_rar(&fixture("rar5_store.rar")).await;
 
     let data1 = extract_bytes(&archive, &archive.entries()[0], None)
-    .await
-    .expect("extract file1");
+        .await
+        .expect("extract file1");
     assert_eq!(data1.as_ref(), b"Hello from file one\n");
 
     let data2 = extract_bytes(&archive, &archive.entries()[1], None)
-    .await
-    .expect("extract file2");
+        .await
+        .expect("extract file2");
     assert_eq!(data2.as_ref(), b"Second file content\n");
 }
 
@@ -348,13 +352,13 @@ async fn rar5_real_compressed_extraction() {
     let archive = open_rar(&fixture("rar5_compressed.rar")).await;
 
     let data1 = extract_bytes(&archive, &archive.entries()[0], None)
-    .await
-    .expect("extract file1");
+        .await
+        .expect("extract file1");
     assert_eq!(data1.as_ref(), b"Hello from file one\n");
 
     let data2 = extract_bytes(&archive, &archive.entries()[1], None)
-    .await
-    .expect("extract file2");
+        .await
+        .expect("extract file2");
     assert_eq!(data2.as_ref(), b"Second file content\n");
 }
 
@@ -528,14 +532,23 @@ async fn rar5_elastic_scan_progress_callbacks() {
     let archive_size = archive.archive_size();
 
     assert_eq!(r.scan_started.len(), 1, "on_scan_start fires once");
-    assert_eq!(r.scan_started[0], archive_size, "on_scan_start receives archive size");
+    assert_eq!(
+        r.scan_started[0], archive_size,
+        "on_scan_start receives archive size"
+    );
 
-    assert!(!r.scan_progress.is_empty(), "on_scan_progress fires at least once");
+    assert!(
+        !r.scan_progress.is_empty(),
+        "on_scan_progress fires at least once"
+    );
     let (last_offset, last_count) = r.scan_progress.last().copied().unwrap();
     assert!(last_offset > 0, "bytes_scanned > 0");
     assert!(last_offset <= archive_size, "bytes_scanned ≤ archive_size");
     assert!(last_count > 0, "entries_found > 0 in final progress call");
 
     assert_eq!(r.scan_completed.len(), 1, "on_scan_complete fires once");
-    assert_eq!(r.scan_completed[0], 2, "on_scan_complete receives correct count");
+    assert_eq!(
+        r.scan_completed[0], 2,
+        "on_scan_complete receives correct count"
+    );
 }

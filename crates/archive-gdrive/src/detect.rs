@@ -42,9 +42,7 @@ mod tests {
 
     #[test]
     fn test_is_gdrive_url() {
-        assert!(is_gdrive_url(
-            "https://drive.google.com/file/d/ABC/view"
-        ));
+        assert!(is_gdrive_url("https://drive.google.com/file/d/ABC/view"));
         assert!(!is_gdrive_url("https://example.com/file.zip"));
         assert!(!is_gdrive_url("not-a-url"));
     }
@@ -67,9 +65,6 @@ mod tests {
             extract_file_id("https://drive.google.com/drive/my-drive"),
             None
         );
-        assert_eq!(
-            extract_file_id("https://example.com/file.zip"),
-            None
-        );
+        assert_eq!(extract_file_id("https://example.com/file.zip"), None);
     }
 }

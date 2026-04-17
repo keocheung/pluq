@@ -77,7 +77,9 @@ impl ArchiveCache {
             return cached == live;
         }
         // Fall back through weaker signals.
-        if let (Some(cached), Some(live)) = (&self.fingerprint.last_modified, &current.last_modified) {
+        if let (Some(cached), Some(live)) =
+            (&self.fingerprint.last_modified, &current.last_modified)
+        {
             return cached == live;
         }
         if let (Some(cached), Some(live)) = (self.fingerprint.mtime, current.mtime) {
@@ -88,16 +90,14 @@ impl ArchiveCache {
 
     /// Serialize to pretty-printed JSON and write to `path`.
     pub fn save(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
-        let json = serde_json::to_string_pretty(self)
-            .map_err(std::io::Error::other)?;
+        let json = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
         std::fs::write(path, json)
     }
 
     /// Deserialize from JSON at `path`.
     pub fn load(path: &std::path::Path) -> Result<Self, std::io::Error> {
         let json = std::fs::read_to_string(path)?;
-        serde_json::from_str(&json)
-            .map_err(std::io::Error::other)
+        serde_json::from_str(&json).map_err(std::io::Error::other)
     }
 }
 
@@ -222,7 +222,12 @@ mod tests {
         let loaded = ArchiveCache::load(tmp.path()).unwrap();
         assert_eq!(loaded.fingerprint, cache.fingerprint);
         assert_eq!(loaded.created_at, 1234567890);
-        if let FormatCacheState::Rar { archive_preamble, archive_size, .. } = loaded.format_state {
+        if let FormatCacheState::Rar {
+            archive_preamble,
+            archive_size,
+            ..
+        } = loaded.format_state
+        {
             assert_eq!(archive_preamble, vec![0x52, 0x61, 0x72, 0x21]);
             assert_eq!(archive_size, 2048);
         } else {
@@ -246,7 +251,12 @@ mod tests {
         };
         cache.save(tmp.path()).unwrap();
         let loaded = ArchiveCache::load(tmp.path()).unwrap();
-        if let FormatCacheState::Rar4 { archive_preamble, archive_size, .. } = loaded.format_state {
+        if let FormatCacheState::Rar4 {
+            archive_preamble,
+            archive_size,
+            ..
+        } = loaded.format_state
+        {
             assert_eq!(archive_preamble, vec![0x52, 0x61, 0x72]);
             assert_eq!(archive_size, 1024);
         } else {

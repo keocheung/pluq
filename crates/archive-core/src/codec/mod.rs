@@ -74,8 +74,8 @@ impl CompressionMethod {
             Self::Deflate64 => true,
             Self::Lzma => true,
             Self::Zstd => true,
-            Self::Lzma2 => false,  // TODO: add lzma-rust2 crate
-            Self::Ppmd => false,   // TODO: add ppmd-rust crate
+            Self::Lzma2 => false, // TODO: add lzma-rust2 crate
+            Self::Ppmd => false,  // TODO: add ppmd-rust crate
         }
     }
 
@@ -145,11 +145,11 @@ pub fn build_decoder<'a>(
         CompressionMethod::Deflate64 => Ok(Box::new(Deflate64Decoder::new(input))),
         CompressionMethod::BZip2 => Ok(Box::new(BZip2Decoder::new(input))),
         CompressionMethod::Lzma => Ok(Box::new(LzmaDecoder::new(input, properties)?)),
-        CompressionMethod::Zstd => Ok(Box::new(
-            ZstdDecoder::new(input).map_err(|e| CoreError::BitstreamError {
+        CompressionMethod::Zstd => Ok(Box::new(ZstdDecoder::new(input).map_err(|e| {
+            CoreError::BitstreamError {
                 detail: format!("Zstd frame header: {e}"),
-            })?,
-        )),
+            }
+        })?)),
         other => Err(CoreError::UnsupportedCompression {
             algorithm: other.to_string(),
         }),
@@ -273,8 +273,7 @@ mod tests {
         let compressed: &[u8] = &[0x01, 0x05, 0x00, 0xFA, 0xFF, 1, 2, 3, 4, 5];
         let expected: &[u8] = &[1, 2, 3, 4, 5];
 
-        let mut decoder =
-            build_decoder(CompressionMethod::Deflate64, compressed, &[]).unwrap();
+        let mut decoder = build_decoder(CompressionMethod::Deflate64, compressed, &[]).unwrap();
         let mut out = Vec::new();
         decoder.read_to_end(&mut out).unwrap();
         assert_eq!(out, expected);
@@ -283,10 +282,7 @@ mod tests {
     #[test]
     fn build_decoder_returns_unsupported_for_missing_codecs() {
         let dummy: &[u8] = &[];
-        for method in [
-            CompressionMethod::Lzma2,
-            CompressionMethod::Ppmd,
-        ] {
+        for method in [CompressionMethod::Lzma2, CompressionMethod::Ppmd] {
             let result = build_decoder(method, dummy, &[]);
             assert!(
                 matches!(result, Err(CoreError::UnsupportedCompression { .. })),

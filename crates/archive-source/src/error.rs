@@ -12,10 +12,7 @@ pub enum SourceError {
         guidance: String,
     },
     /// URL matched a provider pattern but couldn't be parsed.
-    InvalidUrl {
-        url: String,
-        reason: String,
-    },
+    InvalidUrl { url: String, reason: String },
 }
 
 impl fmt::Display for SourceError {

@@ -30,11 +30,7 @@ pub fn resolve(input: &str, _config: &SourceConfig) -> Result<ResolvedSource, So
             })?;
 
         let reader = CachingReadAt::new(GoogleDriveReadAt::new(file_id.clone(), api_key));
-        return Ok(ResolvedSource::GDrive(
-            reader,
-            input.to_string(),
-            file_id,
-        ));
+        return Ok(ResolvedSource::GDrive(reader, input.to_string(), file_id));
     }
 
     // ── Phase 4: Dropbox check would go here ─────────────────────────────

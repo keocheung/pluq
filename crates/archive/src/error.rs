@@ -1,6 +1,4 @@
-use archive_core::io::read_error::{
-    NetworkPhase, ReadErrorKind, ReadFailure, SourceInfo,
-};
+use archive_core::io::read_error::{NetworkPhase, ReadErrorKind, ReadFailure, SourceInfo};
 use archive_core::{CoreError, ReadError};
 use tracing::{debug, warn};
 
@@ -64,9 +62,7 @@ pub fn translate_core_error(err: CoreError) -> ArchiveError {
 
         // Corruption.
         CoreError::CrcMismatch { entry, .. } => ArchiveError::FileCorrupted { filename: entry },
-        CoreError::InvalidFormat { message } => ArchiveError::UnsupportedFormat {
-            detail: message,
-        },
+        CoreError::InvalidFormat { message } => ArchiveError::UnsupportedFormat { detail: message },
         CoreError::CorruptHeader { reason, .. } => ArchiveError::FileCorrupted {
             filename: format!("header: {reason}"),
         },
@@ -79,12 +75,12 @@ pub fn translate_core_error(err: CoreError) -> ArchiveError {
         CoreError::WrongPassword { .. } => ArchiveError::PasswordNeeded,
 
         // Unsupported.
-        CoreError::UnsupportedFormat { format } => ArchiveError::UnsupportedFormat {
-            detail: format,
-        },
-        CoreError::UnsupportedCompression { algorithm } => ArchiveError::UnsupportedFormat {
-            detail: algorithm,
-        },
+        CoreError::UnsupportedFormat { format } => {
+            ArchiveError::UnsupportedFormat { detail: format }
+        }
+        CoreError::UnsupportedCompression { algorithm } => {
+            ArchiveError::UnsupportedFormat { detail: algorithm }
+        }
         CoreError::UnsupportedFeature { detail } => ArchiveError::UnsupportedFormat { detail },
 
         // Security.
@@ -94,7 +90,10 @@ pub fn translate_core_error(err: CoreError) -> ArchiveError {
                 detail: format!("dangerous path: {path}"),
             }
         }
-        CoreError::SymlinkTargetEscape { ref path, ref target } => {
+        CoreError::SymlinkTargetEscape {
+            ref path,
+            ref target,
+        } => {
             warn!(path = %path, target = %target, "symlink escape detected");
             ArchiveError::SecurityRisk {
                 detail: format!("dangerous symlink: {path} -> {target}"),
@@ -180,7 +179,10 @@ mod tests {
             source: SourceInfo::Http {
                 url: "https://example.com/file.zip".into(),
             },
-            operation: ReadOperation::ReadRange { offset: 0, len: 100 },
+            operation: ReadOperation::ReadRange {
+                offset: 0,
+                len: 100,
+            },
             kind,
             diagnostic: "test diagnostic".into(),
         })))
@@ -191,7 +193,10 @@ mod tests {
         let boxed: Box<dyn std::error::Error + Send + Sync> =
             Box::new(std::io::Error::other("auth expired"));
         let err = CoreError::Io(ReadError::Transport(boxed));
-        assert!(matches!(translate_core_error(err), ArchiveError::Transport(_)));
+        assert!(matches!(
+            translate_core_error(err),
+            ArchiveError::Transport(_)
+        ));
     }
 
     #[test]

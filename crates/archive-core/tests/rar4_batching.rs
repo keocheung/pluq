@@ -106,12 +106,17 @@ async fn rar4_extract_selected_batches_into_single_cluster() {
 
     let mut archive = Rar4Archive::open(reader).await.expect("open RAR4");
 
-    let progress: Arc<Mutex<dyn archive_core::ProgressReporter>> =
-        Arc::new(Mutex::new(()));
-    archive.scan_metadata(progress.clone()).await.expect("scan_metadata");
+    let progress: Arc<Mutex<dyn archive_core::ProgressReporter>> = Arc::new(Mutex::new(()));
+    archive
+        .scan_metadata(progress.clone())
+        .await
+        .expect("scan_metadata");
 
-    let entries: Vec<&ArchiveEntry> =
-        archive.entries().iter().filter(|e| !e.is_directory).collect();
+    let entries: Vec<&ArchiveEntry> = archive
+        .entries()
+        .iter()
+        .filter(|e| !e.is_directory)
+        .collect();
     assert_eq!(entries.len(), 2, "fixture must have exactly 2 file entries");
 
     let expected_bytes: u64 = entries.iter().map(|e| e.uncompressed_size).sum();

@@ -3,8 +3,8 @@ pub mod home;
 mod tui;
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use clap::{Parser, Subcommand};
 use tracing::{info, warn};
@@ -150,14 +150,20 @@ async fn run_home(_cancel: Arc<AtomicBool>) -> Result<(), Box<dyn std::error::Er
     tui::run_home().await
 }
 
-async fn run_browse(source: String, _cancel: Arc<AtomicBool>) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_browse(
+    source: String,
+    _cancel: Arc<AtomicBool>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let config = SourceConfig::new();
     let reader = resolve(&source, &config)?;
     tui::run_with_source(source, reader).await?;
     Ok(())
 }
 
-async fn run_subcommand(command: Command, cancel: Arc<AtomicBool>) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_subcommand(
+    command: Command,
+    cancel: Arc<AtomicBool>,
+) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         Command::List { source, all } => {
             let archive = open_with_progress(&source, &cancel).await?;
@@ -232,7 +238,9 @@ async fn run_subcommand(command: Command, cancel: Arc<AtomicBool>) -> Result<(),
             }
 
             let mut file = tokio::fs::File::create(&out_path).await?;
-            let bytes_written = archive.extract(found, &mut file, progress.clone(), None).await?;
+            let bytes_written = archive
+                .extract(found, &mut file, progress.clone(), None)
+                .await?;
 
             {
                 let mut p = progress.lock().unwrap();
@@ -246,7 +254,11 @@ async fn run_subcommand(command: Command, cancel: Arc<AtomicBool>) -> Result<(),
                 format_size(bytes_written)
             );
         }
-        Command::ExtractAll { source, output, all } => {
+        Command::ExtractAll {
+            source,
+            output,
+            all,
+        } => {
             let config = SourceConfig::new();
             let reader = resolve(&source, &config)?;
             let archive = open_with_progress(&source, &cancel).await?;
@@ -257,12 +269,12 @@ async fn run_subcommand(command: Command, cancel: Arc<AtomicBool>) -> Result<(),
                 archive.entries_clean()
             };
 
-            let output_dir = output
-                .unwrap_or_else(|| {
-                    reader.suggested_name()
-                        .map(PathBuf::from)
-                        .unwrap_or_else(|| PathBuf::from("."))
-                });
+            let output_dir = output.unwrap_or_else(|| {
+                reader
+                    .suggested_name()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("."))
+            });
 
             tokio::fs::create_dir_all(&output_dir).await?;
 
@@ -291,14 +303,15 @@ async fn run_subcommand(command: Command, cancel: Arc<AtomicBool>) -> Result<(),
                 Arc::new(Mutex::new(reporter));
 
             let output_dir_ref = &output_dir;
-            let sink_factory = |entry: &ArchiveEntry| -> Option<Box<dyn AsyncWrite + Send + Unpin>> {
-                let dest = output_dir_ref.join(&entry.name);
-                if let Some(parent) = dest.parent() {
-                    std::fs::create_dir_all(parent).ok();
-                }
-                let file = std::fs::File::create(&dest).ok()?;
-                Some(Box::new(tokio::fs::File::from_std(file)))
-            };
+            let sink_factory =
+                |entry: &ArchiveEntry| -> Option<Box<dyn AsyncWrite + Send + Unpin>> {
+                    let dest = output_dir_ref.join(&entry.name);
+                    if let Some(parent) = dest.parent() {
+                        std::fs::create_dir_all(parent).ok();
+                    }
+                    let file = std::fs::File::create(&dest).ok()?;
+                    Some(Box::new(tokio::fs::File::from_std(file)))
+                };
 
             let batch = archive
                 .extract_selected(&safe_entries, sink_factory, progress, None)
@@ -394,8 +407,9 @@ async fn open_with_progress(
             eprintln!(
                 "  Archive requires scanning{}",
                 match &info {
-                    archive::ScanInfo::Required { estimated_bytes, .. } =>
-                        format!(" (~{})", format_size(*estimated_bytes)),
+                    archive::ScanInfo::Required {
+                        estimated_bytes, ..
+                    } => format!(" (~{})", format_size(*estimated_bytes)),
                     _ => String::new(),
                 }
             );
@@ -459,8 +473,9 @@ fn init_logging(debug_flag: bool) -> Option<tracing_appender::non_blocking::Work
     tracing_subscriber::fmt()
         .with_writer(non_blocking)
         .with_env_filter(
-            tracing_subscriber::EnvFilter::builder()
-                .parse_lossy(format!("archive_core={level},archive={level},archive_cli={level}"))
+            tracing_subscriber::EnvFilter::builder().parse_lossy(format!(
+                "archive_core={level},archive={level},archive_cli={level}"
+            )),
         )
         .with_ansi(false)
         .with_target(true)
@@ -491,16 +506,21 @@ mod tests {
         // snipe list file.zip -> source: None, command: Some(Command::List { ... })
         let cli = Cli::try_parse_from(["snipe", "list", "file.zip"]).unwrap();
         assert_eq!(cli.source, None);
-        assert!(matches!(cli.command, Some(Command::List { ref source, all: false }) if source == "file.zip"));
+        assert!(
+            matches!(cli.command, Some(Command::List { ref source, all: false }) if source == "file.zip")
+        );
 
         // snipe file.zip list file.zip -> error (args_conflicts_with_subcommands)
         let res = Cli::try_parse_from(["snipe", "file.zip", "list", "file.zip"]);
         assert!(res.is_err());
 
         // snipe extract file.zip foo.txt -o out/ -> Extract variant
-        let cli = Cli::try_parse_from(["snipe", "extract", "file.zip", "foo.txt", "-o", "out/"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["snipe", "extract", "file.zip", "foo.txt", "-o", "out/"]).unwrap();
         assert_eq!(cli.source, None);
-        assert!(matches!(cli.command, Some(Command::Extract { ref source, ref entry, ref output }) if source == "file.zip" && entry == "foo.txt" && output.as_os_str() == "out/"));
+        assert!(
+            matches!(cli.command, Some(Command::Extract { ref source, ref entry, ref output }) if source == "file.zip" && entry == "foo.txt" && output.as_os_str() == "out/")
+        );
     }
 
     #[test]
@@ -514,9 +534,7 @@ mod tests {
             Some(PathBuf::from("backup"))
         );
         assert_eq!(
-            default_output_folder(
-                "https://drive.google.com/file/d/xxx/data.rar?confirm=t"
-            ),
+            default_output_folder("https://drive.google.com/file/d/xxx/data.rar?confirm=t"),
             Some(PathBuf::from("data"))
         );
         assert_eq!(

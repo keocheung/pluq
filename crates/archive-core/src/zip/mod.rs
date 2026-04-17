@@ -12,14 +12,14 @@
 //! zip.extract(&zip.entries()[0], &mut sink).await?;
 //! ```
 
-pub mod index;
 mod aes;
 mod crypto;
+pub mod index;
 mod parse;
 
+use crypto::{ZipCryptoDecryptor, ZipCryptoReader};
 pub use index::ZipIndex;
 pub use parse::{AesExtraInfo, ZipEntryLocation};
-use crypto::{ZipCryptoDecryptor, ZipCryptoReader};
 
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
@@ -30,8 +30,8 @@ use tokio_util::io::SyncIoBridge;
 use tracing::{debug, info, trace, warn};
 
 use crate::archive_reader::{ArchiveReader, BatchResult};
-use crate::codec::{build_decoder, CompressionMethod};
-use crate::io::{build_clusters, FetchRegion};
+use crate::codec::{CompressionMethod, build_decoder};
+use crate::io::{FetchRegion, build_clusters};
 use crate::junk;
 use crate::progress::ProgressReporter;
 use crate::{ArchiveEntry, CoreError, ReadAt};
@@ -117,7 +117,11 @@ impl<R: ReadAt> ZipArchive<R> {
         entries: Vec<ArchiveEntry>,
         locations: Vec<ZipEntryLocation>,
     ) -> Self {
-        Self { reader, entries, locations }
+        Self {
+            reader,
+            entries,
+            locations,
+        }
     }
 
     /// Bytes that must be downloaded and decompressed to produce this entry.
@@ -204,15 +208,14 @@ impl<R: ReadAt> ZipArchive<R> {
         let handle = tokio::runtime::Handle::current();
         let sync_reader = SyncIoBridge::new_with_handle(compressed_stream, handle);
 
-        let temp_file: tempfile::NamedTempFile = tokio::task::spawn_blocking(
-            move || -> Result<tempfile::NamedTempFile, CoreError> {
+        let temp_file: tempfile::NamedTempFile =
+            tokio::task::spawn_blocking(move || -> Result<tempfile::NamedTempFile, CoreError> {
                 use std::io::Write;
 
-                let temp_file = tempfile::NamedTempFile::new().map_err(|e| {
-                    CoreError::BitstreamError {
+                let temp_file =
+                    tempfile::NamedTempFile::new().map_err(|e| CoreError::BitstreamError {
                         detail: format!("failed to create temp file: {e}"),
-                    }
-                })?;
+                    })?;
 
                 {
                     let mut temp_writer = std::io::BufWriter::new(temp_file.as_file());
@@ -238,25 +241,24 @@ impl<R: ReadAt> ZipArchive<R> {
                 }
 
                 Ok(temp_file)
-            },
-        )
-        .await
-        .map_err(|e| CoreError::BitstreamError {
-            detail: format!("decompression task panicked: {e}"),
-        })??;
+            })
+            .await
+            .map_err(|e| CoreError::BitstreamError {
+                detail: format!("decompression task panicked: {e}"),
+            })??;
 
         // ── Step 4 (async): stream verified temp file to sink ──────────────
-        let mut temp_reader = tokio::fs::File::open(temp_file.path())
-            .await
-            .map_err(|e| CoreError::BitstreamError {
+        let mut temp_reader = tokio::fs::File::open(temp_file.path()).await.map_err(|e| {
+            CoreError::BitstreamError {
                 detail: format!("failed to reopen temp file: {e}"),
-            })?;
+            }
+        })?;
 
-        let bytes_written = tokio::io::copy(&mut temp_reader, sink)
-            .await
-            .map_err(|e| CoreError::BitstreamError {
+        let bytes_written = tokio::io::copy(&mut temp_reader, sink).await.map_err(|e| {
+            CoreError::BitstreamError {
                 detail: format!("copy to sink failed: {e}"),
-            })?;
+            }
+        })?;
 
         info!(name = %entry.name, bytes_written, "ZIP extract complete");
         Ok(bytes_written)
@@ -314,9 +316,7 @@ impl<R: ReadAt> ZipArchive<R> {
 
         info!(
             entries = work.len(),
-            stream_start,
-            stream_len,
-            "ZIP extract_all: opening single stream"
+            stream_start, stream_len, "ZIP extract_all: opening single stream"
         );
 
         // One stream for the entire body.
@@ -380,11 +380,10 @@ impl<R: ReadAt> ZipArchive<R> {
                         .map_err(|e| stream_io_err(e, stream_pos))?;
                     stream_pos += compressed_size;
 
-                    let temp_file = tempfile::NamedTempFile::new().map_err(|e| {
-                        CoreError::BitstreamError {
+                    let temp_file =
+                        tempfile::NamedTempFile::new().map_err(|e| CoreError::BitstreamError {
                             detail: format!("failed to create temp file: {e}"),
-                        }
-                    })?;
+                        })?;
 
                     let bytes_written = {
                         let mut temp_writer = std::io::BufWriter::new(temp_file.as_file());
@@ -475,7 +474,11 @@ impl<R: ReadAt> ZipArchive<R> {
             .collect();
 
         if work.is_empty() {
-            return Ok(BatchResult { bytes_written: 0, succeeded: 0, failed: vec![] });
+            return Ok(BatchResult {
+                bytes_written: 0,
+                succeeded: 0,
+                failed: vec![],
+            });
         }
 
         // 2. Map to FetchRegion and cluster.
@@ -498,7 +501,11 @@ impl<R: ReadAt> ZipArchive<R> {
 
         let file_size = self.reader.size().await.map_err(CoreError::Io)?;
         let password_bytes: Option<Vec<u8>> = password.map(|p| p.to_vec());
-        let mut batch = BatchResult { bytes_written: 0, succeeded: 0, failed: vec![] };
+        let mut batch = BatchResult {
+            bytes_written: 0,
+            succeeded: 0,
+            failed: vec![],
+        };
 
         for cluster in &clusters {
             // Cancel check between clusters.
@@ -521,9 +528,7 @@ impl<R: ReadAt> ZipArchive<R> {
 
             info!(
                 cluster_entries = cluster.len(),
-                cluster_start,
-                cluster_len,
-                "ZIP extract_selected: opening cluster stream"
+                cluster_start, cluster_len, "ZIP extract_selected: opening cluster stream"
             );
 
             let stream = self
@@ -612,7 +617,11 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for ZipArchive<R> {
         ZipArchive::extract(self, entry, sink, progress, password).await
     }
 
-    async fn test(&self, entry: &ArchiveEntry, progress: Arc<Mutex<dyn ProgressReporter>>) -> Result<(), CoreError> {
+    async fn test(
+        &self,
+        entry: &ArchiveEntry,
+        progress: Arc<Mutex<dyn ProgressReporter>>,
+    ) -> Result<(), CoreError> {
         ZipArchive::test(self, entry, progress).await
     }
 
@@ -624,8 +633,8 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for ZipArchive<R> {
         password: Option<&[u8]>,
     ) -> impl std::future::Future<Output = Result<BatchResult, CoreError>> + Send
     where
-        SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn tokio::io::AsyncWrite + Send + Unpin>>
-            + Send,
+        SinkFn:
+            FnMut(&ArchiveEntry) -> Option<Box<dyn tokio::io::AsyncWrite + Send + Unpin>> + Send,
     {
         ZipArchive::extract_selected(self, entries, sink_factory, progress, password)
     }
@@ -667,7 +676,9 @@ fn decompress_cluster(
 
         // Parse the 30-byte fixed LFH header.
         let mut lfh = [0u8; 30];
-        stream.read_exact(&mut lfh).map_err(|e| stream_io_err(e, stream_pos))?;
+        stream
+            .read_exact(&mut lfh)
+            .map_err(|e| stream_io_err(e, stream_pos))?;
         stream_pos += 30;
 
         let sig = u32::from_le_bytes([lfh[0], lfh[1], lfh[2], lfh[3]]);
@@ -691,16 +702,17 @@ fn decompress_cluster(
         // Read compressed data into memory (including encryption overhead).
         let compressed_size = entry.compressed_size;
         let mut compressed = vec![0u8; compressed_size as usize];
-        stream.read_exact(&mut compressed).map_err(|e| stream_io_err(e, stream_pos))?;
+        stream
+            .read_exact(&mut compressed)
+            .map_err(|e| stream_io_err(e, stream_pos))?;
         stream_pos += compressed_size;
 
         // Decompress + CRC-verify into a temp file (per-entry failure → Err item, loop continues).
         let result: Result<tempfile::NamedTempFile, CoreError> = (|| {
-            let temp_file = tempfile::NamedTempFile::new().map_err(|e| {
-                CoreError::BitstreamError {
+            let temp_file =
+                tempfile::NamedTempFile::new().map_err(|e| CoreError::BitstreamError {
                     detail: format!("failed to create temp file: {e}"),
-                }
-            })?;
+                })?;
 
             {
                 let mut temp_writer = std::io::BufWriter::new(temp_file.as_file());
@@ -742,9 +754,11 @@ fn decompress_cluster(
 /// After this call, `reader` is positioned at the start of the raw LZMA bitstream.
 pub(crate) fn read_zip_lzma_header(reader: &mut impl Read) -> Result<Vec<u8>, CoreError> {
     let mut header = [0u8; 4];
-    reader.read_exact(&mut header).map_err(|e| CoreError::InvalidFormat {
-        message: format!("truncated LZMA header: {e}"),
-    })?;
+    reader
+        .read_exact(&mut header)
+        .map_err(|e| CoreError::InvalidFormat {
+            message: format!("truncated LZMA header: {e}"),
+        })?;
     let props_size = u16::from_le_bytes([header[2], header[3]]) as usize;
     if !(5..=255).contains(&props_size) {
         return Err(CoreError::InvalidFormat {
@@ -752,9 +766,11 @@ pub(crate) fn read_zip_lzma_header(reader: &mut impl Read) -> Result<Vec<u8>, Co
         });
     }
     let mut props = vec![0u8; props_size];
-    reader.read_exact(&mut props).map_err(|e| CoreError::InvalidFormat {
-        message: format!("truncated LZMA properties: {e}"),
-    })?;
+    reader
+        .read_exact(&mut props)
+        .map_err(|e| CoreError::InvalidFormat {
+            message: format!("truncated LZMA properties: {e}"),
+        })?;
     Ok(props)
 }
 
@@ -766,9 +782,9 @@ fn skip_exact(reader: &mut impl Read, n: u64) -> Result<(), CoreError> {
     let mut buf = [0u8; 8192];
     while remaining > 0 {
         let to_read = (remaining as usize).min(buf.len());
-        reader.read_exact(&mut buf[..to_read]).map_err(|e| {
-            stream_io_err(e, 0)
-        })?;
+        reader
+            .read_exact(&mut buf[..to_read])
+            .map_err(|e| stream_io_err(e, 0))?;
         remaining -= to_read as u64;
     }
     Ok(())
@@ -803,12 +819,8 @@ fn decompress_and_verify<R: Read + Send, W: std::io::Write>(
     let mut decoder: Box<dyn crate::codec::Decoder + '_> = if is_aes {
         let aes_extra = params.aes_info.as_ref().unwrap();
         let pwd = params.password.ok_or(CoreError::PasswordRequired)?;
-        let decrypted = aes::decrypt_winzip_aes(
-            &mut reader,
-            pwd,
-            aes_extra.strength,
-            params.compressed_size,
-        )?;
+        let decrypted =
+            aes::decrypt_winzip_aes(&mut reader, pwd, aes_extra.strength, params.compressed_size)?;
         let method = parse::zip_method_to_codec(aes_extra.actual_method_id).ok_or_else(|| {
             CoreError::UnsupportedCompression {
                 algorithm: format!("ZIP AES actual method id {}", aes_extra.actual_method_id),
@@ -916,9 +928,10 @@ fn decompress_and_verify<R: Read + Send, W: std::io::Write>(
             break;
         }
         hasher.update(&chunk_buf[..n]);
-        sink.write_all(&chunk_buf[..n]).map_err(|e| CoreError::BitstreamError {
-            detail: format!("write failed for '{}': {e}", params.entry_name),
-        })?;
+        sink.write_all(&chunk_buf[..n])
+            .map_err(|e| CoreError::BitstreamError {
+                detail: format!("write failed for '{}': {e}", params.entry_name),
+            })?;
         total_written += n as u64;
 
         if total_written > max_output {
@@ -982,9 +995,9 @@ mod tests {
     use zip::unstable::write::FileOptionsExt;
     use zip::write::SimpleFileOptions;
 
+    use crate::PasswordDetectionMethod;
     use crate::codec::CompressionMethod;
     use crate::io::LocalReadAt;
-    use crate::PasswordDetectionMethod;
 
     use super::*;
 
@@ -1101,7 +1114,9 @@ mod tests {
         let content = b"integrity check content";
         let (_tmp, reader) = create_test_zip(&[("file.txt", content, ZipCrateMethod::Deflated)]);
         let zip = ZipArchive::open(reader).await.unwrap();
-        zip.test(&zip.entries()[0], Arc::new(Mutex::new(()))).await.unwrap();
+        zip.test(&zip.entries()[0], Arc::new(Mutex::new(())))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1268,12 +1283,14 @@ mod tests {
             .take(200 * 1024)
             .collect();
 
-        let (_tmp, reader) =
-            create_test_zip(&[("large.bin", &content, ZipCrateMethod::Deflated)]);
+        let (_tmp, reader) = create_test_zip(&[("large.bin", &content, ZipCrateMethod::Deflated)]);
         let zip = ZipArchive::open(reader).await.unwrap();
         let data = extract_to_vec(&zip, &zip.entries()[0]).await;
 
-        assert_eq!(data, content, "chunked extraction must be byte-for-byte identical");
+        assert_eq!(
+            data, content,
+            "chunked extraction must be byte-for-byte identical"
+        );
     }
 
     #[tokio::test]
@@ -1314,14 +1331,14 @@ mod tests {
             .take(200 * 1024)
             .collect();
 
-        let (_tmp, reader) =
-            create_test_zip(&[("large.bin", &content, ZipCrateMethod::Deflated)]);
+        let (_tmp, reader) = create_test_zip(&[("large.bin", &content, ZipCrateMethod::Deflated)]);
         let zip = ZipArchive::open(reader).await.unwrap();
 
         let state = Arc::new(Mutex::new(State::default()));
-        let progress: Arc<Mutex<dyn ProgressReporter>> = Arc::new(Mutex::new(
-            CancelAfterFirstChunk { state: Arc::clone(&state) },
-        ));
+        let progress: Arc<Mutex<dyn ProgressReporter>> =
+            Arc::new(Mutex::new(CancelAfterFirstChunk {
+                state: Arc::clone(&state),
+            }));
 
         let mut sink = tokio::io::sink();
         let result = zip
@@ -1335,7 +1352,10 @@ mod tests {
 
         let s = state.lock().unwrap();
         assert!(s.entry_start_called, "on_entry_start must be called");
-        assert!(s.entry_complete_called, "on_entry_complete must be called on cancellation");
+        assert!(
+            s.entry_complete_called,
+            "on_entry_complete must be called on cancellation"
+        );
         assert_eq!(
             s.complete_success,
             Some(false),
@@ -1367,13 +1387,13 @@ mod tests {
             .collect();
         let uncompressed_size = content.len() as u64;
 
-        let (_tmp, reader) =
-            create_test_zip(&[("large.bin", &content, ZipCrateMethod::Deflated)]);
+        let (_tmp, reader) = create_test_zip(&[("large.bin", &content, ZipCrateMethod::Deflated)]);
         let zip = ZipArchive::open(reader).await.unwrap();
 
         let state = Arc::new(Mutex::new(State::default()));
-        let progress: Arc<Mutex<dyn ProgressReporter>> =
-            Arc::new(Mutex::new(ByteRecorder { state: Arc::clone(&state) }));
+        let progress: Arc<Mutex<dyn ProgressReporter>> = Arc::new(Mutex::new(ByteRecorder {
+            state: Arc::clone(&state),
+        }));
 
         let mut sink = tokio::io::sink();
         zip.extract(&zip.entries()[0], &mut sink, progress, None)
@@ -1565,7 +1585,8 @@ mod tests {
             for (name, data, method) in files {
                 let options = SimpleFileOptions::default()
                     .compression_method(*method)
-                    .with_deprecated_encryption(password).unwrap();
+                    .with_deprecated_encryption(password)
+                    .unwrap();
                 writer.start_file(*name, options).unwrap();
                 writer.write_all(data).unwrap();
             }
@@ -1581,18 +1602,24 @@ mod tests {
         let password = b"correct-horse";
         let content = b"Secret message for Archive Sniper!";
 
-        let (_tmp, reader) = create_encrypted_test_zip(
-            password,
-            &[("secret.txt", content, ZipCrateMethod::Stored)],
-        );
+        let (_tmp, reader) =
+            create_encrypted_test_zip(password, &[("secret.txt", content, ZipCrateMethod::Stored)]);
 
         let zip = ZipArchive::open(reader).await.unwrap();
-        assert!(zip.entries()[0].is_encrypted, "entry must be marked as encrypted");
+        assert!(
+            zip.entries()[0].is_encrypted,
+            "entry must be marked as encrypted"
+        );
 
         let mut buf = Vec::new();
-        zip.extract(&zip.entries()[0], &mut buf, Arc::new(Mutex::new(())), Some(password))
-            .await
-            .unwrap();
+        zip.extract(
+            &zip.entries()[0],
+            &mut buf,
+            Arc::new(Mutex::new(())),
+            Some(password),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(buf.as_slice(), content);
     }
@@ -1602,10 +1629,8 @@ mod tests {
         let password = b"correct-horse";
         let content = b"Secret message for Archive Sniper!";
 
-        let (_tmp, reader) = create_encrypted_test_zip(
-            password,
-            &[("secret.txt", content, ZipCrateMethod::Stored)],
-        );
+        let (_tmp, reader) =
+            create_encrypted_test_zip(password, &[("secret.txt", content, ZipCrateMethod::Stored)]);
 
         let zip = ZipArchive::open(reader).await.unwrap();
 
@@ -1641,8 +1666,7 @@ mod tests {
         // vastly exceeds the 1000:1 limit and also blows past the 10 MB output floor.
         // No patching needed — the real compressed_size in the archive is tiny.
         let content = vec![0u8; 11 * 1024 * 1024];
-        let (_tmp, reader) =
-            create_test_zip(&[("bomb.bin", &content, ZipCrateMethod::Deflated)]);
+        let (_tmp, reader) = create_test_zip(&[("bomb.bin", &content, ZipCrateMethod::Deflated)]);
 
         // Confirm the archive actually compresses well (ratio > 1000:1).
         let zip = ZipArchive::open(reader).await.unwrap();
@@ -1670,8 +1694,7 @@ mod tests {
         // Cycling bytes 0–255 in a 100 KB file compresses moderately (ratio well under
         // 1000:1), so the ratio check must not reject it.
         let content: Vec<u8> = (0u8..=255).cycle().take(100 * 1024).collect();
-        let (_tmp, reader) =
-            create_test_zip(&[("normal.bin", &content, ZipCrateMethod::Deflated)]);
+        let (_tmp, reader) = create_test_zip(&[("normal.bin", &content, ZipCrateMethod::Deflated)]);
         let zip = ZipArchive::open(reader).await.unwrap();
 
         let entry = &zip.entries()[0];
@@ -1683,7 +1706,10 @@ mod tests {
         );
 
         let data = extract_to_vec(&zip, entry).await;
-        assert_eq!(data, content, "legitimate high-ratio file must extract successfully");
+        assert_eq!(
+            data, content,
+            "legitimate high-ratio file must extract successfully"
+        );
     }
 
     #[tokio::test]
@@ -1697,31 +1723,31 @@ mod tests {
 
             // ZIP64 EOCD Record (56 bytes total, starts at offset 0).
             buf.extend_from_slice(&0x06064b50u32.to_le_bytes()); // signature
-            buf.extend_from_slice(&44u64.to_le_bytes());          // size of remaining record
-            buf.extend_from_slice(&45u16.to_le_bytes());          // version made by
-            buf.extend_from_slice(&45u16.to_le_bytes());          // version needed
-            buf.extend_from_slice(&0u32.to_le_bytes());           // disk number
-            buf.extend_from_slice(&0u32.to_le_bytes());           // disk with start of CD
-            buf.extend_from_slice(&absurd_count.to_le_bytes());   // entries on this disk
-            buf.extend_from_slice(&absurd_count.to_le_bytes());   // total entries
-            buf.extend_from_slice(&0u64.to_le_bytes());           // CD size
-            buf.extend_from_slice(&0u64.to_le_bytes());           // CD offset
+            buf.extend_from_slice(&44u64.to_le_bytes()); // size of remaining record
+            buf.extend_from_slice(&45u16.to_le_bytes()); // version made by
+            buf.extend_from_slice(&45u16.to_le_bytes()); // version needed
+            buf.extend_from_slice(&0u32.to_le_bytes()); // disk number
+            buf.extend_from_slice(&0u32.to_le_bytes()); // disk with start of CD
+            buf.extend_from_slice(&absurd_count.to_le_bytes()); // entries on this disk
+            buf.extend_from_slice(&absurd_count.to_le_bytes()); // total entries
+            buf.extend_from_slice(&0u64.to_le_bytes()); // CD size
+            buf.extend_from_slice(&0u64.to_le_bytes()); // CD offset
 
             // ZIP64 EOCD Locator (20 bytes): points back to offset 0.
             buf.extend_from_slice(&0x07064b50u32.to_le_bytes()); // signature
-            buf.extend_from_slice(&0u32.to_le_bytes());           // disk with ZIP64 EOCD
-            buf.extend_from_slice(&0u64.to_le_bytes());           // offset of ZIP64 EOCD
-            buf.extend_from_slice(&1u32.to_le_bytes());           // total disks
+            buf.extend_from_slice(&0u32.to_le_bytes()); // disk with ZIP64 EOCD
+            buf.extend_from_slice(&0u64.to_le_bytes()); // offset of ZIP64 EOCD
+            buf.extend_from_slice(&1u32.to_le_bytes()); // total disks
 
             // Standard EOCD (22 bytes): sentinel values trigger ZIP64 lookup.
             buf.extend_from_slice(&0x06054b50u32.to_le_bytes()); // signature
-            buf.extend_from_slice(&0u16.to_le_bytes());           // disk number
-            buf.extend_from_slice(&0u16.to_le_bytes());           // CD start disk
-            buf.extend_from_slice(&0xFFFFu16.to_le_bytes());      // entries this disk (sentinel)
-            buf.extend_from_slice(&0xFFFFu16.to_le_bytes());      // total entries (sentinel)
+            buf.extend_from_slice(&0u16.to_le_bytes()); // disk number
+            buf.extend_from_slice(&0u16.to_le_bytes()); // CD start disk
+            buf.extend_from_slice(&0xFFFFu16.to_le_bytes()); // entries this disk (sentinel)
+            buf.extend_from_slice(&0xFFFFu16.to_le_bytes()); // total entries (sentinel)
             buf.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes()); // CD size (sentinel)
             buf.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes()); // CD offset (sentinel)
-            buf.extend_from_slice(&0u16.to_le_bytes());           // comment length
+            buf.extend_from_slice(&0u16.to_le_bytes()); // comment length
 
             std::fs::write(tmp.path(), &buf).unwrap();
         }
@@ -1753,12 +1779,20 @@ mod tests {
         );
 
         let zip = ZipArchive::open(reader).await.unwrap();
-        assert!(zip.entries()[0].is_encrypted, "entry must be marked as encrypted");
+        assert!(
+            zip.entries()[0].is_encrypted,
+            "entry must be marked as encrypted"
+        );
 
         let mut buf = Vec::new();
-        zip.extract(&zip.entries()[0], &mut buf, Arc::new(Mutex::new(())), Some(password))
-            .await
-            .unwrap();
+        zip.extract(
+            &zip.entries()[0],
+            &mut buf,
+            Arc::new(Mutex::new(())),
+            Some(password),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(buf, content);
     }

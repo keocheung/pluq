@@ -7,10 +7,10 @@
 //! (`[5-byte props][8-byte uncompressed size = unknown]`) so that liblzma's
 //! `lzma_alone_decoder` can process the raw bitstream.
 
-use std::io::{self, Cursor, Read};
-use xz2::stream::Stream;
 use super::{CompressionMethod, Decoder};
 use crate::CoreError;
+use std::io::{self, Cursor, Read};
+use xz2::stream::Stream;
 
 pub struct LzmaDecoder<R: Read> {
     inner: xz2::read::XzDecoder<std::io::Chain<Cursor<Vec<u8>>, R>>,
@@ -23,7 +23,10 @@ impl<R: Read + Send> LzmaDecoder<R> {
     pub fn new(input: R, properties: &[u8]) -> Result<Self, CoreError> {
         if properties.len() < 5 {
             return Err(CoreError::BitstreamError {
-                detail: format!("LZMA properties too short: {} bytes (need 5)", properties.len()),
+                detail: format!(
+                    "LZMA properties too short: {} bytes (need 5)",
+                    properties.len()
+                ),
             });
         }
 

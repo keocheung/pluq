@@ -67,17 +67,12 @@ impl GoogleDriveReadAt {
                 );
 
                 debug!(file_id = %self.file_id, "fetching Google Drive metadata");
-                let resp = self
-                    .client
-                    .get(&url)
-                    .send()
-                    .await
-                    .map_err(|e| {
-                        transport_error(GDriveError::Api {
-                            status: 0,
-                            detail: format!("metadata request failed: {e}"),
-                        })
-                    })?;
+                let resp = self.client.get(&url).send().await.map_err(|e| {
+                    transport_error(GDriveError::Api {
+                        status: 0,
+                        detail: format!("metadata request failed: {e}"),
+                    })
+                })?;
 
                 let status = resp.status();
                 if !status.is_success() {
@@ -130,15 +125,21 @@ fn classify_api_error(status: u16, body: &str, file_id: &str) -> GDriveError {
             file_id: file_id.to_string(),
         },
         403 => match reason.as_deref() {
-            Some("rateLimitExceeded") => GDriveError::RateLimited { retry_after_secs: 60 },
-            Some("userRateLimitExceeded") => GDriveError::RateLimited { retry_after_secs: 30 },
+            Some("rateLimitExceeded") => GDriveError::RateLimited {
+                retry_after_secs: 60,
+            },
+            Some("userRateLimitExceeded") => GDriveError::RateLimited {
+                retry_after_secs: 30,
+            },
             Some("dailyLimitExceeded") => GDriveError::QuotaExceeded,
             _ => GDriveError::NotPublic {
                 file_id: file_id.to_string(),
             },
         },
         401 => GDriveError::InvalidApiKey,
-        429 => GDriveError::RateLimited { retry_after_secs: 60 },
+        429 => GDriveError::RateLimited {
+            retry_after_secs: 60,
+        },
         _ => GDriveError::Api {
             status,
             detail: body.to_string(),
@@ -237,7 +238,10 @@ mod tests {
             panic!("expected Transport, got: {err:?}");
         };
         assert!(
-            matches!(e.downcast_ref::<GDriveError>(), Some(GDriveError::FileNotFound { .. })),
+            matches!(
+                e.downcast_ref::<GDriveError>(),
+                Some(GDriveError::FileNotFound { .. })
+            ),
             "expected FileNotFound, got: {:?}",
             e.downcast_ref::<GDriveError>()
         );
@@ -267,7 +271,10 @@ mod tests {
             panic!("expected Transport, got: {err:?}");
         };
         assert!(
-            matches!(e.downcast_ref::<GDriveError>(), Some(GDriveError::NotPublic { .. })),
+            matches!(
+                e.downcast_ref::<GDriveError>(),
+                Some(GDriveError::NotPublic { .. })
+            ),
             "expected NotPublic, got: {:?}",
             e.downcast_ref::<GDriveError>()
         );
@@ -297,7 +304,10 @@ mod tests {
             panic!("expected Transport, got: {err:?}");
         };
         assert!(
-            matches!(e.downcast_ref::<GDriveError>(), Some(GDriveError::InvalidApiKey)),
+            matches!(
+                e.downcast_ref::<GDriveError>(),
+                Some(GDriveError::InvalidApiKey)
+            ),
             "expected InvalidApiKey, got: {:?}",
             e.downcast_ref::<GDriveError>()
         );

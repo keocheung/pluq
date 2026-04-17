@@ -6,7 +6,7 @@ mod read_at;
 pub mod read_error;
 
 pub use caching_reader::CachingReadAt;
-pub use cluster::{build_clusters, FetchRegion, COALESCE_GAP, MAX_WASTE_RATIO};
+pub use cluster::{COALESCE_GAP, FetchRegion, MAX_WASTE_RATIO, build_clusters};
 pub use http_reader::HttpReadAt;
 pub use local_reader::LocalReadAt;
 pub use read_at::ReadAt;

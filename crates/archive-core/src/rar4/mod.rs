@@ -3,9 +3,9 @@
 //! Custom header parser for listing (enables cloud sniping via range requests).
 //! Extraction delegates to `unrar` — local shortcut or synthetic archive for cloud.
 
-pub(crate) mod parse;
 #[cfg(test)]
 mod batch_tests;
+pub(crate) mod parse;
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -18,16 +18,16 @@ use tokio_util::io::SyncIoBridge;
 
 use crate::archive_reader::{ArchiveReader, BatchResult, extract_selected_default};
 use crate::codec::CompressionMethod;
-use crate::io::{build_clusters, FetchRegion, LocalPath};
+use crate::io::{FetchRegion, LocalPath, build_clusters};
 use crate::junk;
 use crate::progress::ProgressReporter;
 use crate::rar::{
-    assemble_and_unrar_synthetic, build_unrar_progress_hooks, consume_snippets, map_unrar_error,
-    verify_and_stream_from_file, SnippetConfig, SnippetMsg, RAR4_SIGNATURE,
+    RAR4_SIGNATURE, SnippetConfig, SnippetMsg, assemble_and_unrar_synthetic,
+    build_unrar_progress_hooks, consume_snippets, map_unrar_error, verify_and_stream_from_file,
 };
 use crate::rar4::parse::{
-    build_rar4_end_block, parse_block_header, parse_file_header, parse_main_header, BLOCK_END,
-    BLOCK_FILE,
+    BLOCK_END, BLOCK_FILE, build_rar4_end_block, parse_block_header, parse_file_header,
+    parse_main_header,
 };
 use crate::time::dos_datetime_to_system_time;
 use crate::{ArchiveEntry, CoreError, ReadAt};
@@ -143,8 +143,7 @@ impl<R: ReadAt> Rar4Archive<R> {
             });
         }
 
-        let preamble_end =
-            (main_header.raw.archive_offset + main_header.raw.total_size) as usize;
+        let preamble_end = (main_header.raw.archive_offset + main_header.raw.total_size) as usize;
         if preamble_end > chunk.len() {
             return Err(CoreError::CorruptHeader {
                 offset: 7,
@@ -189,7 +188,11 @@ impl<R: ReadAt> Rar4Archive<R> {
     ///
     /// Returns an empty slice if the archive has not yet been scanned.
     pub fn entries(&self) -> &[ArchiveEntry] {
-        if self.scan_complete { &self.entries } else { &[] }
+        if self.scan_complete {
+            &self.entries
+        } else {
+            &[]
+        }
     }
 
     /// Entries with OS-generated junk filtered out.
@@ -299,8 +302,7 @@ impl<R: ReadAt> Rar4Archive<R> {
                 ($n:expr) => {
                     let needed = buf_pos + $n;
                     if buf.len() < needed {
-                        let stream_head =
-                            offset + (buf.len().saturating_sub(buf_pos)) as u64;
+                        let stream_head = offset + (buf.len().saturating_sub(buf_pos)) as u64;
                         let avail = size.saturating_sub(stream_head) as usize;
                         let to_read = (needed - buf.len()).min(avail);
                         if to_read > 0 {
@@ -332,9 +334,8 @@ impl<R: ReadAt> Rar4Archive<R> {
                     let file_hdr = parse_file_header(&buf[buf_pos..], block)?;
 
                     let is_solid = file_hdr.raw.head_flags & FLAG_SOLID != 0;
-                    let is_split = file_hdr.raw.head_flags
-                        & (FLAG_CONTINUED_PREV | FLAG_CONTINUED_NEXT)
-                        != 0;
+                    let is_split =
+                        file_hdr.raw.head_flags & (FLAG_CONTINUED_PREV | FLAG_CONTINUED_NEXT) != 0;
 
                     let header_size_u64 = file_hdr.raw.head_size as u64;
                     let pack_size = file_hdr.pack_size;
@@ -371,106 +372,94 @@ impl<R: ReadAt> Rar4Archive<R> {
                         if let Some(ref config) = snippet_config
                             && (config.filter)(&entry)
                         {
-                            let head_bytes_owned =
-                                buf[buf_pos..buf_pos + head_size].to_vec();
+                            let head_bytes_owned = buf[buf_pos..buf_pos + head_size].to_vec();
 
-                                let temp_file = tokio::task::spawn_blocking(
-                                    tempfile::NamedTempFile::new,
+                            let temp_file =
+                                tokio::task::spawn_blocking(tempfile::NamedTempFile::new)
+                                    .await
+                                    .map_err(|e| CoreError::BitstreamError {
+                                        detail: format!("spawn temp: {e}"),
+                                    })?
+                                    .map_err(|e| CoreError::BitstreamError {
+                                        detail: format!("create temp: {e}"),
+                                    })?;
+
+                            let std_file = temp_file.as_file().try_clone().map_err(|e| {
+                                CoreError::BitstreamError {
+                                    detail: format!("clone temp file: {e}"),
+                                }
+                            })?;
+                            let mut snippet_writer = tokio::io::BufWriter::with_capacity(
+                                64 * 1024,
+                                tokio::fs::File::from_std(std_file),
+                            );
+
+                            snippet_writer
+                                .write_all(&config.preamble)
+                                .await
+                                .map_err(snippet_write_err)?;
+                            snippet_writer
+                                .write_all(&head_bytes_owned)
+                                .await
+                                .map_err(snippet_write_err)?;
+
+                            buf_pos += head_size;
+                            let data_in_buf = (buf.len() - buf_pos).min(pack_size as usize);
+                            if data_in_buf > 0 {
+                                snippet_writer
+                                    .write_all(&buf[buf_pos..buf_pos + data_in_buf])
+                                    .await
+                                    .map_err(snippet_write_err)?;
+                            }
+                            buf_pos += data_in_buf;
+
+                            let data_remaining = pack_size - data_in_buf as u64;
+                            if data_remaining > 0 {
+                                buf.drain(..buf_pos);
+                                buf_pos = 0;
+                                tokio::io::copy(
+                                    &mut (&mut stream).take(data_remaining),
+                                    &mut snippet_writer,
                                 )
                                 .await
-                                .map_err(|e| CoreError::BitstreamError {
-                                    detail: format!("spawn temp: {e}"),
-                                })?
-                                .map_err(|e| CoreError::BitstreamError {
-                                    detail: format!("create temp: {e}"),
+                                .map_err(|e| scan_stream_err(e, offset))?;
+                            }
+
+                            snippet_writer
+                                .write_all(&config.end_block)
+                                .await
+                                .map_err(snippet_write_err)?;
+                            snippet_writer.flush().await.map_err(snippet_write_err)?;
+                            drop(snippet_writer);
+
+                            let (_, snippet_path) =
+                                temp_file.keep().map_err(|e| CoreError::BitstreamError {
+                                    detail: format!("keep temp file: {e}"),
                                 })?;
 
-                                let std_file = temp_file
-                                    .as_file()
-                                    .try_clone()
-                                    .map_err(|e| CoreError::BitstreamError {
-                                        detail: format!("clone temp file: {e}"),
-                                    })?;
-                                let mut snippet_writer =
-                                    tokio::io::BufWriter::with_capacity(
-                                        64 * 1024,
-                                        tokio::fs::File::from_std(std_file),
-                                    );
+                            if config
+                                .sender
+                                .send(SnippetMsg {
+                                    path: snippet_path.clone(),
+                                    entry: entry.clone(),
+                                    crc32: Some(file_hdr.file_crc),
+                                    blake2_hash: None,
+                                })
+                                .await
+                                .is_err()
+                            {
+                                let _ = std::fs::remove_file(&snippet_path);
+                                return Err(CoreError::BitstreamError {
+                                    detail: "extraction consumer dropped unexpectedly".into(),
+                                });
+                            }
 
-                                snippet_writer
-                                    .write_all(&config.preamble)
-                                    .await
-                                    .map_err(snippet_write_err)?;
-                                snippet_writer
-                                    .write_all(&head_bytes_owned)
-                                    .await
-                                    .map_err(snippet_write_err)?;
-
-                                buf_pos += head_size;
-                                let data_in_buf =
-                                    (buf.len() - buf_pos).min(pack_size as usize);
-                                if data_in_buf > 0 {
-                                    snippet_writer
-                                        .write_all(
-                                            &buf[buf_pos..buf_pos + data_in_buf],
-                                        )
-                                        .await
-                                        .map_err(snippet_write_err)?;
-                                }
-                                buf_pos += data_in_buf;
-
-                                let data_remaining = pack_size - data_in_buf as u64;
-                                if data_remaining > 0 {
-                                    buf.drain(..buf_pos);
-                                    buf_pos = 0;
-                                    tokio::io::copy(
-                                        &mut (&mut stream).take(data_remaining),
-                                        &mut snippet_writer,
-                                    )
-                                    .await
-                                    .map_err(|e| scan_stream_err(e, offset))?;
-                                }
-
-                                snippet_writer
-                                    .write_all(&config.end_block)
-                                    .await
-                                    .map_err(snippet_write_err)?;
-                                snippet_writer
-                                    .flush()
-                                    .await
-                                    .map_err(snippet_write_err)?;
-                                drop(snippet_writer);
-
-                                let (_, snippet_path) = temp_file.keep().map_err(
-                                    |e| CoreError::BitstreamError {
-                                        detail: format!("keep temp file: {e}"),
-                                    },
-                                )?;
-
-                                if config
-                                    .sender
-                                    .send(SnippetMsg {
-                                        path: snippet_path.clone(),
-                                        entry: entry.clone(),
-                                        crc32: Some(file_hdr.file_crc),
-                                        blake2_hash: None,
-                                    })
-                                    .await
-                                    .is_err()
-                                {
-                                    let _ = std::fs::remove_file(&snippet_path);
-                                    return Err(CoreError::BitstreamError {
-                                        detail: "extraction consumer dropped unexpectedly"
-                                            .into(),
-                                    });
-                                }
-
-                                offset += total_advance;
-                                progress
-                                    .lock()
-                                    .unwrap()
-                                    .on_scan_progress(offset, entries.len());
-                                continue;
+                            offset += total_advance;
+                            progress
+                                .lock()
+                                .unwrap()
+                                .on_scan_progress(offset, entries.len());
+                            continue;
                         }
                     }
 
@@ -565,12 +554,17 @@ impl<R: ReadAt> Rar4Archive<R> {
 
         // Encrypted entries must go through unrar (it handles AES decryption).
         if loc.is_encrypted {
-            return self.extract_compressed(entry, loc, sink, progress, password).await;
+            return self
+                .extract_compressed(entry, loc, sink, progress, password)
+                .await;
         }
 
         match loc.method {
             0x30 => self.extract_store(entry, loc, sink, progress).await,
-            0x31..=0x35 => self.extract_compressed(entry, loc, sink, progress, None).await,
+            0x31..=0x35 => {
+                self.extract_compressed(entry, loc, sink, progress, None)
+                    .await
+            }
             m => Err(CoreError::UnsupportedCompression {
                 algorithm: format!("RAR4 method 0x{m:02X}"),
             }),
@@ -612,18 +606,18 @@ impl<R: ReadAt> Rar4Archive<R> {
         let mut sync_reader = SyncIoBridge::new_with_handle(stream, handle);
 
         use std::io::Write;
-        let temp_file = tokio::task::spawn_blocking(move || -> Result<tempfile::NamedTempFile, CoreError> {
+        let temp_file =
+            tokio::task::spawn_blocking(move || -> Result<tempfile::NamedTempFile, CoreError> {
                 const CHUNK_SIZE: usize = 64 * 1024;
 
                 let mut crc_hasher = crc32fast::Hasher::new();
                 let mut total_written: u64 = 0;
                 let mut chunk_buf = vec![0u8; CHUNK_SIZE];
-                
-                let temp_file = tempfile::NamedTempFile::new().map_err(|e| {
-                    CoreError::BitstreamError {
+
+                let temp_file =
+                    tempfile::NamedTempFile::new().map_err(|e| CoreError::BitstreamError {
                         detail: format!("failed to create temp file: {e}"),
-                    }
-                })?;
+                    })?;
                 let mut temp_writer = std::io::BufWriter::new(temp_file.as_file());
 
                 {
@@ -634,8 +628,7 @@ impl<R: ReadAt> Rar4Archive<R> {
                 loop {
                     let n = sync_reader.read(&mut chunk_buf).map_err(|io_err| {
                         if let Some(inner) = io_err.into_inner()
-                            && let Ok(read_error) =
-                                inner.downcast::<crate::io::ReadError>()
+                            && let Ok(read_error) = inner.downcast::<crate::io::ReadError>()
                         {
                             return CoreError::Io(*read_error);
                         }
@@ -648,7 +641,7 @@ impl<R: ReadAt> Rar4Archive<R> {
                     }
 
                     crc_hasher.update(&chunk_buf[..n]);
-                    
+
                     temp_writer.write_all(&chunk_buf[..n]).map_err(|e| {
                         CoreError::BitstreamError {
                             detail: format!("temp file write failed for '{entry_name}': {e}"),
@@ -667,10 +660,8 @@ impl<R: ReadAt> Rar4Archive<R> {
                     }
                 }
 
-                temp_writer.flush().map_err(|e| {
-                    CoreError::BitstreamError {
-                        detail: format!("temp file flush failed for '{entry_name}': {e}"),
-                    }
+                temp_writer.flush().map_err(|e| CoreError::BitstreamError {
+                    detail: format!("temp file flush failed for '{entry_name}': {e}"),
                 })?;
                 drop(temp_writer);
 
@@ -699,16 +690,16 @@ impl<R: ReadAt> Rar4Archive<R> {
 
         // Step 3 (async): write verified bytes to the sink.
         // Copy verified temp file to the final sink.
-        let mut temp_reader = tokio::fs::File::open(temp_file.path())
-            .await
-            .map_err(|e| CoreError::BitstreamError {
+        let mut temp_reader = tokio::fs::File::open(temp_file.path()).await.map_err(|e| {
+            CoreError::BitstreamError {
                 detail: format!("failed to reopen temp file: {e}"),
-            })?;
-        let written = tokio::io::copy(&mut temp_reader, sink)
-            .await
-            .map_err(|e| CoreError::BitstreamError {
+            }
+        })?;
+        let written = tokio::io::copy(&mut temp_reader, sink).await.map_err(|e| {
+            CoreError::BitstreamError {
                 detail: format!("copy to sink failed: {e}"),
-            })?;
+            }
+        })?;
         // temp_file dropped here → auto-deleted.
         Ok(written)
     }
@@ -756,11 +747,10 @@ impl<R: ReadAt> Rar4Archive<R> {
         let (cancel, on_progress) = build_unrar_progress_hooks(&progress);
         let out_tmp =
             tokio::task::spawn_blocking(move || -> Result<tempfile::NamedTempFile, CoreError> {
-                let out_tmp = tempfile::NamedTempFile::new().map_err(|e| {
-                    CoreError::BitstreamError {
+                let out_tmp =
+                    tempfile::NamedTempFile::new().map_err(|e| CoreError::BitstreamError {
                         detail: format!("failed to create extraction temp file: {e}"),
-                    }
-                })?;
+                    })?;
                 let out_path = out_tmp.path().to_path_buf();
 
                 let mut archive = match &password_bytes {
@@ -778,22 +768,15 @@ impl<R: ReadAt> Rar4Archive<R> {
                         Some(h) => h,
                         None => {
                             return Err(CoreError::InvalidFormat {
-                                message: format!(
-                                    "entry '{target_name}' not found in archive"
-                                ),
-                            })
+                                message: format!("entry '{target_name}' not found in archive"),
+                            });
                         }
                     };
 
-                    let name =
-                        header.entry().filename.to_string_lossy().replace('\\', "/");
+                    let name = header.entry().filename.to_string_lossy().replace('\\', "/");
                     if name == target_name {
                         header
-                            .extract_to_with_progress(
-                                &out_path,
-                                Some(cancel),
-                                Some(on_progress),
-                            )
+                            .extract_to_with_progress(&out_path, Some(cancel), Some(on_progress))
                             .map_err(map_unrar_error)?;
                         return Ok(out_tmp);
                     }
@@ -861,22 +844,20 @@ impl<R: ReadAt> Rar4Archive<R> {
         // 3. Assemble synthetic RAR4 archive and extract with unrar.
         let out_tmp =
             tokio::task::spawn_blocking(move || -> Result<tempfile::NamedTempFile, CoreError> {
-                let temp_file = tempfile::NamedTempFile::new().map_err(|e| {
-                    CoreError::BitstreamError {
+                let temp_file =
+                    tempfile::NamedTempFile::new().map_err(|e| CoreError::BitstreamError {
                         detail: format!("failed to create temp file: {e}"),
-                    }
-                })?;
+                    })?;
 
                 {
                     use std::io::Write;
                     let mut writer = std::io::BufWriter::new(temp_file.as_file());
-                    for chunk in [
-                        archive_preamble.as_ref(),
-                        file_header_bytes.as_ref(),
-                    ] {
-                        writer.write_all(chunk).map_err(|e| CoreError::BitstreamError {
-                            detail: format!("temp file write failed: {e}"),
-                        })?;
+                    for chunk in [archive_preamble.as_ref(), file_header_bytes.as_ref()] {
+                        writer
+                            .write_all(chunk)
+                            .map_err(|e| CoreError::BitstreamError {
+                                detail: format!("temp file write failed: {e}"),
+                            })?;
                     }
 
                     // Stream compressed data from network to temp file (O(1) memory).
@@ -905,11 +886,10 @@ impl<R: ReadAt> Rar4Archive<R> {
                 }
 
                 // Create second temp file for extraction output.
-                let out_tmp = tempfile::NamedTempFile::new().map_err(|e| {
-                    CoreError::BitstreamError {
+                let out_tmp =
+                    tempfile::NamedTempFile::new().map_err(|e| CoreError::BitstreamError {
                         detail: format!("failed to create extraction temp file: {e}"),
-                    }
-                })?;
+                    })?;
                 let out_path = out_tmp.path().to_path_buf();
 
                 let temp_path = temp_file.path().to_path_buf();
@@ -965,7 +945,11 @@ impl<R: ReadAt> Rar4Archive<R> {
         SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn AsyncWrite + Send + Unpin>> + Send,
     {
         if entries.is_empty() {
-            return Ok(BatchResult { bytes_written: 0, succeeded: 0, failed: vec![] });
+            return Ok(BatchResult {
+                bytes_written: 0,
+                succeeded: 0,
+                failed: vec![],
+            });
         }
 
         // Local path: delegate to default loop (unrar opens the real file directly).
@@ -974,7 +958,11 @@ impl<R: ReadAt> Rar4Archive<R> {
         }
 
         // Cloud path: build clusters.
-        let mut batch = BatchResult { bytes_written: 0, succeeded: 0, failed: vec![] };
+        let mut batch = BatchResult {
+            bytes_written: 0,
+            succeeded: 0,
+            failed: vec![],
+        };
 
         let work: Vec<(&ArchiveEntry, &Rar4EntryLocation)> = entries
             .iter()
@@ -1044,13 +1032,10 @@ impl<R: ReadAt> Rar4Archive<R> {
 
                         let gap = loc.header_offset.saturating_sub(stream_pos);
                         if gap > 0 {
-                            std::io::copy(
-                                &mut (&mut sync_reader).take(gap),
-                                &mut std::io::sink(),
-                            )
-                            .map_err(|e| CoreError::BitstreamError {
-                                detail: format!("skip gap failed: {e}"),
-                            })?;
+                            std::io::copy(&mut (&mut sync_reader).take(gap), &mut std::io::sink())
+                                .map_err(|e| CoreError::BitstreamError {
+                                    detail: format!("skip gap failed: {e}"),
+                                })?;
                             stream_pos += gap;
                         }
 
@@ -1143,7 +1128,11 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for Rar4Archive<R> {
         Rar4Archive::extract(self, entry, sink, progress, password).await
     }
 
-    async fn test(&self, entry: &ArchiveEntry, progress: Arc<Mutex<dyn ProgressReporter>>) -> Result<(), CoreError> {
+    async fn test(
+        &self,
+        entry: &ArchiveEntry,
+        progress: Arc<Mutex<dyn ProgressReporter>>,
+    ) -> Result<(), CoreError> {
         Rar4Archive::test(self, entry, progress).await
     }
 
@@ -1155,8 +1144,8 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for Rar4Archive<R> {
         password: Option<&[u8]>,
     ) -> impl std::future::Future<Output = Result<BatchResult, CoreError>> + Send
     where
-        SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn tokio::io::AsyncWrite + Send + Unpin>>
-            + Send,
+        SinkFn:
+            FnMut(&ArchiveEntry) -> Option<Box<dyn tokio::io::AsyncWrite + Send + Unpin>> + Send,
     {
         Rar4Archive::extract_selected(self, entries, sink_factory, progress, password)
     }
@@ -1224,9 +1213,11 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for Rar4Archive<R> {
                     Rar4Archive::extract(self, &entry, &mut buf, progress.clone(), password)
                         .await?;
                 use std::io::Write;
-                sync_sink.write_all(&buf).map_err(|e| CoreError::BitstreamError {
-                    detail: format!("write to sink failed: {e}"),
-                })?;
+                sync_sink
+                    .write_all(&buf)
+                    .map_err(|e| CoreError::BitstreamError {
+                        detail: format!("write to sink failed: {e}"),
+                    })?;
                 total += bytes;
             }
             return Ok(total);
@@ -1241,8 +1232,12 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for Rar4Archive<R> {
 
         // Spawn consumer.
         let consumer_progress = progress.clone();
-        let consumer =
-            tokio::spawn(consume_snippets(rx, sink_factory, consumer_progress, password_owned));
+        let consumer = tokio::spawn(consume_snippets(
+            rx,
+            sink_factory,
+            consumer_progress,
+            password_owned,
+        ));
 
         // Build snippet config.
         let config = SnippetConfig {
@@ -1252,7 +1247,9 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for Rar4Archive<R> {
             filter: Box::new(filter),
         };
 
-        { progress.lock().unwrap().on_scan_start(size); }
+        {
+            progress.lock().unwrap().on_scan_start(size);
+        }
 
         // Run producer (in current task — borrows self.reader).
         let (entries, locations) =
@@ -1260,11 +1257,9 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for Rar4Archive<R> {
                 .await?;
 
         // Await consumer.
-        let total_bytes = consumer
-            .await
-            .map_err(|e| CoreError::BitstreamError {
-                detail: format!("consumer panicked: {e}"),
-            })??;
+        let total_bytes = consumer.await.map_err(|e| CoreError::BitstreamError {
+            detail: format!("consumer panicked: {e}"),
+        })??;
 
         // Populate self with harvested metadata.
         let entry_count = entries.len();
@@ -1272,7 +1267,9 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for Rar4Archive<R> {
         self.locations = locations;
         self.scan_complete = true;
 
-        { progress.lock().unwrap().on_scan_complete(entry_count); }
+        {
+            progress.lock().unwrap().on_scan_complete(entry_count);
+        }
 
         Ok(total_bytes)
     }
@@ -1281,7 +1278,9 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for Rar4Archive<R> {
 // ── Helper functions ──────────────────────────────────────────────────────────
 
 fn snippet_write_err(e: std::io::Error) -> CoreError {
-    CoreError::BitstreamError { detail: format!("snippet write: {e}") }
+    CoreError::BitstreamError {
+        detail: format!("snippet write: {e}"),
+    }
 }
 
 /// Map a stream `io::Error` to `CoreError` for the elastic scan.

@@ -1,18 +1,16 @@
 use std::sync::{Arc, Mutex};
 
 use archive_core::{
-    ArchiveEntry, ArchiveReader, BatchResult, CoreError, LocalPath, ProgressReporter, Rar4Archive,
-    RarArchive, ReadAt, ScanInfo, ZipArchive, RAR4_SIGNATURE, RAR5_SIGNATURE,
+    ArchiveEntry, ArchiveReader, BatchResult, CoreError, LocalPath, ProgressReporter,
+    RAR4_SIGNATURE, RAR5_SIGNATURE, Rar4Archive, RarArchive, ReadAt, ScanInfo, ZipArchive,
 };
 use bytes::Bytes;
 use tokio::io::AsyncWrite;
 use tracing::{debug, info};
 
-use crate::cache::{
-    cache_path_for, ArchiveCache, ArchiveFingerprint, FormatCacheState,
-};
+use crate::cache::{ArchiveCache, ArchiveFingerprint, FormatCacheState, cache_path_for};
 use crate::entry_tree::EntryTree;
-use crate::error::{translate_core_error, ArchiveError};
+use crate::error::{ArchiveError, translate_core_error};
 use crate::opened::{Opened, PendingArchive};
 
 /// Internal enum for format-specific archive implementations.
@@ -41,9 +39,7 @@ impl<R: ReadAt + LocalPath + 'static> std::fmt::Debug for Archive<R> {
             ArchiveInner::Rar(_) => "Rar",
             ArchiveInner::Rar4(_) => "Rar4",
         };
-        f.debug_struct("Archive")
-            .field("format", &format)
-            .finish()
+        f.debug_struct("Archive").field("format", &format).finish()
     }
 }
 
@@ -104,10 +100,14 @@ impl<R: ReadAt + LocalPath + 'static> Archive<R> {
         // RAR5?
         if magic.len() >= 8 && magic[..8] == RAR5_SIGNATURE {
             info!("format detected: RAR5");
-            let rar = RarArchive::open(reader).await.map_err(translate_core_error)?;
+            let rar = RarArchive::open(reader)
+                .await
+                .map_err(translate_core_error)?;
             let info = rar.scan_info();
             return if matches!(info, ScanInfo::Ready) {
-                let archive = Self { inner: ArchiveInner::Rar(rar) };
+                let archive = Self {
+                    inner: ArchiveInner::Rar(rar),
+                };
                 // Save cache for local files (already scanned during open).
                 if let Some(cache_path) = cache_path_for(source) {
                     let _ = archive.save_cache(&fingerprint, &cache_path);
@@ -126,10 +126,14 @@ impl<R: ReadAt + LocalPath + 'static> Archive<R> {
         // RAR4?
         if magic.len() >= 7 && magic[..7] == RAR4_SIGNATURE {
             info!("format detected: RAR4");
-            let rar4 = Rar4Archive::open(reader).await.map_err(translate_core_error)?;
+            let rar4 = Rar4Archive::open(reader)
+                .await
+                .map_err(translate_core_error)?;
             let info = rar4.scan_info();
             return if matches!(info, ScanInfo::Ready) {
-                let archive = Self { inner: ArchiveInner::Rar4(rar4) };
+                let archive = Self {
+                    inner: ArchiveInner::Rar4(rar4),
+                };
                 // Save cache for local files (already scanned during open).
                 if let Some(cache_path) = cache_path_for(source) {
                     let _ = archive.save_cache(&fingerprint, &cache_path);
@@ -147,8 +151,12 @@ impl<R: ReadAt + LocalPath + 'static> Archive<R> {
 
         // Fall back to ZIP (reads EOCD from the end of the file).
         info!("format detected: ZIP (fallback)");
-        let zip = ZipArchive::open(reader).await.map_err(translate_core_error)?;
-        let archive = Self { inner: ArchiveInner::Zip(zip) };
+        let zip = ZipArchive::open(reader)
+            .await
+            .map_err(translate_core_error)?;
+        let archive = Self {
+            inner: ArchiveInner::Zip(zip),
+        };
         // Save cache for ZIP (listing is fast but caching saves 2 range requests on reopen).
         if let Some(cache_path) = cache_path_for(source) {
             let _ = archive.save_cache(&fingerprint, &cache_path);
@@ -162,9 +170,16 @@ impl<R: ReadAt + LocalPath + 'static> Archive<R> {
         match cache.format_state {
             FormatCacheState::Zip { locations } => {
                 let zip = ZipArchive::from_cached(reader, cache.entries, locations);
-                Self { inner: ArchiveInner::Zip(zip) }
+                Self {
+                    inner: ArchiveInner::Zip(zip),
+                }
             }
-            FormatCacheState::Rar { locations, archive_preamble, end_block, archive_size } => {
+            FormatCacheState::Rar {
+                locations,
+                archive_preamble,
+                end_block,
+                archive_size,
+            } => {
                 let rar = RarArchive::from_cached(
                     reader,
                     cache.entries,
@@ -174,9 +189,16 @@ impl<R: ReadAt + LocalPath + 'static> Archive<R> {
                     local_path,
                     archive_size,
                 );
-                Self { inner: ArchiveInner::Rar(rar) }
+                Self {
+                    inner: ArchiveInner::Rar(rar),
+                }
             }
-            FormatCacheState::Rar4 { locations, archive_preamble, end_block, archive_size } => {
+            FormatCacheState::Rar4 {
+                locations,
+                archive_preamble,
+                end_block,
+                archive_size,
+            } => {
                 let rar4 = Rar4Archive::from_cached(
                     reader,
                     cache.entries,
@@ -186,7 +208,9 @@ impl<R: ReadAt + LocalPath + 'static> Archive<R> {
                     local_path,
                     archive_size,
                 );
-                Self { inner: ArchiveInner::Rar4(rar4) }
+                Self {
+                    inner: ArchiveInner::Rar4(rar4),
+                }
             }
         }
     }
@@ -287,18 +311,21 @@ impl<R: ReadAt + LocalPath + 'static> Archive<R> {
         password: Option<&[u8]>,
     ) -> Result<BatchResult, ArchiveError>
     where
-        SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn tokio::io::AsyncWrite + Send + Unpin>>
-            + Send,
+        SinkFn:
+            FnMut(&ArchiveEntry) -> Option<Box<dyn tokio::io::AsyncWrite + Send + Unpin>> + Send,
     {
         match &self.inner {
             ArchiveInner::Zip(z) => {
-                z.extract_selected(entries, sink_factory, progress, password).await
+                z.extract_selected(entries, sink_factory, progress, password)
+                    .await
             }
             ArchiveInner::Rar(r) => {
-                r.extract_selected(entries, sink_factory, progress, password).await
+                r.extract_selected(entries, sink_factory, progress, password)
+                    .await
             }
             ArchiveInner::Rar4(r) => {
-                r.extract_selected(entries, sink_factory, progress, password).await
+                r.extract_selected(entries, sink_factory, progress, password)
+                    .await
             }
         }
         .map_err(translate_core_error)
@@ -373,12 +400,18 @@ impl<R: ReadAt + LocalPath + 'static> Archive<R> {
         SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn std::io::Write + Send>> + Send + 'static,
     {
         match &mut self.inner {
-            ArchiveInner::Zip(z) => z.extract_all_streaming(filter, sink_factory, progress, password)
-                .await.map_err(translate_core_error),
-            ArchiveInner::Rar(r) => r.extract_all_streaming(filter, sink_factory, progress, password)
-                .await.map_err(translate_core_error),
-            ArchiveInner::Rar4(r) => r.extract_all_streaming(filter, sink_factory, progress, password)
-                .await.map_err(translate_core_error),
+            ArchiveInner::Zip(z) => z
+                .extract_all_streaming(filter, sink_factory, progress, password)
+                .await
+                .map_err(translate_core_error),
+            ArchiveInner::Rar(r) => r
+                .extract_all_streaming(filter, sink_factory, progress, password)
+                .await
+                .map_err(translate_core_error),
+            ArchiveInner::Rar4(r) => r
+                .extract_all_streaming(filter, sink_factory, progress, password)
+                .await
+                .map_err(translate_core_error),
         }
     }
 }
@@ -415,7 +448,8 @@ mod tests {
         let mut buf = Vec::new();
         let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
         for (name, data) in entries {
-            zw.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+            zw.start_file(*name, zip::write::SimpleFileOptions::default())
+                .unwrap();
             zw.write_all(data).unwrap();
         }
         zw.finish().unwrap();
@@ -454,7 +488,11 @@ mod tests {
         let buf = build_zip(&[("hello.txt", b"hello")]);
         let (_f, path) = write_temp(&buf);
         let archive = Archive::open_reader(&path, LocalReadAt::new(&path))
-            .await.unwrap().ready().await.unwrap();
+            .await
+            .unwrap()
+            .ready()
+            .await
+            .unwrap();
         assert!(!archive.entries().is_empty());
         assert_eq!(archive.entries()[0].name, "hello.txt");
     }
@@ -474,7 +512,9 @@ mod tests {
     async fn open_zip_returns_ready() {
         let buf = build_zip(&[("hello.txt", b"hello")]);
         let (_f, path) = write_temp(&buf);
-        let opened = Archive::open_reader(&path, LocalReadAt::new(&path)).await.unwrap();
+        let opened = Archive::open_reader(&path, LocalReadAt::new(&path))
+            .await
+            .unwrap();
         assert!(matches!(opened, Opened::Ready(_)));
     }
 
@@ -482,7 +522,9 @@ mod tests {
     async fn open_rar5_local_returns_ready() {
         // Local RAR5: sequential scan runs during open → always Ready.
         let path = rar_fixture("rar5_store.rar");
-        let opened = Archive::open_reader(&path, LocalReadAt::new(&path)).await.unwrap();
+        let opened = Archive::open_reader(&path, LocalReadAt::new(&path))
+            .await
+            .unwrap();
         assert!(matches!(opened, Opened::Ready(_)));
     }
 
@@ -504,7 +546,9 @@ mod tests {
     async fn open_rar4_returns_ready() {
         // RAR4 always scans during open — never NeedsScan.
         let path = rar_fixture("rar4_sample.rar");
-        let opened = Archive::open_reader(&path, LocalReadAt::new(&path)).await.unwrap();
+        let opened = Archive::open_reader(&path, LocalReadAt::new(&path))
+            .await
+            .unwrap();
         assert!(matches!(opened, Opened::Ready(_)));
     }
 
@@ -521,7 +565,11 @@ mod tests {
 
         // Open and get the archive.
         let archive = Archive::open_reader(&path, LocalReadAt::new(&path))
-            .await.unwrap().ready().await.unwrap();
+            .await
+            .unwrap()
+            .ready()
+            .await
+            .unwrap();
         let entry_count = archive.entries().len();
         assert!(entry_count > 0);
 
@@ -538,7 +586,10 @@ mod tests {
         // Load and verify round-trip.
         let cached = ArchiveCache::load(cache_file.path()).unwrap();
         assert_eq!(cached.entries.len(), entry_count);
-        assert!(matches!(cached.format_state, crate::cache::FormatCacheState::Zip { .. }));
+        assert!(matches!(
+            cached.format_state,
+            crate::cache::FormatCacheState::Zip { .. }
+        ));
     }
 
     #[tokio::test]
@@ -548,8 +599,13 @@ mod tests {
 
         // First open: scans and saves cache.
         let archive = Archive::open_reader(&fixture_path, LocalReadAt::new(&fixture_path))
-            .await.unwrap().ready().await.unwrap();
-        let expected_entries: Vec<String> = archive.entries().iter().map(|e| e.name.clone()).collect();
+            .await
+            .unwrap()
+            .ready()
+            .await
+            .unwrap();
+        let expected_entries: Vec<String> =
+            archive.entries().iter().map(|e| e.name.clone()).collect();
         assert!(!expected_entries.is_empty());
 
         // Manually save to our isolated temp dir.
@@ -573,7 +629,8 @@ mod tests {
 
         let restored = Archive::from_cache(cached, LocalReadAt::new(&fixture_path));
 
-        let restored_entries: Vec<String> = restored.entries().iter().map(|e| e.name.clone()).collect();
+        let restored_entries: Vec<String> =
+            restored.entries().iter().map(|e| e.name.clone()).collect();
         assert_eq!(restored_entries, expected_entries);
     }
 
@@ -582,8 +639,13 @@ mod tests {
         let fixture_path = rar_fixture("rar4_sample.rar");
 
         let archive = Archive::open_reader(&fixture_path, LocalReadAt::new(&fixture_path))
-            .await.unwrap().ready().await.unwrap();
-        let expected_entries: Vec<String> = archive.entries().iter().map(|e| e.name.clone()).collect();
+            .await
+            .unwrap()
+            .ready()
+            .await
+            .unwrap();
+        let expected_entries: Vec<String> =
+            archive.entries().iter().map(|e| e.name.clone()).collect();
         assert!(!expected_entries.is_empty());
 
         let fingerprint = crate::cache::ArchiveFingerprint {
@@ -605,7 +667,8 @@ mod tests {
 
         let restored = Archive::from_cache(cached, LocalReadAt::new(&fixture_path));
 
-        let restored_entries: Vec<String> = restored.entries().iter().map(|e| e.name.clone()).collect();
+        let restored_entries: Vec<String> =
+            restored.entries().iter().map(|e| e.name.clone()).collect();
         assert_eq!(restored_entries, expected_entries);
     }
 
@@ -618,7 +681,11 @@ mod tests {
         ]);
         let (_f, path) = write_temp(&buf);
         let archive = Archive::open_reader(&path, LocalReadAt::new(&path))
-            .await.unwrap().ready().await.unwrap();
+            .await
+            .unwrap()
+            .ready()
+            .await
+            .unwrap();
 
         let all_entries = archive.entries_clean();
         assert_eq!(all_entries.len(), 3);
@@ -638,7 +705,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.succeeded, 2);
-        assert_eq!(result.bytes_written, b"hello world".len() as u64 + b"foo bar baz".len() as u64);
+        assert_eq!(
+            result.bytes_written,
+            b"hello world".len() as u64 + b"foo bar baz".len() as u64
+        );
         assert!(result.failed.is_empty());
     }
 
@@ -647,7 +717,11 @@ mod tests {
         let buf = build_zip(&[("x.txt", b"data"), ("y.txt", b"more data")]);
         let (_f, path) = write_temp(&buf);
         let archive = Archive::open_reader(&path, LocalReadAt::new(&path))
-            .await.unwrap().ready().await.unwrap();
+            .await
+            .unwrap()
+            .ready()
+            .await
+            .unwrap();
 
         let all_entries = archive.entries_clean();
         #[allow(clippy::iter_cloned_collect)]

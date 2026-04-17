@@ -32,7 +32,10 @@ impl std::fmt::Display for ProviderError {
             Self::FileNotFound { provider } => {
                 write!(f, "{provider}: file not found or deleted")
             }
-            Self::RateLimited { provider, retry_after } => {
+            Self::RateLimited {
+                provider,
+                retry_after,
+            } => {
                 write!(f, "{provider}: rate limited")?;
                 if let Some(d) = retry_after {
                     write!(f, " (retry after {}s)", d.as_secs())?;
@@ -79,16 +82,30 @@ pub fn classify_transport(err: &(dyn std::error::Error + 'static)) -> Option<Pro
 
 fn classify_gdrive(e: &GDriveError) -> ProviderError {
     match e {
-        GDriveError::FileNotFound { .. } => ProviderError::FileNotFound { provider: "Google Drive" },
-        GDriveError::NotPublic { .. } => ProviderError::NotPublic { provider: "Google Drive" },
-        GDriveError::InvalidApiKey => ProviderError::InvalidCredentials { provider: "Google Drive" },
-        GDriveError::ApiKeyMissing => ProviderError::InvalidCredentials { provider: "Google Drive" },
+        GDriveError::FileNotFound { .. } => ProviderError::FileNotFound {
+            provider: "Google Drive",
+        },
+        GDriveError::NotPublic { .. } => ProviderError::NotPublic {
+            provider: "Google Drive",
+        },
+        GDriveError::InvalidApiKey => ProviderError::InvalidCredentials {
+            provider: "Google Drive",
+        },
+        GDriveError::ApiKeyMissing => ProviderError::InvalidCredentials {
+            provider: "Google Drive",
+        },
         GDriveError::RateLimited { retry_after_secs } => ProviderError::RateLimited {
             provider: "Google Drive",
             retry_after: Some(Duration::from_secs(*retry_after_secs)),
         },
-        GDriveError::QuotaExceeded => ProviderError::QuotaExceeded { provider: "Google Drive" },
-        GDriveError::InvalidUrl { .. } => ProviderError::InvalidCredentials { provider: "Google Drive" },
-        GDriveError::Api { .. } => ProviderError::InvalidCredentials { provider: "Google Drive" },
+        GDriveError::QuotaExceeded => ProviderError::QuotaExceeded {
+            provider: "Google Drive",
+        },
+        GDriveError::InvalidUrl { .. } => ProviderError::InvalidCredentials {
+            provider: "Google Drive",
+        },
+        GDriveError::Api { .. } => ProviderError::InvalidCredentials {
+            provider: "Google Drive",
+        },
     }
 }

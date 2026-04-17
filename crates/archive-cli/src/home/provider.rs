@@ -65,9 +65,18 @@ mod tests {
 
     #[test]
     fn test_serde_names() {
-        assert_eq!(serde_json::to_string(&Provider::Local).unwrap(), "\"Local\"");
+        assert_eq!(
+            serde_json::to_string(&Provider::Local).unwrap(),
+            "\"Local\""
+        );
         assert_eq!(serde_json::to_string(&Provider::Http).unwrap(), "\"Http\"");
-        assert_eq!(serde_json::to_string(&Provider::GDrive).unwrap(), "\"GDrive\"");
-        assert_eq!(serde_json::to_string(&Provider::Dropbox).unwrap(), "\"Dropbox\"");
+        assert_eq!(
+            serde_json::to_string(&Provider::GDrive).unwrap(),
+            "\"GDrive\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Provider::Dropbox).unwrap(),
+            "\"Dropbox\""
+        );
     }
 }

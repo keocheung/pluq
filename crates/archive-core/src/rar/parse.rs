@@ -140,11 +140,7 @@ pub(crate) fn parse_block_header(
 
     trace!(
         archive_offset,
-        block_type,
-        header_size,
-        data_size,
-        total_size,
-        "parsed block header"
+        block_type, header_size, data_size, total_size, "parsed block header"
     );
 
     Ok(RawBlockHeader {
@@ -179,8 +175,15 @@ pub(crate) fn parse_compression_info(raw: u64) -> RarCompressionInfo {
     let solid = (raw >> 6) & 0x01 != 0;
     let method = ((raw >> 7) & 0x07) as u8;
     let dict_exponent = (raw >> 10) & 0x1F;
-    let dict_size = (128 * 1024u64).checked_shl(dict_exponent as u32).unwrap_or(u64::MAX);
-    RarCompressionInfo { version, solid, method, dict_size }
+    let dict_size = (128 * 1024u64)
+        .checked_shl(dict_exponent as u32)
+        .unwrap_or(u64::MAX);
+    RarCompressionInfo {
+        version,
+        solid,
+        method,
+        dict_size,
+    }
 }
 
 // ── Extra area record structs ─────────────────────────────────────────────────
@@ -289,8 +292,7 @@ pub(crate) fn parse_file_header(
         .replace('\\', "/");
     pos += name_len;
 
-    let is_directory =
-        (file_flags & FILE_FLAG_DIRECTORY != 0) || name.ends_with('/');
+    let is_directory = (file_flags & FILE_FLAG_DIRECTORY != 0) || name.ends_with('/');
 
     let extra_area_size = raw.extra_area_size as usize;
     let (encryption, blake2_hash, high_precision_time) = if extra_area_size > 0 {
@@ -367,9 +369,7 @@ fn parse_file_extra_area(
 
         match record_type {
             0x01 => {
-                if let Ok(enc) =
-                    parse_encryption_record(record_data, rpos, archive_offset)
-                {
+                if let Ok(enc) = parse_encryption_record(record_data, rpos, archive_offset) {
                     encryption = Some(enc);
                 }
             }
@@ -416,7 +416,13 @@ fn parse_encryption_record(
         None
     };
 
-    Ok(RarFileEncryption { version, kdf_count, salt, iv, check_value })
+    Ok(RarFileEncryption {
+        version,
+        kdf_count,
+        salt,
+        iv,
+        check_value,
+    })
 }
 
 fn parse_hash_record(data: &[u8], mut pos: usize) -> Result<[u8; 32], CoreError> {
@@ -439,7 +445,11 @@ fn parse_hash_record(data: &[u8], mut pos: usize) -> Result<[u8; 32], CoreError>
 
 fn parse_time_record(data: &[u8], mut pos: usize) -> Result<RarHighPrecisionTime, CoreError> {
     if pos >= data.len() {
-        return Ok(RarHighPrecisionTime { mtime_ns: None, ctime_ns: None, atime_ns: None });
+        return Ok(RarHighPrecisionTime {
+            mtime_ns: None,
+            ctime_ns: None,
+            atime_ns: None,
+        });
     }
 
     let flags = read_vint(data, &mut pos)?;
@@ -463,7 +473,11 @@ fn parse_time_record(data: &[u8], mut pos: usize) -> Result<RarHighPrecisionTime
         None
     };
 
-    Ok(RarHighPrecisionTime { mtime_ns, ctime_ns, atime_ns })
+    Ok(RarHighPrecisionTime {
+        mtime_ns,
+        ctime_ns,
+        atime_ns,
+    })
 }
 
 /// Parse one timestamp from the time record extra area.
@@ -524,10 +538,7 @@ pub(crate) fn parse_main_header(
     if raw.block_type != 1 {
         return Err(CoreError::CorruptHeader {
             offset: archive_offset,
-            reason: format!(
-                "expected main header (type 1), got type {}",
-                raw.block_type
-            ),
+            reason: format!("expected main header (type 1), got type {}", raw.block_type),
         });
     }
 
@@ -555,7 +566,12 @@ pub(crate) fn parse_main_header(
         None
     };
 
-    Ok(RarMainHeader { raw, archive_flags, is_solid, locator })
+    Ok(RarMainHeader {
+        raw,
+        archive_flags,
+        is_solid,
+        locator,
+    })
 }
 
 /// Scan the main header extra area for the locator record (type 0x01).
@@ -589,7 +605,10 @@ fn parse_main_extra_area(data: &[u8]) -> Option<RarLocator> {
             } else {
                 None
             };
-            return Some(RarLocator { quick_open_offset, recovery_offset });
+            return Some(RarLocator {
+                quick_open_offset,
+                recovery_offset,
+            });
         }
     }
     None
@@ -626,10 +645,7 @@ pub(crate) struct QoCachedBlock {
 /// - `data`            bytes — the cached header block bytes
 ///
 /// Unknown or corrupt entries are skipped gracefully.
-pub(crate) fn parse_quick_open_data(
-    qo_data: &[u8],
-    qo_block_offset: u64,
-) -> Vec<QoCachedBlock> {
+pub(crate) fn parse_quick_open_data(qo_data: &[u8], qo_block_offset: u64) -> Vec<QoCachedBlock> {
     let mut blocks = Vec::new();
     let mut pos = 0usize;
 
@@ -638,8 +654,7 @@ pub(crate) fn parse_quick_open_data(
         if pos + 4 > qo_data.len() {
             break;
         }
-        let structure_crc =
-            u32::from_le_bytes(qo_data[pos..pos + 4].try_into().unwrap());
+        let structure_crc = u32::from_le_bytes(qo_data[pos..pos + 4].try_into().unwrap());
         pos += 4;
 
         // ── structure_size vint ───────────────────────────────────────────────
@@ -694,7 +709,10 @@ pub(crate) fn parse_quick_open_data(
         }
         let data = structure_data[spos..spos + data_size].to_vec();
 
-        blocks.push(QoCachedBlock { original_archive_offset, data });
+        blocks.push(QoCachedBlock {
+            original_archive_offset,
+            data,
+        });
         pos = structure_end;
     }
 
@@ -882,15 +900,15 @@ mod tests {
         let data_size: u64 = 4; // compressed == uncompressed for Store
 
         let mut body = Vec::new();
-        body.push(0x06u8);                          // file_flags
-        body.push(0x04);                            // unpacked_size = 4
-        body.push(0x20);                            // attributes
+        body.push(0x06u8); // file_flags
+        body.push(0x04); // unpacked_size = 4
+        body.push(0x20); // attributes
         body.extend_from_slice(&mtime.to_le_bytes()); // mtime (4 bytes)
-        body.extend_from_slice(&crc.to_le_bytes());   // data_crc32 (4 bytes)
-        body.push(0x00);                            // compression_info (store)
-        body.push(0x01);                            // host_os (Unix)
-        body.push(0x04);                            // name_len = 4
-        body.extend_from_slice(b"test");            // name
+        body.extend_from_slice(&crc.to_le_bytes()); // data_crc32 (4 bytes)
+        body.push(0x00); // compression_info (store)
+        body.push(0x01); // host_os (Unix)
+        body.push(0x04); // name_len = 4
+        body.extend_from_slice(b"test"); // name
 
         // block_type = 2, flags = 0x0002 (data area present), data_area_size = 4
         // header_size = block_type(1) + flags(1) + data_area_size_vint(1) + body.len()
@@ -918,8 +936,8 @@ mod tests {
         let block = make_store_file_block();
         let raw = parse_block_header(&block, 100).unwrap();
         assert_eq!(raw.block_type, 2);
-        assert_eq!(raw.flags, 0x0002);       // data area flag
-        assert_eq!(raw.data_size, 4);        // compressed data size
+        assert_eq!(raw.flags, 0x0002); // data area flag
+        assert_eq!(raw.data_size, 4); // compressed data size
         assert_eq!(raw.extra_area_size, 0);
         assert_eq!(raw.archive_offset, 100);
     }
@@ -987,10 +1005,7 @@ mod tests {
             RAR5_SIGNATURE,
             [0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x01, 0x00]
         );
-        assert_eq!(
-            RAR4_SIGNATURE,
-            [0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x00]
-        );
+        assert_eq!(RAR4_SIGNATURE, [0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x00]);
     }
 
     // ── parse_quick_open_data ─────────────────────────────────────────────────
@@ -1134,7 +1149,11 @@ mod tests {
         buf.extend_from_slice(&entry2);
 
         let blocks = parse_quick_open_data(&buf, 0);
-        assert_eq!(blocks.len(), 1, "overflowed first entry must be skipped, not abort");
+        assert_eq!(
+            blocks.len(),
+            1,
+            "overflowed first entry must be skipped, not abort"
+        );
         assert_eq!(blocks[0].original_archive_offset, 200);
         assert_eq!(blocks[0].data, fake_header);
     }

@@ -192,7 +192,11 @@ pub async fn find_eocd(reader: &impl ReadAt) -> Result<Eocd, CoreError> {
         || cd_offset_32 == ZIP64_MAGIC32;
 
     if !is_zip64 {
-        debug!(file_size, entry_count = entry_count_16, "standard ZIP EOCD found");
+        debug!(
+            file_size,
+            entry_count = entry_count_16,
+            "standard ZIP EOCD found"
+        );
         return Ok(Eocd {
             entry_count: entry_count_16 as u64,
             cd_size: cd_size_32 as u64,
@@ -369,8 +373,7 @@ pub async fn parse_central_directory(
         // ── Derive entry fields ────────────────────────────────────────────
         // GP bit 0 = encrypted. AES entries (method 99) are always encrypted
         // even if some tools don't set GP bit 0.
-        let is_encrypted =
-            (general_purpose_flags & GP_FLAG_ENCRYPTED != 0) || method_id == 99;
+        let is_encrypted = (general_purpose_flags & GP_FLAG_ENCRYPTED != 0) || method_id == 99;
 
         let name = decode_zip_filename(&cd_bytes[name_start..name_end], general_purpose_flags);
         let is_directory = name.ends_with('/');
@@ -487,7 +490,10 @@ fn parse_aes_extra(extra: &[u8]) -> Option<AesExtraInfo> {
             // vendor_id bytes at i+2..i+4 should be b"AE" — we don't enforce this
             let strength = extra[i + 4];
             let actual_method_id = read_u16_le(extra, i + 5);
-            return Some(AesExtraInfo { strength, actual_method_id });
+            return Some(AesExtraInfo {
+                strength,
+                actual_method_id,
+            });
         }
 
         i += size;
@@ -507,9 +513,7 @@ pub async fn resolve_data_offset(
     location: &ZipEntryLocation,
 ) -> Result<u64, crate::io::ReadError> {
     // Read the fixed-size part of the Local File Header (30 bytes).
-    let lfh = reader
-        .read_range(location.offset, 30)
-        .await?;
+    let lfh = reader.read_range(location.offset, 30).await?;
 
     let sig = read_u32_le(&lfh, 0);
     if sig != LOCAL_FILE_HEADER_SIGNATURE {

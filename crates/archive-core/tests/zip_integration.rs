@@ -9,10 +9,14 @@ use std::io::{Cursor, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use archive_core::{ArchiveEntry, CompressionMethod, CoreError, LocalReadAt, ProgressReporter, ZipArchive};
+use archive_core::{
+    ArchiveEntry, CompressionMethod, CoreError, LocalReadAt, ProgressReporter, ZipArchive,
+};
 
 async fn open_zip(path: &str) -> ZipArchive<LocalReadAt> {
-    ZipArchive::open(LocalReadAt::new(path)).await.expect("open ZIP")
+    ZipArchive::open(LocalReadAt::new(path))
+        .await
+        .expect("open ZIP")
 }
 
 async fn extract_bytes(
@@ -25,9 +29,9 @@ async fn extract_bytes(
     archive.extract(entry, &mut buf, progress, password).await?;
     Ok(bytes::Bytes::from(buf))
 }
+use zip::CompressionMethod as ZipMethod;
 use zip::unstable::write::FileOptionsExt as _;
 use zip::write::SimpleFileOptions;
-use zip::CompressionMethod as ZipMethod;
 
 // ── Test data ──────────────────────────────────────────────────────────────
 
@@ -93,7 +97,8 @@ fn build_integration_zip() -> (tempfile::NamedTempFile, String) {
                 "zipcrypto_deflated.txt",
                 SimpleFileOptions::default()
                     .compression_method(ZipMethod::Deflated)
-                    .with_deprecated_encryption(ZIP_CRYPTO_PASSWORD).unwrap(),
+                    .with_deprecated_encryption(ZIP_CRYPTO_PASSWORD)
+                    .unwrap(),
             )
             .unwrap();
         writer.write_all(&zipcrypto_content()).unwrap();
@@ -158,15 +163,27 @@ async fn list_entries_count_names_flags_methods() {
     assert_eq!(plain_small.uncompressed_size, SMALL_CONTENT.len() as u64);
 
     // Encryption flags
-    assert!(!plain_large.is_encrypted, "plain_large must not be encrypted");
-    assert!(!plain_small.is_encrypted, "plain_small must not be encrypted");
+    assert!(
+        !plain_large.is_encrypted,
+        "plain_large must not be encrypted"
+    );
+    assert!(
+        !plain_small.is_encrypted,
+        "plain_small must not be encrypted"
+    );
     assert!(zipcrypto.is_encrypted, "ZipCrypto entry must be encrypted");
     assert!(aes.is_encrypted, "AES entry must be encrypted");
     assert!(!dir.is_encrypted, "directory must not be encrypted");
 
     // Compression methods
-    assert_eq!(plain_large.compression_method, Some(CompressionMethod::Deflate));
-    assert_eq!(plain_small.compression_method, Some(CompressionMethod::Store));
+    assert_eq!(
+        plain_large.compression_method,
+        Some(CompressionMethod::Deflate)
+    );
+    assert_eq!(
+        plain_small.compression_method,
+        Some(CompressionMethod::Store)
+    );
     assert_eq!(
         zipcrypto.compression_method,
         Some(CompressionMethod::Deflate)
@@ -207,7 +224,11 @@ async fn extract_unencrypted_entries() {
         .find(|e| e.name == "plain_small.bin")
         .unwrap();
     let bytes = extract_bytes(&archive, entry, None).await.unwrap();
-    assert_eq!(bytes.as_ref(), SMALL_CONTENT, "small Stored entry content mismatch");
+    assert_eq!(
+        bytes.as_ref(),
+        SMALL_CONTENT,
+        "small Stored entry content mismatch"
+    );
 }
 
 /// Extract encrypted entries with correct passwords.
@@ -291,14 +312,20 @@ async fn test_integrity_unencrypted_ok_encrypted_requires_password() {
         .iter()
         .find(|e| e.name == "plain_large.txt")
         .unwrap();
-    archive.test(plain_large, Arc::new(Mutex::new(()))).await.unwrap();
+    archive
+        .test(plain_large, Arc::new(Mutex::new(())))
+        .await
+        .unwrap();
 
     let plain_small = archive
         .entries()
         .iter()
         .find(|e| e.name == "plain_small.bin")
         .unwrap();
-    archive.test(plain_small, Arc::new(Mutex::new(()))).await.unwrap();
+    archive
+        .test(plain_small, Arc::new(Mutex::new(())))
+        .await
+        .unwrap();
 
     // Encrypted entries without password → PasswordRequired
     let zipcrypto = archive
@@ -346,7 +373,11 @@ async fn progress_callbacks_recorded_correctly() {
             s.entry_start_size = size;
         }
         fn on_bytes_progress(&mut self, bytes_so_far: u64) {
-            self.state.lock().unwrap().progress_values.push(bytes_so_far);
+            self.state
+                .lock()
+                .unwrap()
+                .progress_values
+                .push(bytes_so_far);
         }
         fn on_entry_complete(&mut self, _name: &str, success: bool) {
             self.state.lock().unwrap().entry_complete_success = Some(success);
@@ -365,12 +396,20 @@ async fn progress_callbacks_recorded_correctly() {
     let entry_size = entry.uncompressed_size;
 
     let state = Arc::new(Mutex::new(State::default()));
-    let progress: Arc<Mutex<dyn ProgressReporter>> =
-        Arc::new(Mutex::new(RecordingReporter { state: Arc::clone(&state) }));
+    let progress: Arc<Mutex<dyn ProgressReporter>> = Arc::new(Mutex::new(RecordingReporter {
+        state: Arc::clone(&state),
+    }));
 
     let mut buf = Vec::new();
-    archive.extract(entry, &mut buf, progress, None).await.unwrap();
-    assert_eq!(buf, large_content(), "extracted content must match original");
+    archive
+        .extract(entry, &mut buf, progress, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        buf,
+        large_content(),
+        "extracted content must match original"
+    );
 
     let s = state.lock().unwrap();
 
@@ -401,7 +440,10 @@ async fn progress_callbacks_recorded_correctly() {
 
     // Values must be strictly increasing
     for w in s.progress_values.windows(2) {
-        assert!(w[1] > w[0], "progress values must be strictly increasing: {w:?}");
+        assert!(
+            w[1] > w[0],
+            "progress values must be strictly increasing: {w:?}"
+        );
     }
 
     // on_entry_complete called with success = true
@@ -415,11 +457,18 @@ async fn progress_callbacks_recorded_correctly() {
 // ── New-codec integration tests ────────────────────────────────────────────
 
 /// Build a minimal ZIP in memory with one entry using the given compression method.
-fn build_codec_zip(method: ZipMethod, name: &str, content: &[u8]) -> (tempfile::NamedTempFile, String) {
+fn build_codec_zip(
+    method: ZipMethod,
+    name: &str,
+    content: &[u8],
+) -> (tempfile::NamedTempFile, String) {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
     writer
-        .start_file(name, SimpleFileOptions::default().compression_method(method))
+        .start_file(
+            name,
+            SimpleFileOptions::default().compression_method(method),
+        )
         .unwrap();
     writer.write_all(content).unwrap();
     let buf = writer.finish().unwrap().into_inner();
@@ -438,7 +487,10 @@ async fn zip_bzip2_small_entry_round_trip() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].name, "bzip2_small.bin");
     assert_eq!(entries[0].uncompressed_size, SMALL_CONTENT.len() as u64);
-    assert_eq!(entries[0].compression_method, Some(CompressionMethod::BZip2));
+    assert_eq!(
+        entries[0].compression_method,
+        Some(CompressionMethod::BZip2)
+    );
     assert!(!entries[0].is_encrypted);
 
     let bytes = extract_bytes(&archive, &entries[0], None).await.unwrap();
@@ -454,7 +506,10 @@ async fn zip_bzip2_large_entry_round_trip() {
     let entries = archive.entries();
 
     assert_eq!(entries[0].uncompressed_size, content.len() as u64);
-    assert_eq!(entries[0].compression_method, Some(CompressionMethod::BZip2));
+    assert_eq!(
+        entries[0].compression_method,
+        Some(CompressionMethod::BZip2)
+    );
 
     let bytes = extract_bytes(&archive, &entries[0], None).await.unwrap();
     assert_eq!(bytes.as_ref(), content.as_slice());
@@ -643,11 +698,16 @@ async fn extract_selected_map(
     let map: Arc<Mutex<HashMap<String, Vec<u8>>>> = Arc::new(Mutex::new(HashMap::new()));
     let map2 = map.clone();
 
-    let sink_factory = move |entry: &ArchiveEntry| -> Option<Box<dyn tokio::io::AsyncWrite + Send + Unpin>> {
-        let name = entry.name.clone();
-        let map3 = map2.clone();
-        Some(Box::new(MapWriter { name, map: map3, buf: Vec::new() }))
-    };
+    let sink_factory =
+        move |entry: &ArchiveEntry| -> Option<Box<dyn tokio::io::AsyncWrite + Send + Unpin>> {
+            let name = entry.name.clone();
+            let map3 = map2.clone();
+            Some(Box::new(MapWriter {
+                name,
+                map: map3,
+                buf: Vec::new(),
+            }))
+        };
 
     let progress = Arc::new(Mutex::new(()));
     archive
@@ -679,8 +739,7 @@ async fn extract_selected_all_entries_match() {
         "plain_large.txt content mismatch"
     );
     assert_eq!(
-        map["plain_small.bin"],
-        SMALL_CONTENT,
+        map["plain_small.bin"], SMALL_CONTENT,
         "plain_small.bin content mismatch"
     );
 }

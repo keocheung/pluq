@@ -79,11 +79,7 @@ impl<T: ReadAt> ReadAt for CachingReadAt<T> {
         let saved = len.saturating_sub(fetch_len);
         debug!(
             offset,
-            len,
-            fetch_offset,
-            fetch_len,
-            saved,
-            "cache miss, fetching from inner"
+            len, fetch_offset, fetch_len, saved, "cache miss, fetching from inner"
         );
 
         // Fetch from inner reader (no lock held during I/O).
@@ -150,7 +146,11 @@ impl<T: ReadAt> ReadAt for CachingReadAt<T> {
         }
 
         if !suffix.is_empty() {
-            trace!(offset = stream_end, len = suffix_len, "stream: serving cached suffix");
+            trace!(
+                offset = stream_end,
+                len = suffix_len,
+                "stream: serving cached suffix"
+            );
             readers.push_back(Box::new(io::Cursor::new(suffix)));
         }
 
@@ -403,8 +403,7 @@ mod tests {
         }
 
         fn calls(&self) -> usize {
-            self.call_count
-                .load(std::sync::atomic::Ordering::Relaxed)
+            self.call_count.load(std::sync::atomic::Ordering::Relaxed)
         }
     }
 
@@ -567,17 +566,11 @@ mod tests {
         // Stream from before the cached block to EOF.
         let stream_start = cached_block_start - 10_000;
         let stream_len = 200_000 - stream_start;
-        let mut stream = cached
-            .read_stream(stream_start, stream_len)
-            .await
-            .unwrap();
+        let mut stream = cached.read_stream(stream_start, stream_len).await.unwrap();
         let mut collected = Vec::new();
         stream.read_to_end(&mut collected).await.unwrap();
 
-        assert_eq!(
-            collected,
-            &data[stream_start as usize..200_000]
-        );
+        assert_eq!(collected, &data[stream_start as usize..200_000]);
         // One new inner call for the uncached middle portion.
         assert_eq!(cached.inner.calls(), calls_after_prime + 1);
     }

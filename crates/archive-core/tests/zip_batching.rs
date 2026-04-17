@@ -10,19 +10,25 @@ use std::io::{Cursor, Write};
 use std::sync::{Arc, Mutex};
 
 use archive_core::{ArchiveEntry, ZipArchive};
-use zip::write::SimpleFileOptions;
 use zip::CompressionMethod as ZipMethod;
+use zip::write::SimpleFileOptions;
 
 fn build_multi_entry_zip() -> (tempfile::NamedTempFile, std::path::PathBuf) {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let path = tmp.path().to_path_buf();
 
     let mut w = zip::ZipWriter::new(Cursor::new(Vec::new()));
-    w.start_file("file1.txt", SimpleFileOptions::default().compression_method(ZipMethod::Stored))
-        .unwrap();
+    w.start_file(
+        "file1.txt",
+        SimpleFileOptions::default().compression_method(ZipMethod::Stored),
+    )
+    .unwrap();
     w.write_all(b"Hello from file one!").unwrap();
-    w.start_file("file2.txt", SimpleFileOptions::default().compression_method(ZipMethod::Stored))
-        .unwrap();
+    w.start_file(
+        "file2.txt",
+        SimpleFileOptions::default().compression_method(ZipMethod::Stored),
+    )
+    .unwrap();
     w.write_all(b"Second file content!").unwrap();
     let buf = w.finish().unwrap().into_inner();
     std::fs::write(&path, &buf).unwrap();
@@ -39,8 +45,11 @@ async fn zip_extract_selected_batches_into_single_cluster() {
 
     let archive = ZipArchive::open(reader).await.expect("open ZIP");
 
-    let entries: Vec<&ArchiveEntry> =
-        archive.entries().iter().filter(|e| !e.is_directory).collect();
+    let entries: Vec<&ArchiveEntry> = archive
+        .entries()
+        .iter()
+        .filter(|e| !e.is_directory)
+        .collect();
     assert_eq!(entries.len(), 2, "fixture must have exactly 2 entries");
 
     let expected_bytes: u64 = entries.iter().map(|e| e.uncompressed_size).sum();
@@ -62,7 +71,10 @@ async fn zip_extract_selected_batches_into_single_cluster() {
     let delta = calls_after - calls_before;
 
     assert_eq!(result.succeeded, 2, "both entries must succeed");
-    assert_eq!(result.bytes_written, expected_bytes, "bytes_written must equal sum of uncompressed sizes");
+    assert_eq!(
+        result.bytes_written, expected_bytes,
+        "bytes_written must equal sum of uncompressed sizes"
+    );
     assert!(
         delta < entries.len(),
         "expected fewer read_stream calls than entries (got {delta} for {} entries — batching not active?)",

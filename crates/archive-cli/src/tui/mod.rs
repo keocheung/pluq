@@ -8,7 +8,7 @@ use std::io;
 
 use crossterm::{
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use futures::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend};
@@ -34,28 +34,35 @@ pub async fn run_with_source(
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!(source = %source, "TUI starting in Browse mode");
     let app = app::App::new_with_source(source.clone());
-    
-    run_app(app, Some(move |tx: tokio::sync::mpsc::UnboundedSender<app::AppMessage>| {
-        debug!("spawning Archive::open task");
-        tokio::spawn(async move {
-            let result = archive::Archive::open_reader(&source, reader).await;
-            let _ = tx.send(app::AppMessage::ArchiveOpened(result));
-        });
-    })).await
+
+    run_app(
+        app,
+        Some(
+            move |tx: tokio::sync::mpsc::UnboundedSender<app::AppMessage>| {
+                debug!("spawning Archive::open task");
+                tokio::spawn(async move {
+                    let result = archive::Archive::open_reader(&source, reader).await;
+                    let _ = tx.send(app::AppMessage::ArchiveOpened(result));
+                });
+            },
+        ),
+    )
+    .await
 }
 
 pub async fn run_home() -> Result<(), Box<dyn std::error::Error>> {
     info!("TUI starting in Home mode");
     let app = app::App::new_home();
-    run_app(app, None::<fn(tokio::sync::mpsc::UnboundedSender<app::AppMessage>)>).await
+    run_app(
+        app,
+        None::<fn(tokio::sync::mpsc::UnboundedSender<app::AppMessage>)>,
+    )
+    .await
 }
 
-async fn run_app<F>(
-    mut app: app::App,
-    setup: Option<F>,
-) -> Result<(), Box<dyn std::error::Error>> 
-where 
-    F: FnOnce(tokio::sync::mpsc::UnboundedSender<app::AppMessage>)
+async fn run_app<F>(mut app: app::App, setup: Option<F>) -> Result<(), Box<dyn std::error::Error>>
+where
+    F: FnOnce(tokio::sync::mpsc::UnboundedSender<app::AppMessage>),
 {
     // Install panic hook that restores terminal before printing panic info.
     let original_hook = std::panic::take_hook();
@@ -85,10 +92,7 @@ where
                 if key.code == crossterm::event::KeyCode::Esc
                     || key.code == crossterm::event::KeyCode::Char('q')
                 {
-                    cancel_flag_reader.store(
-                        true,
-                        std::sync::atomic::Ordering::SeqCst,
-                    );
+                    cancel_flag_reader.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
                 if event_tx.send(key).is_err() {
                     break;

@@ -22,7 +22,7 @@ fn main() {
 
     // 1. Check for API Key (Env -> .env file -> Prompt)
     let mut api_key = std::env::var("ARCHIVE_SNIPER_GDRIVE_KEY").ok();
-    
+
     if api_key.is_none() {
         // Try reading from .env file
         if let Ok(content) = std::fs::read_to_string(".env") {
@@ -43,7 +43,7 @@ fn main() {
             println!("❌ Error: API key is required.");
             return;
         }
-        
+
         // Save to .env file for next time
         println!("💾 Saving key to .env file...");
         let _ = std::fs::write(".env", format!("ARCHIVE_SNIPER_GDRIVE_KEY=\"{k}\"\n"));
@@ -67,7 +67,7 @@ fn main() {
 
     // 4. Build and Run Command
     println!("\n🚀 Launching TUI Browse...");
-    
+
     let mut args = vec!["run", "-p", "archive-cli", "--"];
     if use_debug {
         args.push("--debug");
@@ -80,7 +80,7 @@ fn main() {
 
     let mut cmd = Command::new("cargo");
     cmd.args(&args);
-    
+
     // Set the env var for the child process
     if let Some(key) = api_key {
         cmd.env("ARCHIVE_SNIPER_GDRIVE_KEY", key);
@@ -100,7 +100,9 @@ fn prompt(msg: &str) -> String {
     print!("{msg}");
     io::stdout().flush().unwrap();
     let mut input = String::new();
-    io::stdin().read_line(&mut input).expect("failed to read line");
+    io::stdin()
+        .read_line(&mut input)
+        .expect("failed to read line");
     input
 }
 

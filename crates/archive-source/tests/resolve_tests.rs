@@ -1,5 +1,5 @@
 use archive_core::LocalPath;
-use archive_source::{resolve, ResolvedSource, SourceConfig};
+use archive_source::{ResolvedSource, SourceConfig, resolve};
 
 #[test]
 fn resolve_local_path() {
@@ -36,7 +36,10 @@ fn resolve_gdrive_url_without_api_key() {
         "https://drive.google.com/file/d/abc123/view?usp=sharing",
         &config,
     );
-    assert!(matches!(result, Err(_) | Ok(ResolvedSource::GDrive(_, _, _))));
+    assert!(matches!(
+        result,
+        Err(_) | Ok(ResolvedSource::GDrive(_, _, _))
+    ));
 }
 
 #[test]
@@ -73,7 +76,9 @@ fn test_suggested_name() {
     assert_eq!(res.suggested_name().unwrap(), "data");
 
     // GDrive "view" link (mocking key to test logic)
-    unsafe { std::env::set_var("ARCHIVE_SNIPER_GDRIVE_KEY", "dummy"); }
+    unsafe {
+        std::env::set_var("ARCHIVE_SNIPER_GDRIVE_KEY", "dummy");
+    }
     let res = resolve("https://drive.google.com/file/d/ABC-123/view", &config).unwrap();
     assert_eq!(res.suggested_name().unwrap(), "ABC-123");
 }
