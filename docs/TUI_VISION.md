@@ -13,10 +13,46 @@ The TUI is the primary experience. CLI commands exist for scripting and automati
 
 ---
 
+## Data & Persistence
+
+- **Bookmarks:** Stored in `~/.config/archive-sniper/bookmarks.json`.
+- **Recent:** Stored in `~/.config/archive-sniper/recent.json`.
+
+### Schema Example
+```json
+{
+  "name": "Photos 2024",
+  "source": "https://drive.google.com/...",
+  "provider": "GDrive",
+  "size": 4509715660,
+  "last_opened": "2026-04-11T14:30:00Z"
+}
+```
+
+---
+
+## Overlays & Prompts
+
+### File Collisions (Extraction)
+If exact file names collide during batch extraction, the following prompt is displayed:
+`[!] N files already exist. (o) Overwrite All (s) Skip All (c) Cancel`
+*(Note: Merging into existing folders is done silently without prompting).*
+
+### Bookmark Collisions
+If a user tries to save or rename a bookmark to a name that already exists, the following prompt is displayed:
+`[!] Bookmark "[Name]" already exists. (o) Overwrite (r) Rename (c) Cancel`
+
+---
+
 ## Home Screen
 
 Launching `snipe` shows the home screen — an entry point where users can open
 a new archive or jump back into a saved/recent one.
+
+### Capabilities & Keys
+- `b`: **Bookmark** the selected item from the Recent list.
+- `r`: **Rename** the selected bookmark.
+- `d`: **Delete** the selected bookmark or recent entry.
 
 ### Snipe Input
 
@@ -52,6 +88,7 @@ the user lands in the browse screen — a drill-down file browser.
 - **Selection:** Toggle individual files and directories, or select all in folder
 - **Selection Review:** Full-screen view of all staged files, with pruning
 - **Extraction Cost:** Live cost estimate for highlighted and selected entries
+- **Add Bookmark:** `b` to bookmark the currently browsing archive.
 
 ---
 

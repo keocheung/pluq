@@ -1,0 +1,42 @@
+# MIRRORED FROM .gitignore (except for files Gemini should see)
+
+# Rust build artifacts
+/target/
+**/target/
+
+# Cargo lock files — keep root lock, ignore crate-level ones
+Cargo.lock
+
+# Editor / OS / Tool files
+.DS_Store
+.idea/
+.vscode/
+.gemini/
+.claude/
+*.swp
+*.swo
+# *.log
+!archive-sniper.log
+
+# Environment files (never commit secrets)
+.env
+.env.*
+dev_links.json
+
+# Test / scratch ZIPs
+*.zip
+
+# Dev crate output (listings, extracted files)
+crates/archive-dev/output/
+
+# Learning log (private/internal progress tracking)
+LEARNING.md
+
+# Session plan (Gemini is ALLOWED to see these)
+# SESSION_PLAN*.md
+
+# Documentation folders
+docs/sandbox/
+# docs/superpowers/ (Gemini is ALLOWED to see these)
+
+temp/
