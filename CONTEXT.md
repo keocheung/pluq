@@ -2,9 +2,9 @@
 
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
-* **Current Phase:** Phase 3 — Interactive TUI + Google Drive Provider.
-* **Current Active Task:** [HANDOVER] Phase 3c Home Screen v2 (Bookmarks + Overlay) complete.
-* **Baseline:** 334 tests pass. Clippy clean.
+* **Current Phase:** Phase 4 — Dropbox Provider complete.
+* **Current Active Task:** [HANDOVER] Dropbox provider (`archive-dropbox`) complete. Ready for CLI integration.
+* **Baseline:** 359 tests pass. Clippy clean.
 
 
 ---

@@ -20,7 +20,7 @@ impl Provider {
             ResolvedSource::Local(..) => Self::Local,
             ResolvedSource::Http(..) => Self::Http,
             ResolvedSource::GDrive(..) => Self::GDrive,
-            // When ResolvedSource::Dropbox lands (Phase 4), add arm here.
+            ResolvedSource::Dropbox(..) => Self::Dropbox,
         }
     }
 

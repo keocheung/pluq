@@ -1,13 +1,13 @@
-use std::io::{self, Read, Write};
-use std::process::Command;
 use reqwest::blocking::Client;
 use serde_json::json;
+use std::io::{self, Read, Write};
+use std::process::Command;
 
 fn main() {
     println!("=== 🎯 Archive Sniper: Dev Scratchpad ===\n");
     println!("1. Google Drive Test Launcher (existing)");
     println!("2. Dropbox API PoC (new)");
-    
+
     let choice = prompt("Select an option (1/2): ");
     match choice.trim() {
         "1" => run_gdrive_launcher(),
@@ -127,8 +127,12 @@ fn run_dropbox_poc() {
         .and_then(|v| v.get("dropbox_public_zip"))
         .and_then(|v| v.as_str());
 
-    if let Some(url) = personal_url { println!("1. Personal: {}", url); }
-    if let Some(url) = public_url { println!("2. Public:   {}", url); }
+    if let Some(url) = personal_url {
+        println!("1. Personal: {}", url);
+    }
+    if let Some(url) = public_url {
+        println!("2. Public:   {}", url);
+    }
     println!("3. Custom URL");
 
     let choice = prompt("Select a link option (1/2/3): ");
@@ -137,7 +141,7 @@ fn run_dropbox_poc() {
         "2" => public_url.map(|s| s.to_string()).unwrap_or_default(),
         _ => prompt("🔗 Enter Dropbox Shared Link: ").trim().to_string(),
     };
-    
+
     if url.is_empty() {
         println!("❌ Error: URL is required.");
         return;
@@ -146,13 +150,13 @@ fn run_dropbox_poc() {
     // Try to get token from env
     let mut token = std::env::var("ARCHIVE_SNIPER_DROPBOX_TOKEN").ok();
 
-    if token.is_none() {
-        if let Ok(content) = std::fs::read_to_string(".env") {
-            for line in content.lines() {
-                if let Some(val) = line.strip_prefix("ARCHIVE_SNIPER_DROPBOX_TOKEN=") {
-                    token = Some(val.trim().trim_matches('\"').to_string());
-                    break;
-                }
+    if token.is_none()
+        && let Ok(content) = std::fs::read_to_string(".env")
+    {
+        for line in content.lines() {
+            if let Some(val) = line.strip_prefix("ARCHIVE_SNIPER_DROPBOX_TOKEN=") {
+                token = Some(val.trim().trim_matches('\"').to_string());
+                break;
             }
         }
     }
@@ -162,16 +166,17 @@ fn run_dropbox_poc() {
         let t = prompt("🔑 Enter your Dropbox Access Token (or press Enter to try without): ");
         let t = t.trim().to_string();
         if !t.is_empty() {
-             token = Some(t);
+            token = Some(t);
         }
     }
-    
+
     let client = Client::new();
-    
+
     // Step 1: Get Metadata (Size)
     println!("\n📊 1. Fetching Metadata...");
     let meta_url = "https://api.dropboxapi.com/2/sharing/get_shared_link_metadata";
-    let mut meta_req = client.post(meta_url)
+    let mut meta_req = client
+        .post(meta_url)
         .header("Content-Type", "application/json")
         .json(&json!({ "url": url }));
 
@@ -181,21 +186,28 @@ fn run_dropbox_poc() {
 
     let meta_resp = meta_req.send().expect("failed to send metadata request");
     println!("📡 Metadata Status: {}", meta_resp.status());
-    
+
     let meta_body: serde_json::Value = meta_resp.json().expect("failed to parse metadata JSON");
     if meta_body.get("error").is_some() {
         println!("❌ Metadata Error: {}", meta_body);
         return;
     }
-    
-    let size = meta_body.get("size").and_then(serde_json::Value::as_u64).unwrap_or(0);
-    let name = meta_body.get("name").and_then(serde_json::Value::as_str).unwrap_or("unknown");
+
+    let size = meta_body
+        .get("size")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let name = meta_body
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
     println!("✅ Name: {}, Size: {} bytes", name, size);
 
     // Step 2: Surgical Read (Range)
     println!("\n🎯 2. Performing Surgical Read (Range: bytes=0-19)...");
     let dl_url = "https://content.dropboxapi.com/2/sharing/get_shared_link_file";
-    let mut dl_req = client.post(dl_url)
+    let mut dl_req = client
+        .post(dl_url)
         .header("Dropbox-API-Arg", json!({ "url": url }).to_string())
         .header("Range", "bytes=0-19");
 
@@ -205,13 +217,15 @@ fn run_dropbox_poc() {
 
     let mut dl_resp = dl_req.send().expect("failed to send download request");
     println!("📡 Download Status: {}", dl_resp.status());
-    
+
     if dl_resp.status().is_success() {
         let mut buffer = Vec::new();
-        dl_resp.read_to_end(&mut buffer).expect("failed to read body");
+        dl_resp
+            .read_to_end(&mut buffer)
+            .expect("failed to read body");
         println!("✅ Received {} bytes.", buffer.len());
         println!("💾 Bytes (hex): {:02x?}", buffer);
-        
+
         if buffer.starts_with(&[0x50, 0x4b]) {
             println!("📂 Signature: ZIP (PK) detected!");
         }

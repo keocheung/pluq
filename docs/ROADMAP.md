@@ -90,7 +90,7 @@ These commands define the CLI's public API. The TUI is the default entry point.
 > is centralized in the `archive-source` crate. See `docs/SOURCE.md`.
 
 - [x] **Google Drive** — `archive-gdrive` crate (`GoogleDriveReadAt`). Uses Drive v3 API for size/metadata, delegates range reads to inner `HttpReadAt`. API key from env var or embedded default.
-- [ ] **Dropbox** — `archive-dropbox` crate (`DropboxReadAt`). Shared-link metadata via `POST /2/sharing/get_shared_link_metadata`, range reads via `POST /2/sharing/get_shared_link_file`. App access token in `Authorization: Bearer` header.
+- [x] **Dropbox** — `archive-dropbox` crate (`DropboxReadAt`). Shared-link metadata via `POST /2/sharing/get_shared_link_metadata`, range reads via `POST /2/sharing/get_shared_link_file`. App access token in `Authorization: Bearer` header.
 - [ ] **OneDrive** — `archive-onedrive` crate. Resolve share link → driveItem via Microsoft Graph API, download with Range headers. *(v1.x — deferred)*
 
 ### Phase 4.5: OAuth2 — Private File Access

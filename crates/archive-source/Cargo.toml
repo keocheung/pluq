@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 archive-core = { path = "../archive-core" }
 archive-gdrive = { path = "../archive-gdrive" }
+archive-dropbox = { path = "../archive-dropbox" }
 bytes = "1"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 tokio = { version = "1", features = ["io-util"] }

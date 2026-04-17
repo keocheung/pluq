@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use archive_core::{CachingReadAt, HttpReadAt, LocalPath, LocalReadAt, ReadAt, ReadError};
+use archive_dropbox::DropboxReadAt;
 use archive_gdrive::GoogleDriveReadAt;
 use bytes::Bytes;
 use tokio::io::AsyncRead;
@@ -18,6 +19,8 @@ pub enum ResolvedSource {
     Http(CachingReadAt<HttpReadAt>, String),
     /// A Google Drive file accessed via the Drive API. (Reader, Original URL, File ID)
     GDrive(CachingReadAt<GoogleDriveReadAt>, String, String),
+    /// A Dropbox shared file accessed via the Dropbox API. (Reader, Original URL)
+    Dropbox(CachingReadAt<DropboxReadAt>, String),
 }
 
 impl ResolvedSource {
@@ -27,6 +30,7 @@ impl ResolvedSource {
             Self::Local(_, path) => crate::suggest_name_from_str(path),
             Self::Http(_, url) => crate::suggest_name_from_str(url),
             Self::GDrive(_, url, _) => crate::suggest_name_from_str(url),
+            Self::Dropbox(_, url) => crate::suggest_name_from_str(url),
         }
     }
 }
@@ -46,6 +50,7 @@ impl ReadAt for ResolvedSource {
             Self::Local(r, _) => r.read_range(offset, len).await,
             Self::Http(r, _) => r.read_range(offset, len).await,
             Self::GDrive(r, _, _) => r.read_range(offset, len).await,
+            Self::Dropbox(r, _) => r.read_range(offset, len).await,
         }
     }
 
@@ -58,6 +63,7 @@ impl ReadAt for ResolvedSource {
             Self::Local(r, _) => r.read_stream(offset, len).await,
             Self::Http(r, _) => r.read_stream(offset, len).await,
             Self::GDrive(r, _, _) => r.read_stream(offset, len).await,
+            Self::Dropbox(r, _) => r.read_stream(offset, len).await,
         }
     }
 
@@ -66,6 +72,7 @@ impl ReadAt for ResolvedSource {
             Self::Local(r, _) => r.size().await,
             Self::Http(r, _) => r.size().await,
             Self::GDrive(r, _, _) => r.size().await,
+            Self::Dropbox(r, _) => r.size().await,
         }
     }
 }

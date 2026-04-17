@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use archive_dropbox::DropboxError;
 use archive_gdrive::GDriveError;
 
 /// Provider-agnostic error classification for transport tunnel errors.
@@ -75,7 +76,10 @@ pub fn classify_transport(err: &(dyn std::error::Error + 'static)) -> Option<Pro
         return Some(classify_gdrive(e));
     }
 
-    // ── Phase 4: Dropbox classification would go here ────────────────────
+    // ── Dropbox ──────────────────────────────────────────────────────────
+    if let Some(e) = err.downcast_ref::<DropboxError>() {
+        return Some(classify_dropbox(e));
+    }
 
     None
 }
@@ -107,5 +111,105 @@ fn classify_gdrive(e: &GDriveError) -> ProviderError {
         GDriveError::Api { .. } => ProviderError::InvalidCredentials {
             provider: "Google Drive",
         },
+    }
+}
+
+fn classify_dropbox(e: &DropboxError) -> ProviderError {
+    match e {
+        DropboxError::FileNotFound { .. } => ProviderError::FileNotFound {
+            provider: "Dropbox",
+        },
+        DropboxError::NotPublic { .. } => ProviderError::NotPublic {
+            provider: "Dropbox",
+        },
+        DropboxError::InvalidToken | DropboxError::TokenMissing => {
+            ProviderError::InvalidCredentials {
+                provider: "Dropbox",
+            }
+        }
+        DropboxError::RateLimited { retry_after_secs } => ProviderError::RateLimited {
+            provider: "Dropbox",
+            retry_after: Some(std::time::Duration::from_secs(*retry_after_secs)),
+        },
+        DropboxError::QuotaExceeded => ProviderError::QuotaExceeded {
+            provider: "Dropbox",
+        },
+        DropboxError::InvalidUrl { .. } => ProviderError::InvalidCredentials {
+            provider: "Dropbox",
+        },
+        DropboxError::Api { .. } => ProviderError::InvalidCredentials {
+            provider: "Dropbox",
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_dropbox_file_not_found() {
+        let err = DropboxError::FileNotFound { url: "x".into() };
+        let pe = classify_transport(&err).unwrap();
+        assert!(matches!(
+            pe,
+            ProviderError::FileNotFound {
+                provider: "Dropbox"
+            }
+        ));
+    }
+
+    #[test]
+    fn classify_dropbox_not_public() {
+        let err = DropboxError::NotPublic { url: "x".into() };
+        let pe = classify_transport(&err).unwrap();
+        assert!(matches!(
+            pe,
+            ProviderError::NotPublic {
+                provider: "Dropbox"
+            }
+        ));
+    }
+
+    #[test]
+    fn classify_dropbox_invalid_token() {
+        let err = DropboxError::InvalidToken;
+        let pe = classify_transport(&err).unwrap();
+        assert!(matches!(
+            pe,
+            ProviderError::InvalidCredentials {
+                provider: "Dropbox"
+            }
+        ));
+    }
+
+    #[test]
+    fn classify_dropbox_rate_limited() {
+        let err = DropboxError::RateLimited {
+            retry_after_secs: 30,
+        };
+        let pe = classify_transport(&err).unwrap();
+        if let ProviderError::RateLimited {
+            provider,
+            retry_after,
+        } = pe
+        {
+            assert_eq!(provider, "Dropbox");
+            assert_eq!(retry_after, Some(Duration::from_secs(30)));
+        } else {
+            panic!("expected RateLimited");
+        }
+    }
+
+    #[test]
+    fn classify_dropbox_quota_exceeded() {
+        let err = DropboxError::QuotaExceeded;
+        let pe = classify_transport(&err).unwrap();
+        assert!(matches!(
+            pe,
+            ProviderError::QuotaExceeded {
+                provider: "Dropbox"
+            }
+        ));
     }
 }

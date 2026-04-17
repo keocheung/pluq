@@ -1,0 +1,21 @@
+[package]
+name = "archive-dropbox"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+archive-core = { path = "../archive-core" }
+bytes = "1"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+tokio = { version = "1", features = ["sync", "io-util"] }
+url = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+futures-util = "0.3"
+tokio-util = { version = "0.7", features = ["io"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6"

@@ -1,4 +1,5 @@
 use archive_core::{CachingReadAt, HttpReadAt, LocalReadAt};
+use archive_dropbox::{self, DropboxReadAt};
 use archive_gdrive::{self, GoogleDriveReadAt};
 use tracing::info;
 
@@ -33,7 +34,18 @@ pub fn resolve(input: &str, _config: &SourceConfig) -> Result<ResolvedSource, So
         return Ok(ResolvedSource::GDrive(reader, input.to_string(), file_id));
     }
 
-    // ── Phase 4: Dropbox check would go here ─────────────────────────────
+    // ── Dropbox? ─────────────────────────────────────────────────────────
+    if archive_dropbox::is_dropbox_url(input) {
+        info!(url = %input, "Dropbox URL detected");
+
+        let token = archive_dropbox::token().ok_or_else(|| SourceError::NoCredentials {
+            provider: "Dropbox",
+            guidance: "Set ARCHIVE_SNIPER_DROPBOX_TOKEN environment variable.".into(),
+        })?;
+
+        let reader = CachingReadAt::new(DropboxReadAt::new(input.to_string(), token));
+        return Ok(ResolvedSource::Dropbox(reader, input.to_string()));
+    }
 
     // ── Generic HTTP? ────────────────────────────────────────────────────
     if input.starts_with("http://") || input.starts_with("https://") {
@@ -52,4 +64,53 @@ pub fn resolve(input: &str, _config: &SourceConfig) -> Result<ResolvedSource, So
         LocalReadAt::new(input),
         input.to_string(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // Use a global mutex to serialize tests that mutate the environment.
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn dropbox_url_without_token_returns_no_credentials() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        // SAFETY: test mutates process env. Run single-threaded if flaky.
+        unsafe {
+            std::env::remove_var("ARCHIVE_SNIPER_DROPBOX_TOKEN");
+        }
+        let result = resolve(
+            "https://www.dropbox.com/s/abc/x.zip?dl=0",
+            &SourceConfig::default(),
+        );
+        assert!(matches!(
+            result,
+            Err(SourceError::NoCredentials {
+                provider: "Dropbox",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn dropbox_url_with_token_returns_dropbox_variant() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        // SAFETY: test mutates process env. Run single-threaded if flaky.
+        unsafe {
+            std::env::set_var("ARCHIVE_SNIPER_DROPBOX_TOKEN", "test-token");
+        }
+        let url = "https://www.dropbox.com/s/abc/x.zip?dl=0";
+        let result = resolve(url, &SourceConfig::default());
+
+        match result {
+            Ok(ResolvedSource::Dropbox(_, r_url)) => assert_eq!(r_url, url),
+            _ => panic!("expected Dropbox variant"),
+        }
+
+        unsafe {
+            std::env::remove_var("ARCHIVE_SNIPER_DROPBOX_TOKEN");
+        }
+    }
 }
