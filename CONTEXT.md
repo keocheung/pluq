@@ -30,7 +30,7 @@
 1.  **Start of Session:** Read this file first. Consult Tier 2 switchboards on-demand for deeper context. Pull a spoke only when its "Read when" hint matches the work.
 2.  **Session Planning:** Use a "Master-Step" pattern at the project root: `SESSION_PLAN.md` (overview/index) + `SESSION_PLAN_STEP_N.md` (detailed steps in separate files). This naming convention ensures they are automatically ignored by `.gitignore`.
 3.  **During Work:** Keep `Current Active Task` pointing to the active `SESSION_PLAN.md` step.
-3.  **End of Task:** Update `[Dynamic State]` (task pointer + baseline). On plan completion, reset to `[HANDOVER]`.
+3.  **End of Task:** Update `[Dynamic State]` (task pointer + baseline). On plan completion, reset to `[HANDOVER]`. **If completing a roadmap task: check it off `[x]`, move from `ROADMAP.md` to `docs/roadmap/COMPLETED.md`.**
 4.  **Commits:** **Conventional Commits** with crate scope (`feat(archive-core): ...`). Bodies use strict `-` bullet lists.
 5.  **Git Protocol:** **NEVER** auto-commit or stage. Always ask Stefan first.
 
