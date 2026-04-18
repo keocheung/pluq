@@ -93,15 +93,13 @@ fn run_dropbox_launcher() {
         // Save to .env file for next time
         println!("💾 Saving keys to .env file...");
         let mut env_content = std::fs::read_to_string(".env").unwrap_or_default();
-        if let Some(k) = &app_key {
-            if !env_content.contains("ARCHIVE_SNIPER_DROPBOX_APP_KEY=") {
+        if let Some(k) = &app_key
+            && !env_content.contains("ARCHIVE_SNIPER_DROPBOX_APP_KEY=") {
                 env_content.push_str(&format!("ARCHIVE_SNIPER_DROPBOX_APP_KEY=\"{k}\"\n"));
-            }
         }
-        if let Some(s) = &app_secret {
-            if !env_content.contains("ARCHIVE_SNIPER_DROPBOX_APP_SECRET=") {
+        if let Some(s) = &app_secret
+            && !env_content.contains("ARCHIVE_SNIPER_DROPBOX_APP_SECRET=") {
                 env_content.push_str(&format!("ARCHIVE_SNIPER_DROPBOX_APP_SECRET=\"{s}\"\n"));
-            }
         }
         let _ = std::fs::write(".env", env_content);
     } else {
