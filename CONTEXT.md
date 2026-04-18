@@ -2,8 +2,8 @@
 
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
-* **Current Phase:** Phase 4 — Dropbox Provider complete. TUI 'q' conflict fixed.
-* **Current Active Task:** [HANDOVER] TUI 'q' key conflict resolved (Ctrl+q for inputs). Typing 'q' in SnipeInput now works.
+* **Current Phase:** Phase 4.5 — OAuth (Google Drive + Dropbox). Scoping step 1.
+* **Current Active Task:** `SESSION_PLAN_STEP_1.md` — scaffold `archive-auth` crate (TokenStore + PKCE loopback flow + provider OAuth config constants). No wiring into providers/source/CLI yet.
 * **Baseline:** 360 tests pass. Clippy clean.
 
 

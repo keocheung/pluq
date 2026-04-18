@@ -346,53 +346,22 @@ The `resolve()` signature doesn't change. `SourceConfig` gains a `token_store`
 field. Provider crates gain an OAuth variant in their auth enum. Product layers
 gain OAuth flow code. No architectural surgery.
 
----
+### Token Persistence
 
-## Migration: What Changes From Current Code
+Tokens live in `~/.config/archive-sniper/tokens.json` (via the `directories`
+crate for cross-platform resolution). Refresh flow:
 
-### Deleted from `archive-core`
+1. Reader holds `Arc<TokenStore>` passed through `GDriveAuth::OAuth` / `DropboxAuth::OAuth`.
+2. On 401, reader refreshes via provider's token endpoint.
+3. Reader calls `TokenStore::save(provider, new_token)` — callback-free, direct.
+4. `TokenStore::save` does atomic write (temp file → rename) to avoid partials.
 
-- `source.rs` — the `Source` enum, `DynReadAt` trait, `Source::detect()`,
-  `Source::provider()`, `#[allow(private_interfaces)]`
-- `LocalPath` impl for `Source` in `io/mod.rs`
+**Platform note — file permissions.** On Unix, `tokens.json` is chmod `0600`
+after each write to keep tokens readable only by the owner. Windows has no
+direct `0600` equivalent; the file inherits the user's ACLs on `%APPDATA%`,
+which is effectively user-only on standard installs. No chmod attempted on
+Windows — documented limitation, not a blocker.
 
-### Moved to `archive-source`
+**Scope.** v1 stores one token per provider (single Google account, single
+Dropbox account). Multi-account is deferred.
 
-- URL detection logic (currently `Source::detect()` in core + `provider::build_reader()`
-  in CLI) -> `resolve()`
-- Transport error formatting (currently `provider::format_transport_error()` in CLI)
-  -> `classify_transport()`
-
-### Changed in `archive` (facade)
-
-- `ArchiveInner` becomes generic: `ArchiveInner<R: ReadAt>` instead of
-  `ArchiveInner { Zip(ZipArchive<Source>), ... }`
-- `Archive::open(source: &str)` removed (was doing detection internally)
-- `Archive::open_reader()` becomes the primary entry point, taking any `R: ReadAt`
-- `local_path()` detection for RAR extraction shortcut needs a new approach
-  (see below)
-
-### `local_path()` for RAR Extraction
-
-Currently `Source::local_path()` tells the RAR pipeline whether to use the
-local-file shortcut (pass path to `unrar`) vs the cloud synthetic-archive approach.
-
-With `ResolvedSource`, this becomes:
-
-```rust
-impl ResolvedSource {
-    pub fn local_path(&self) -> Option<&Path> {
-        match self {
-            ResolvedSource::Local(r) => Some(&r.path),
-            _ => None,
-        }
-    }
-}
-```
-
-Same logic, moved from core's `Source` to `archive-source`'s `ResolvedSource`.
-
-### Deleted from `archive-cli`
-
-- `src/provider.rs` — detection + construction + error formatting all move to
-  `archive-source`. CLI just calls `resolve()` and `classify_transport()`.
