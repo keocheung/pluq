@@ -2,9 +2,9 @@
 
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
-* **Current Phase:** Phase 4.5 — OAuth (Google Drive + Dropbox). Steps 1-3 complete (reviewed PASS). Step 4 scoped.
-* **Current Active Task:** `SESSION_PLAN_STEP_4.md`
-* **Baseline:** 391 tests pass. Clippy clean.
+* **Current Phase:** Phase 4.5 — OAuth (Google Drive + Dropbox). Steps 1-4 complete. Step 5 scoped.
+* **Current Active Task:** `SESSION_PLAN_STEP_5.md` — wire OAuth token management CLI (`snipe auth`).
+* **Baseline:** 398 tests pass. Clippy clean.
 
 
 ---

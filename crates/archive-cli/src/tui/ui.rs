@@ -1265,7 +1265,7 @@ mod ui_tests {
     fn home_renders_empty() {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         terminal.draw(|f| draw(f, &mut app)).unwrap();
     }
 
@@ -1273,7 +1273,7 @@ mod ui_tests {
     fn home_renders_with_bookmarks() {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
 
         use crate::home::bookmarks::{BookmarkEntry, BookmarkList};
         use crate::home::provider::Provider;
@@ -1295,7 +1295,7 @@ mod ui_tests {
     fn home_renders_with_overlay_editing() {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
 
         use crate::home::provider::Provider;
         use crate::tui::app::{BookmarkOverlay, OverlayMode, OverlayState};
@@ -1317,7 +1317,7 @@ mod ui_tests {
     fn home_renders_with_overlay_collision() {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
 
         use crate::home::provider::Provider;
         use crate::tui::app::{BookmarkOverlay, OverlayMode, OverlayState};

@@ -343,25 +343,29 @@ pub struct App {
 
     /// Bookmark overlay state. None when not active.
     pub bookmark_overlay: Option<BookmarkOverlay>,
+
+    pub token_store: Option<Arc<archive_auth::TokenStore>>,
 }
 
 impl App {
     /// Entry from `snipe <source>` — direct browse.
-    pub fn new_with_source(source: String) -> Self {
+    pub fn new_with_source(source: String, token_store: Option<Arc<archive_auth::TokenStore>>) -> Self {
         let mut app = Self::default_state();
         app.source = source;
         app.phase = AppPhase::Opening;
         app.launched_from_home = false;
+        app.token_store = token_store;
         app
     }
 
     /// Entry from bare `snipe` — Home Screen.
-    pub fn new_home() -> Self {
+    pub fn new_home(token_store: Option<Arc<archive_auth::TokenStore>>) -> Self {
         let mut app = Self::default_state();
         app.phase = AppPhase::Home;
         app.home_recent = crate::home::recent::RecentList::load();
         app.home_bookmarks = crate::home::bookmarks::BookmarkList::load();
         app.launched_from_home = true;
+        app.token_store = token_store;
         app
     }
 
@@ -404,11 +408,12 @@ impl App {
             home_bookmarks_selected: 0,
             launched_from_home: false,
             bookmark_overlay: None,
+            token_store: None,
         }
     }
 
-    pub fn new(source: String) -> Self {
-        Self::new_with_source(source)
+    pub fn new(source: String, token_store: Option<Arc<archive_auth::TokenStore>>) -> Self {
+        Self::new_with_source(source, token_store)
     }
 
     /// Returns the archive stem name for use as the default extraction folder.
@@ -761,7 +766,11 @@ impl App {
 
     /// Common logic for opening an archive from Home (Snipe Input or Recent).
     fn submit_home_source(&mut self, source: String, tx: &mpsc::UnboundedSender<AppMessage>) {
-        let config = SourceConfig::new();
+        let mut config = SourceConfig::new();
+        if let Some(store) = &self.token_store {
+            config = config.with_token_store(store.clone());
+        }
+        
         match resolve(&source, &config) {
             Ok(reader) => {
                 let provider = crate::home::provider::Provider::from_resolved(&reader);
@@ -2004,7 +2013,7 @@ mod home_tests {
 
     #[test]
     fn test_app_new_home() {
-        let app = App::new_home();
+        let app = App::new_home(None);
         assert!(matches!(app.phase, AppPhase::Home));
         assert!(app.launched_from_home);
         assert_eq!(app.home_focus, HomeFocus::SnipeInput);
@@ -2016,7 +2025,7 @@ mod home_tests {
     #[test]
     fn test_app_new_with_source() {
         let source = "foo.zip".to_string();
-        let app = App::new_with_source(source.clone());
+        let app = App::new_with_source(source.clone(), None);
         assert!(matches!(app.phase, AppPhase::Opening));
         assert!(!app.launched_from_home);
         assert_eq!(app.source, source);
@@ -2024,7 +2033,7 @@ mod home_tests {
 
     #[test]
     fn test_home_focus_cycling() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         // Tab cycles forwards
@@ -2046,7 +2055,7 @@ mod home_tests {
 
     #[test]
     fn test_home_snipe_input() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         // Type "/tmp/foo.zip"
@@ -2070,7 +2079,7 @@ mod home_tests {
 
     #[test]
     fn test_tab_cycles_focus_when_empty() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         assert_eq!(app.home_focus, HomeFocus::SnipeInput);
         assert!(app.snipe_input.is_empty());
@@ -2081,7 +2090,7 @@ mod home_tests {
 
     #[test]
     fn test_tab_cycles_focus_when_url() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         app.snipe_input = "https://google.com".to_string();
 
@@ -2096,7 +2105,7 @@ mod home_tests {
         let file_path = dir.path().join("foo.zip");
         std::fs::File::create(&file_path).unwrap();
 
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         app.snipe_input = format!("{}/f", dir.path().to_string_lossy());
 
@@ -2112,7 +2121,7 @@ mod home_tests {
 
     #[test]
     fn test_backtab_always_cycles_focus() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         app.snipe_input = "/tmp/foo".to_string();
 
@@ -2123,7 +2132,7 @@ mod home_tests {
 
     #[test]
     fn test_home_snipe_input_accepts_shift_chars() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         // Uppercase letter (crossterm reports Char('H') + SHIFT on most terminals).
@@ -2137,7 +2146,7 @@ mod home_tests {
 
     #[test]
     fn test_home_recent_navigation() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         // Clear bookmarks to ensure Recent entries are visible
         app.home_bookmarks = BookmarkList::default();
@@ -2186,7 +2195,7 @@ mod home_tests {
 
     #[test]
     fn test_home_recent_delete() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         // Clear bookmarks to ensure Recent entries are visible
         app.home_bookmarks = BookmarkList::default();
@@ -2226,7 +2235,7 @@ mod home_tests {
 
     #[test]
     fn test_home_esc_noop() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         app.handle_key(make_key(KeyCode::Esc), &tx);
@@ -2236,7 +2245,7 @@ mod home_tests {
 
     #[test]
     fn test_home_handle_key_q() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         // Focused on SnipeInput: 'q' should type "q", not quit.
@@ -2257,7 +2266,7 @@ mod home_tests {
 
     #[test]
     fn test_q_from_home_recent_ignores_ctrl() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         app.home_focus = HomeFocus::Recent;
@@ -2279,7 +2288,7 @@ mod home_tests {
 
     #[test]
     fn test_home_snipe_enter_empty() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         app.snipe_input = "   ".to_string();
@@ -2292,7 +2301,7 @@ mod home_tests {
 
     #[tokio::test]
     async fn test_home_snipe_enter_unresolvable() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         // GDrive URL without file ID should fail resolution
@@ -2305,7 +2314,7 @@ mod home_tests {
 
     #[tokio::test]
     async fn test_home_snipe_enter_success() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         app.snipe_input = "test.zip".to_string();
@@ -2320,7 +2329,7 @@ mod home_tests {
 
     #[test]
     fn test_record_recent_from_home() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         app.source = "test.zip".to_string();
         app.home_pending_name = Some("Test Archive".to_string());
         app.home_pending_provider = Some(Provider::Local);
@@ -2336,7 +2345,7 @@ mod home_tests {
 
     #[test]
     fn test_record_recent_not_from_home() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         app.launched_from_home = false;
         app.home_recent = RecentList::default();
 
@@ -2346,7 +2355,7 @@ mod home_tests {
 
     #[test]
     fn test_return_to_home() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         app.source = "test.zip".into();
         app.phase = AppPhase::Browsing;
         app.current_path = vec!["subdir".into()];
@@ -2365,7 +2374,7 @@ mod home_tests {
 
     #[test]
     fn test_esc_to_home_from_browsing_root() {
-        let mut app = App::new_home(); // sets launched_from_home = true
+        let mut app = App::new_home(None); // sets launched_from_home = true
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         app.phase = AppPhase::Browsing;
@@ -2377,7 +2386,7 @@ mod home_tests {
 
     #[test]
     fn test_esc_noop_from_browsing_root_not_launched_from_home() {
-        let mut app = App::new_with_source("test.zip".into());
+        let mut app = App::new_with_source("test.zip".into(), None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         app.phase = AppPhase::Browsing;
@@ -2390,7 +2399,7 @@ mod home_tests {
 
     #[test]
     fn test_esc_to_home_from_error() {
-        let mut app = App::new_home(); // sets launched_from_home = true
+        let mut app = App::new_home(None); // sets launched_from_home = true
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         app.phase = AppPhase::Error("bad".into());
@@ -2401,7 +2410,7 @@ mod home_tests {
 
     #[tokio::test]
     async fn test_recent_enter_opens() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         let entries = vec![RecentEntry {
@@ -2426,7 +2435,7 @@ mod home_tests {
 
     #[test]
     fn test_q_from_home_quits() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         app.home_focus = HomeFocus::Recent;
@@ -2436,7 +2445,7 @@ mod home_tests {
 
     #[test]
     fn test_new_home_init_state() {
-        let app = App::new_home();
+        let app = App::new_home(None);
         assert_eq!(app.home_bookmarks_selected, 0);
         assert_eq!(app.home_recent_selected, 0);
         assert_eq!(app.home_focus, HomeFocus::SnipeInput);
@@ -2521,7 +2530,7 @@ mod home_tests {
 
     #[test]
     fn test_bookmarks_focus_nav() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         let b1 = BookmarkEntry {
@@ -2562,7 +2571,7 @@ mod home_tests {
 
     #[test]
     fn test_bookmarks_delete() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         let b1 = BookmarkEntry {
@@ -2592,7 +2601,7 @@ mod home_tests {
 
     #[tokio::test]
     async fn test_recent_enter_uses_visible_index() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         let r1 = RecentEntry {
@@ -2631,7 +2640,7 @@ mod home_tests {
 
     #[test]
     fn test_recent_delete_uses_visible_index() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         let r1 = RecentEntry {
@@ -2671,7 +2680,7 @@ mod home_tests {
 
     #[test]
     fn test_overlay_open_from_recent() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         app.home_bookmarks = BookmarkList::default();
 
@@ -2696,7 +2705,7 @@ mod home_tests {
     }
     #[test]
     fn test_overlay_esc_closes() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         app.bookmark_overlay = Some(BookmarkOverlay {
             mode: OverlayMode::Save {
@@ -2714,7 +2723,7 @@ mod home_tests {
 
     #[test]
     fn test_overlay_enter_saves_new() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         app.home_bookmarks = BookmarkList::default();
         app.bookmark_overlay = Some(BookmarkOverlay {
@@ -2739,7 +2748,7 @@ mod home_tests {
 
     #[test]
     fn test_overlay_enter_triggers_collision() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         let b1 = BookmarkEntry {
@@ -2771,7 +2780,7 @@ mod home_tests {
 
     #[test]
     fn test_overlay_collision_overwrite() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         let b1 = BookmarkEntry {
@@ -2803,7 +2812,7 @@ mod home_tests {
 
     #[test]
     fn test_overlay_collision_cancel() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         app.bookmark_overlay = Some(BookmarkOverlay {
@@ -2822,7 +2831,7 @@ mod home_tests {
 
     #[test]
     fn test_overlay_collision_rename_reopens_editing() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         app.bookmark_overlay = Some(BookmarkOverlay {
@@ -2845,7 +2854,7 @@ mod home_tests {
 
     #[test]
     fn test_overlay_from_browse() {
-        let mut app = App::new_with_source("foo.zip".into());
+        let mut app = App::new_with_source("foo.zip".into(), None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         app.phase = AppPhase::Browsing;
 
@@ -2862,7 +2871,7 @@ mod home_tests {
 
     #[test]
     fn test_overlay_accepts_shift_chars() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         app.bookmark_overlay = Some(BookmarkOverlay {
             mode: OverlayMode::Save {
@@ -2883,7 +2892,7 @@ mod home_tests {
 
     #[test]
     fn test_overlay_intercepts_keys() {
-        let mut app = App::new_with_source("foo.zip".into());
+        let mut app = App::new_with_source("foo.zip".into(), None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         app.phase = AppPhase::Browsing;
         app.bookmark_overlay = Some(BookmarkOverlay {
@@ -2902,7 +2911,7 @@ mod home_tests {
 
     #[test]
     fn test_rename_opens_overlay() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let b1 = BookmarkEntry {
             name: "MyArchive".into(),
@@ -2925,7 +2934,7 @@ mod home_tests {
 
     #[test]
     fn test_rename_submit_ok() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let b1 = BookmarkEntry {
             name: "A".into(),
@@ -2956,7 +2965,7 @@ mod home_tests {
 
     #[test]
     fn test_rename_submit_collision() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let b1 = BookmarkEntry {
             name: "A".into(),
@@ -2994,7 +3003,7 @@ mod home_tests {
 
     #[test]
     fn test_rename_overwrite_removes_conflict() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let b1 = BookmarkEntry {
             name: "A".into(),
@@ -3037,7 +3046,7 @@ mod home_tests {
 
     #[test]
     fn test_rename_overwrite_when_conflict_after_target() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let b1 = BookmarkEntry {
             name: "A".into(),
@@ -3074,7 +3083,7 @@ mod home_tests {
 
     #[test]
     fn test_rename_out_of_range_noop() {
-        let mut app = App::new_home();
+        let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         app.home_bookmarks = BookmarkList::default();
         app.bookmark_overlay = Some(BookmarkOverlay {

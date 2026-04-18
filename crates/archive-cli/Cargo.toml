@@ -7,6 +7,7 @@ edition = "2024"
 archive = { path = "../archive" }
 archive-gdrive = { path = "../archive-gdrive" }
 archive-source = { path = "../archive-source" }
+archive-auth = { path = "../archive-auth" }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 crossterm = { version = "0.29", features = ["event-stream"] }

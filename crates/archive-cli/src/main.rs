@@ -122,10 +122,15 @@ async fn main() {
         eprintln!("\n  Cancelling...");
     });
 
+    let token_store = archive_auth::TokenStore::load_default()
+        .inspect_err(|e| warn!(error = %e, "failed to load OAuth token store; continuing without OAuth"))
+        .ok()
+        .map(std::sync::Arc::new);
+
     let run_result = match (cli.source, cli.command) {
-        (None, None) => run_home(cancel).await,
-        (Some(src), None) => run_browse(src, cancel).await,
-        (None, Some(cmd)) => run_subcommand(cmd, cancel).await,
+        (None, None) => run_home(cancel, token_store).await,
+        (Some(src), None) => run_browse(src, cancel, token_store).await,
+        (None, Some(cmd)) => run_subcommand(cmd, cancel, token_store).await,
         (Some(_), Some(_)) => unreachable!(), // args_conflicts_with_subcommands
     };
 
@@ -146,27 +151,37 @@ async fn main() {
     }
 }
 
-async fn run_home(_cancel: Arc<AtomicBool>) -> Result<(), Box<dyn std::error::Error>> {
-    tui::run_home().await
+fn source_config(token_store: Option<Arc<archive_auth::TokenStore>>) -> SourceConfig {
+    let mut cfg = SourceConfig::new();
+    if let Some(store) = token_store {
+        cfg = cfg.with_token_store(store);
+    }
+    cfg
+}
+
+async fn run_home(_cancel: Arc<AtomicBool>, token_store: Option<Arc<archive_auth::TokenStore>>) -> Result<(), Box<dyn std::error::Error>> {
+    tui::run_home(token_store).await
 }
 
 async fn run_browse(
     source: String,
     _cancel: Arc<AtomicBool>,
+    token_store: Option<Arc<archive_auth::TokenStore>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config = SourceConfig::new();
+    let config = source_config(token_store.clone());
     let reader = resolve(&source, &config)?;
-    tui::run_with_source(source, reader).await?;
+    tui::run_with_source(source, reader, token_store).await?;
     Ok(())
 }
 
 async fn run_subcommand(
     command: Command,
     cancel: Arc<AtomicBool>,
+    token_store: Option<Arc<archive_auth::TokenStore>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         Command::List { source, all } => {
-            let archive = open_with_progress(&source, &cancel).await?;
+            let archive = open_with_progress(&source, &cancel, token_store).await?;
 
             let entries: Vec<_> = if all {
                 archive.entries().iter().collect()
@@ -206,7 +221,7 @@ async fn run_subcommand(
             entry,
             output,
         } => {
-            let archive = open_with_progress(&source, &cancel).await?;
+            let archive = open_with_progress(&source, &cancel, token_store).await?;
 
             let found = archive
                 .entries()
@@ -259,9 +274,9 @@ async fn run_subcommand(
             output,
             all,
         } => {
-            let config = SourceConfig::new();
+            let config = source_config(token_store.clone());
             let reader = resolve(&source, &config)?;
-            let archive = open_with_progress(&source, &cancel).await?;
+            let archive = open_with_progress(&source, &cancel, token_store).await?;
 
             let entries: Vec<_> = if all {
                 archive.entries().iter().collect()
@@ -334,7 +349,7 @@ async fn run_subcommand(
             );
         }
         Command::Test { source, all } => {
-            let archive = open_with_progress(&source, &cancel).await?;
+            let archive = open_with_progress(&source, &cancel, token_store).await?;
 
             let entries: Vec<_> = if all {
                 archive.entries().iter().collect()
@@ -395,9 +410,10 @@ async fn run_subcommand(
 async fn open_with_progress(
     source: &str,
     cancel: &Arc<AtomicBool>,
+    token_store: Option<Arc<archive_auth::TokenStore>>,
 ) -> Result<Archive<ResolvedSource>, Box<dyn std::error::Error>> {
     eprintln!("  Opening {source}...");
-    let config = SourceConfig::new();
+    let config = source_config(token_store);
     let reader = resolve(source, &config)?;
     let opened = Archive::open_reader(source, reader).await?;
     match opened {

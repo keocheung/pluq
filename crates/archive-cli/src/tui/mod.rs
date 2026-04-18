@@ -31,9 +31,10 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io
 pub async fn run_with_source(
     source: String,
     reader: archive_source::ResolvedSource,
+    token_store: Option<std::sync::Arc<archive_auth::TokenStore>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!(source = %source, "TUI starting in Browse mode");
-    let app = app::App::new_with_source(source.clone());
+    let app = app::App::new_with_source(source.clone(), token_store);
 
     run_app(
         app,
@@ -50,9 +51,9 @@ pub async fn run_with_source(
     .await
 }
 
-pub async fn run_home() -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run_home(token_store: Option<std::sync::Arc<archive_auth::TokenStore>>) -> Result<(), Box<dyn std::error::Error>> {
     info!("TUI starting in Home mode");
-    let app = app::App::new_home();
+    let app = app::App::new_home(token_store);
     run_app(
         app,
         None::<fn(tokio::sync::mpsc::UnboundedSender<app::AppMessage>)>,

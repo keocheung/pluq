@@ -7,10 +7,12 @@ edition = "2024"
 archive-core = { path = "../archive-core" }
 archive-gdrive = { path = "../archive-gdrive" }
 archive-dropbox = { path = "../archive-dropbox" }
+archive-auth = { path = "../archive-auth" }
 bytes = "1"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 tokio = { version = "1", features = ["io-util"] }
 tracing = "0.1"
 
 [dev-dependencies]
+tempfile = "3.27.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
