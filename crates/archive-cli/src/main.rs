@@ -1,3 +1,4 @@
+mod auth_cmd;
 mod cli_progress;
 pub mod home;
 mod tui;
@@ -74,6 +75,11 @@ enum Command {
         /// Show all entries including OS-generated junk files.
         #[arg(long)]
         all: bool,
+    },
+    /// Manage OAuth tokens for cloud providers.
+    Auth {
+        #[command(subcommand)]
+        action: auth_cmd::AuthAction,
     },
 }
 
@@ -180,6 +186,9 @@ async fn run_subcommand(
     token_store: Option<Arc<archive_auth::TokenStore>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match command {
+        Command::Auth { action } => {
+            return auth_cmd::run_auth(action, token_store).await;
+        }
         Command::List { source, all } => {
             let archive = open_with_progress(&source, &cancel, token_store).await?;
 
@@ -574,5 +583,52 @@ mod tests {
             Some(PathBuf::from("1ExampleGDriveFileId000000000000"))
         );
         assert_eq!(default_output_folder(""), None);
+    }
+
+    #[test]
+    fn test_cli_parsing_auth_add() {
+        let cli = Cli::try_parse_from(["snipe", "auth", "add", "gdrive"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Auth {
+                action: auth_cmd::AuthAction::Add { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn test_cli_parsing_auth_list() {
+        let cli = Cli::try_parse_from(["snipe", "auth", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Auth { action: auth_cmd::AuthAction::List })
+        ));
+    }
+
+    #[test]
+    fn test_cli_parsing_auth_remove() {
+        let cli = Cli::try_parse_from(["snipe", "auth", "remove", "dropbox"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Auth {
+                action: auth_cmd::AuthAction::Remove { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn test_cli_parsing_auth_invalid_provider() {
+        let result = Cli::try_parse_from(["snipe", "auth", "add", "onedrive"]);
+        assert!(result.is_err()); // clap ValueEnum rejects unknown
+    }
+
+    #[test]
+    fn test_cli_parsing_auth_with_timeout() {
+        let cli = Cli::try_parse_from(["snipe", "auth", "add", "gdrive", "--timeout", "60"]).unwrap();
+        if let Some(Command::Auth { action: auth_cmd::AuthAction::Add { timeout, .. } }) = cli.command {
+            assert_eq!(timeout, 60);
+        } else {
+            panic!("expected Auth::Add with timeout=60");
+        }
     }
 }

@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 archive = { path = "../archive" }
 archive-gdrive = { path = "../archive-gdrive" }
+archive-dropbox = { path = "../archive-dropbox" }
 archive-source = { path = "../archive-source" }
 archive-auth = { path = "../archive-auth" }
 chrono = { version = "0.4", features = ["serde"] }
