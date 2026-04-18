@@ -1,777 +1,177 @@
 # ArchiveSniper — Error Architecture
 
-> **Source of truth** for how errors flow across layers.
-> Last updated: 2026-03-23.
-> See also: `ARCHITECTURE.md` (system architecture), `CONTEXT.md` (project state).
+> **Switchboard.** Canonical philosophy + 4-tier model + flow summary below.
+> Variant definitions, decorator code, translation match arms live in
+> `errors/` spokes — pull on demand.
+> See also: `ARCHITECTURE.md` (system layers), `CONTEXT.md` (project state).
 
 ---
 
-## Philosophy
+## Philosophy (non-negotiable)
 
-**Each layer defines errors for its consumer.** No layer exposes a lower layer's error types. Errors are either **handled** (retry, prompt, recover — the error disappears) or **translated** into the consumer's vocabulary. Never wrapped.
-
-**If you can handle it, handle it.** An error only travels upward when the current layer genuinely cannot deal with it. Many errors never reach the UI because an intermediate layer resolved them.
-
-**The unhandleable falls to a catch-all.** If no layer has a specific response for an error, it becomes a generic "something went wrong" with enough detail for logging/debugging. The user gets a human message, not a stack trace.
-
-**Errors carry context for their audience.** I/O errors carry source paths/URLs and structured failure reasons so decorators can route programmatically AND products can generate helpful user messages — without string parsing.
+1. **Each layer defines errors for its consumer.** No layer exposes a
+   lower layer's error types upward.
+2. **Handle or translate, never wrap.** An error either disappears
+   (retry, prompt, recover) or becomes the consumer's vocabulary.
+3. **The unhandleable falls to a catch-all.** Generic "something went
+   wrong" with enough context for logging — never a stack trace shown to
+   the user.
+4. **Errors carry context for two audiences.** Decorators route
+   programmatically (match on enum variants). Products build user
+   messages (no string parsing).
+5. **Decorator errors tunnel blindly.** `ReadError::Transport(Box<dyn>)`
+   carries opaque decorator errors through core and the state layer
+   untouched. Only the product opens the box and downcasts.
 
 ---
 
 ## The Four Error Tiers
 
-```
+```text
 ╔════════════════════════════════════════════════════════════════════╗
-║  Layer 4 (Products) sees: ArchiveError                                ║
-║    - Handles universal errors directly                              ║
-║    - Opens ArchiveError::Transport for decorator errors               ║
-║    - Defines own error type (ServerError, AppError, etc.)           ║
+║ Tier 3 — Layer 4 (Products) sees: ArchiveError                      ║
+║   • Handle universal errors directly                                ║
+║   • Open ArchiveError::Transport, downcast to known decorator types ║
+║   • Translate to product-level error (ServerError, AppError, etc.)  ║
 ╠════════════════════════════════════════════════════════════════════╣
-║  Layer 3 (Archive — Facade + State)                                ║
-║    - Receives CoreError from format parsers                      ║
-║    - Handles/translates core errors it understands                  ║
-║    - Finds ReadError::Transport inside CoreError::Io             ║
-║      and tunnels it blindly as ArchiveError::Transport                ║
-║    - Creates its own errors (cache, session state)                  ║
+║ Tier 2 — Layer 3 (Archive — Facade + State) produces: ArchiveError  ║
+║   • Receives CoreError from format parsers                          ║
+║   • Translates core errors it understands                           ║
+║   • Builds user-friendly message from ReadFailure context           ║
+║   • Promotes ReadError::Transport → ArchiveError::Transport (blind) ║
 ╠════════════════════════════════════════════════════════════════════╣
-║  Layer 2 (Format Parsers) produces: CoreError                    ║
-║    - Every variant is a format/archive concept                      ║
-║    - Io(ReadError) wraps I/O errors from ReadAt calls               ║
-║    - No Transport variant — tunnel lives inside ReadError            ║
+║ Tier 1 — Layer 2 (Format Parsers) produces: CoreError               ║
+║   • Every variant is a format/archive concept                       ║
+║   • Io(ReadError) wraps I/O at the parser boundary                  ║
+║   • No Transport variant — tunnel lives inside ReadError            ║
 ╠════════════════════════════════════════════════════════════════════╣
-║  Layer 0 (I/O) produces: ReadError                                  ║
-║    - Standalone I/O error language (local + remote)                 ║
-║    - Structured context for routing (decorators) AND display (UI)   ║
-║    - Transport tunnel: decorators inject opaque boxed errors here    ║
+║ Tier 0 — Layer 0 (I/O) produces: ReadError                          ║
+║   • Standalone I/O language (local + remote)                        ║
+║   • Failed(ReadFailure) — structured kind for routing + display     ║
+║   • Transport(Box) — opaque decorator tunnel injected here          ║
+║   • OutOfBounds — semantic upconversion to CorruptHeader at parser  ║
 ╚════════════════════════════════════════════════════════════════════╝
 ```
 
 ---
 
-## Tier 0: `ReadError` (I/O Layer)
+## Vocabulary Per Layer (one-liners)
 
-The I/O layer's own error language. Returned by all `ReadAt` methods (`read_range()`, `read_stream()`, `size()`). Covers both local filesystem and HTTP failures. Designed for two consumers:
-
-1. **Decorators** — need structured `ReadErrorKind` to route programmatically (retry? refresh token? give up?)
-2. **Users** (via products) — need `source`, `operation`, and `kind` to generate helpful messages
-
-```rust
-// Owned by archive-core (Layer 0).
-
-pub enum ReadError {
-    /// An actual I/O failure — network or filesystem.
-    /// Boxed because ReadFailure is 144 bytes (keeps ReadError at 32 bytes on the stack).
-    Failed(Box<ReadFailure>),
-
-    /// Opaque tunnel for decorator errors (Auth, Retry, Quota).
-    /// Decorators inject their own boxed error types here.
-    /// Core and state layer carry this blindly. Products open and downcast.
-    Transport(Box<dyn Error + Send + Sync>),
-
-    /// Requested range exceeds source size (HTTP 416, read past EOF).
-    /// Format parsers convert this to CoreError::CorruptHeader —
-    /// if the parser asked for nonexistent bytes, the header data was wrong.
-    OutOfBounds { offset: u64, len: u64, size: u64 },
-}
-```
-
-### ReadFailure — full context for every I/O error
-
-```rust
-pub struct ReadFailure {
-    /// Which source failed. Critical when MultiVolumeReadAt is involved:
-    /// "I/O error reading volume 3 (archive.part3.rar)" instead of
-    /// "something failed somewhere."
-    pub source: SourceInfo,
-
-    /// What the I/O layer was doing when it failed.
-    pub operation: ReadOperation,
-
-    /// Structured failure reason. Decorators match on this for routing.
-    /// Products use this + source + operation to build user messages.
-    pub kind: ReadErrorKind,
-
-    /// Raw diagnostic from the underlying library (reqwest, tokio::fs, etc.).
-    /// For logs and debugging only — never shown to users directly.
-    pub diagnostic: String,
-}
-
-pub enum SourceInfo {
-    LocalFile { path: PathBuf },
-    Http      { url: String },
-}
-
-pub enum ReadOperation {
-    /// Initial open / connection establishment.
-    Open,
-    /// HEAD request or file stat to determine total size.
-    SizeCheck,
-    /// Actual byte-range read.
-    ReadRange { offset: u64, len: u64 },
-}
-```
-
-### ReadErrorKind — the routing + display language
-
-Every variant carries enough structured data so that:
-- **Decorators** can match and decide without parsing strings
-- **Products** can build specific, helpful user messages
-
-```rust
-pub enum ReadErrorKind {
-    // ── Network transport (TCP/TLS level — no HTTP status code) ──────────
-
-    /// TCP connection or data transfer timed out.
-    /// User message: "Connection to Dropbox timed out. Check your internet."
-    NetworkTimeout { phase: NetworkPhase },
-
-    /// TCP connection was reset during data transfer.
-    /// User message: "Connection dropped while downloading. [Retry]"
-    NetworkReset,
-
-    /// TLS handshake failed (cert expired, self-signed, hostname mismatch).
-    /// User message: "SSL certificate error for dropbox.com: {reason}"
-    TlsFailure { reason: String },
-
-    /// DNS resolution failed — likely offline or bad hostname.
-    /// User message: "Cannot reach 'example.com'. Check your internet connection."
-    DnsFailure { hostname: String },
-
-    // ── HTTP application level ───────────────────────────────────────────
-
-    /// Server returned an HTTP error status.
-    /// Decorators inspect `code` for routing:
-    ///   - 401 → AuthReadAt refreshes token
-    ///   - 429/503 → RetryReadAt checks Retry-After header, backs off
-    ///   - 404 → nobody handles, fatal
-    /// `body` often contains XML/JSON from cloud providers explaining why.
-    /// User message: "Dropbox returned error 403: {parsed body or code meaning}"
-    HttpStatus {
-        code:    u16,
-        headers: Vec<(String, String)>,
-        body:    Option<Bytes>,
-    },
-
-    /// Server returned 200 OK instead of 206 Partial Content.
-    /// Cloud sniping is impossible — this URL does not support range requests.
-    /// User message: "This server does not support partial downloads."
-    RangeNotSupported,
-
-    // ── Local filesystem ─────────────────────────────────────────────────
-
-    /// OS denied read access to the file.
-    /// User message: "Permission denied: cannot read '{path}'"
-    PermissionDenied,
-
-    /// File no longer exists (deleted or moved after we started).
-    /// User message: "'{path}' was moved or deleted while reading."
-    FileNotFound,
-
-    /// Hardware or OS-level I/O error (bad sector, failing drive).
-    /// Retrying will not help. `os_code` for diagnostics.
-    /// User message: "Disk error reading '{path}'. The storage device may be failing."
-    DiskIoError { os_code: Option<i32> },
-
-    /// Another process holds an exclusive lock (common on Windows).
-    /// Brief retry may resolve this.
-    /// User message: "'{path}' is locked by another program. Close it and retry."
-    FileLocked,
-
-    /// System call interrupted (EINTR). Safe to retry immediately.
-    Interrupted,
-}
-
-pub enum NetworkPhase {
-    /// Never reached the server — TCP connect failed or timed out.
-    Connect,
-    /// Reached the server, TLS handshake failed.
-    Tls,
-    /// Connection was established, data transfer was interrupted.
-    Transfer,
-}
-```
-
-### How decorators use ReadErrorKind
-
-Decorators implement `ReadAt`. They call `self.inner.read_range()`, get `Result<_, ReadError>`, inspect the kind, and decide:
-
-```rust
-// RetryReadAt — retry transient failures with backoff.
-fn is_retryable(kind: &ReadErrorKind) -> bool {
-    matches!(kind,
-        ReadErrorKind::NetworkTimeout { .. }
-        | ReadErrorKind::NetworkReset
-        | ReadErrorKind::Interrupted
-        | ReadErrorKind::FileLocked
-        | ReadErrorKind::HttpStatus { code: 429 | 503, .. }
-    )
-}
-
-fn retry_delay(kind: &ReadErrorKind) -> Duration {
-    match kind {
-        ReadErrorKind::HttpStatus { code: 429, ref headers, .. } =>
-            parse_retry_after(headers).unwrap_or(Duration::from_secs(5)),
-        ReadErrorKind::Interrupted => Duration::ZERO,
-        ReadErrorKind::FileLocked => Duration::from_millis(200),
-        _ => Duration::from_secs(2),  // default backoff
-    }
-}
-```
-
-```rust
-// AuthReadAt — intercept 401, attempt token refresh.
-// Shows read_range; read_stream follows the same pattern.
-impl ReadAt for AuthReadAt {
-    async fn read_range(&self, offset: u64, len: u64)
-        -> Result<Bytes, ReadError>
-    {
-        match self.inner.read_range(offset, len).await {
-            Ok(bytes) => Ok(bytes),
-            Err(ReadError::Failed(ref f))
-                if matches!(f.kind, ReadErrorKind::HttpStatus { code: 401, .. }) =>
-            {
-                // Try refreshing the token
-                match self.token_provider.refresh().await {
-                    Ok(new_token) => {
-                        self.update_headers(new_token);
-                        self.inner.read_range(offset, len).await  // retry with new token
-                    }
-                    Err(e) => Err(ReadError::Transport(
-                        Box::new(AuthError::RefreshFailed { detail: e.to_string() })
-                    )),
-                }
-            }
-            Err(other) => Err(other),  // pass through
-        }
-    }
-
-    async fn read_stream(&self, offset: u64, len: u64)
-        -> Result<Box<dyn AsyncRead + Send + Unpin>, ReadError>
-    {
-        // Same 401-intercept pattern as read_range.
-        // Retries the connection; once a stream is returned, mid-stream errors
-        // are the caller's problem (retry at that level is not possible).
-        match self.inner.read_stream(offset, len).await {
-            Ok(stream) => Ok(stream),
-            Err(ReadError::Failed(ref f))
-                if matches!(f.kind, ReadErrorKind::HttpStatus { code: 401, .. }) =>
-            {
-                match self.token_provider.refresh().await {
-                    Ok(new_token) => {
-                        self.update_headers(new_token);
-                        self.inner.read_stream(offset, len).await
-                    }
-                    Err(e) => Err(ReadError::Transport(
-                        Box::new(AuthError::RefreshFailed { detail: e.to_string() })
-                    )),
-                }
-            }
-            Err(other) => Err(other),
-        }
-    }
-}
-```
+- **`ReadError`** — `archive-core` Layer 0. Variants: `Failed(ReadFailure)`,
+  `Transport(Box)`, `OutOfBounds`.
+- **`ReadFailure`** — `archive-core` Layer 0. Fields: `source`, `operation`,
+  `kind`, `diagnostic`.
+- **`ReadErrorKind`** — `archive-core` Layer 0. Network / HTTP status /
+  local FS variants. See `errors/read-error.md` for the full table.
+- **Decorator errors** — each horizontal crate owns its own. `AuthError`
+  (in `archive-auth`), `RetryError` (in `archive-retry`), `QuotaError`
+  (server-internal). Each independent. Boxed into `ReadError::Transport`.
+- **`CoreError`** — `archive-core` Layer 2. Variants: `Io`, `InvalidFormat`,
+  `UnsupportedFormat`, `UnsupportedCompression`, `UnsupportedFeature`,
+  `CorruptHeader`, `BitstreamError`, `CrcMismatch`, `PathTraversal`,
+  `SymlinkTargetEscape`, `ResourceLimitExceeded`, `PasswordRequired`,
+  `WrongPassword`, `Cancelled`. **No `Transport` variant** — tunnel rides
+  inside `Io(ReadError::Transport)`.
+- **`ArchiveError`** — `archive` Layer 3. Variants: `FileCorrupted`,
+  `PasswordNeeded`, `UnsupportedFormat`, `SecurityRisk`, `ConnectionFailed`,
+  `Cancelled`, `CacheInvalid`, `Internal`, `Transport`.
+- **`ServerError` / `AppError` / `CliError`** — each product owns its own.
+  Extends `ArchiveError` translation with product-specific variants (auth,
+  quota, etc.). CLI never sees `Transport` — composes no decorators.
 
 ---
 
-## Tier 0.5: Decorator Errors (Horizontal Crates)
+## Translation Flow Summary
 
-Created by `ReadAt` decorators from horizontal crates (e.g., `archive-auth`, `archive-retry`). Each horizontal crate defines its **own error type** — there is no single shared enum. Each crate is independent.
+```text
+Layer 0 (I/O)            Layer 2 (Parser)       Layer 3 (Archive)        Layer 4 (Product)
+ReadError                CoreError              ArchiveError             Product error / UI
+-----------              ------------           --------------           ------------------
 
-```rust
-// Owned by archive-auth crate.
-#[non_exhaustive]
-enum AuthError {
-    TokenExpired,
-    RefreshFailed { detail: String },
-}
+Failed{kind:NetTimeout}  → Io(ReadError::..)    → ConnectionFailed       → "Connection timed out"
+Failed{kind:PermDenied}  → Io(ReadError::..)    → ConnectionFailed       → "Permission denied: '...'"
+OutOfBounds              → CorruptHeader        → FileCorrupted          → "File is damaged"
 
-// Owned by server crate (not shared).
-#[non_exhaustive]
-enum QuotaError {
-    Hit { used: u64, limit: u64 },
-}
+                           InvalidFormat        → UnsupportedFormat      → "Not an archive"
+                           UnsupportedFormat    → UnsupportedFormat      → "Can't read format"
+                           UnsupportedCompr     → UnsupportedFormat      → "Can't decompress"
+                           UnsupportedFeature   → UnsupportedFormat      → "Feature missing"
 
-// Owned by archive-retry crate.
-#[non_exhaustive]
-enum RetryError {
-    Exhausted { attempts: u32 },
-}
-```
+                           CorruptHeader        → FileCorrupted          → "File is damaged"
+                           BitstreamError       → FileCorrupted          → "Extraction failed"
+                           CrcMismatch          → FileCorrupted          → "Integrity check failed"
 
-Each error type implements `std::error::Error + Send + Sync`. Decorators box them into `ReadError::Transport`. The box travels through core (as `CoreError::Io(ReadError::Transport(box))`) and the state layer (as `ArchiveError::Transport(box)`) untouched. The product at the top opens the box and downcasts to the types it knows from its own dependencies.
+                           PasswordRequired     → [handle: prompt]       → (disappears)
+                                                → PasswordNeeded         → password dialog
+                           WrongPassword        → [handle: retry]        → (disappears)
 
----
+                           PathTraversal        → SecurityRisk           → "Dangerous archive"
+                           SymlinkTargetEscape  → SecurityRisk           → "Dangerous link"
+                           ResourceLimitExceed  → Internal               → "Resource limit hit"
 
-## Tier 1: `CoreError` (Core)
+                           Cancelled            → Cancelled              → (operation stopped)
 
-Core's error type. Produced by format parsers (Layer 2) and the facade (Layer 3). Contains only format/archive concepts. I/O errors from `ReadAt` are wrapped as `Io(ReadError)` — core does not inspect or reinterpret them.
-
-```rust
-// Owned by archive-core.
-
-/// How a wrong password or decryption failure was detected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PasswordDetectionMethod {
-    /// Fast: Decrypted header bytes didn't match expected patterns (LZMA/Deflate/etc).
-    EarlyHeaderValidation,
-    /// Slow: Full decompression finished, but the resulting CRC-32 was wrong.
-    CrcMismatch,
-    /// Technical: The bitstream itself was garbage, causing the decompressor to error out.
-    DecompressionFailure,
-}
-
-#[non_exhaustive]
-#[derive(Debug, Error)]
-pub enum CoreError {
-    // --- I/O (from ReadAt calls) ---
-
-    /// Wraps the I/O layer's error. Format parsers do not inspect the contents —
-    /// they convert ReadError to CoreError::Io at the call boundary.
-    /// The ReadError::Transport box (if present) is preserved inside.
-    #[error("I/O error: {0}")]
-    Io(ReadError),
-
-    // --- Identification ---
-
-    /// Not an archive or signature mismatch (e.g., "This is a JPEG").
-    #[error("invalid archive format: {message}")]
-    InvalidFormat { message: String },
-
-    /// Known format, but version too new or variant not handled (e.g., "RAR v5").
-    #[error("unsupported archive format: {format}")]
-    UnsupportedFormat { format: String },
-
-    /// We can read the format, but don't have the algorithm (e.g., "LZMA", "PPMd").
-    #[error("unsupported compression: {algorithm}")]
-    UnsupportedCompression { algorithm: String },
-
-    /// Known format/compression, but using a specific feature (e.g., "Multi-volume ZIP").
-    #[error("unsupported feature: {detail}")]
-    UnsupportedFeature { detail: String },
-
-    // --- Integrity & Processing ---
-
-    /// Metadata is structurally broken (e.g., "ZIP Central Directory is missing bytes").
-    #[error("corrupt header at offset {offset:#x}: {reason}")]
-    CorruptHeader { offset: u64, reason: String },
-
-    /// The compressed data violates the algorithm's rules (logical corruption).
-    #[error("bitstream error: {detail}")]
-    BitstreamError { detail: String },
-
-    /// Final integrity check failed (data is wrong or password was incorrect).
-    #[error("CRC mismatch for '{entry}': expected {expected:#010x}, got {actual:#010x}")]
-    CrcMismatch { entry: String, expected: u32, actual: u32 },
-
-    // --- Security & Safety ---
-
-    /// Protection against "../../etc/passwd" style attacks.
-    #[error("path traversal detected: {path}")]
-    PathTraversal { path: String },
-
-    /// Protection against symlinks pointing to sensitive host files.
-    #[error("symlink target escape: {path} -> {target}")]
-    SymlinkTargetEscape { path: String, target: String },
-
-    /// Protection against "ZIP Bombs" or memory exhaustion (e.g., 1GB LZMA dictionary).
-    #[error("resource limit exceeded: {message}")]
-    ResourceLimitExceeded { message: String },
-
-    // --- Interaction ---
-
-    /// Triggers a password prompt in the UI.
-    #[error("password required")]
-    PasswordRequired,
-
-    /// Password was provided but failed (includes detection method for sniping UX).
-    #[error("wrong password ({method})")]
-    WrongPassword { method: PasswordDetectionMethod },
-
-    /// Signal that the user (or a timeout) stopped the task.
-    #[error("operation cancelled")]
-    Cancelled,
-}
-```
-
-**Key design points:**
-
-- **No `Transport` variant.** The decorator tunnel lives inside `ReadError::Transport`, which arrives at core wrapped in `CoreError::Io(ReadError::Transport(box))`. Core never creates, inspects, or handles transport errors.
-- **No raw `io::Error` or `reqwest::Error`.** All dependency errors are translated at their origin into `ReadError` (Layer 0) or `CoreError` variants (Layer 2). Nothing foreign leaks through.
-- **`#[non_exhaustive]`** forces downstream `match` to include a catch-all arm. Safe to add variants in future versions.
-- **`Io(ReadError)` replaces old `ReadFailed`.** Format parsers convert with `map_err(CoreError::Io)` — one call, no field extraction needed.
-
-**What format parsers do with `ReadError` from `ReadAt` calls:**
-
-```rust
-// In a format parser (header reads use read_range → Bytes):
-let header_bytes = self.reader.read_range(offset, len).await
-    .map_err(|e| match e {
-        ReadError::OutOfBounds { offset, len, size } =>
-            CoreError::CorruptHeader {
-                offset,
-                reason: format!("header read past end: {offset}+{len} > {size}"),
-            },
-        other => CoreError::Io(other),  // everything else wraps directly
-    })?;
-
-// For entry data extraction, use read_stream → AsyncRead:
-let stream = self.reader.read_stream(data_offset, compressed_size).await
-    .map_err(CoreError::Io)?;
-// stream is piped through SyncIoBridge → decoder → sink (see ARCHITECTURE.md § Async/Sync Boundary)
-```
-
----
-
-## Tier 2: `ArchiveError` (State Layer)
-
-The state layer's error type. Designed for product consumption. Contains only **universal** concepts that every product needs. No auth, billing, or quota errors — those are product-specific and travel through the `Transport` tunnel.
-
-```rust
-// Owned by archive.
-
-#[non_exhaustive]
-pub enum ArchiveError {
-    /// A file in the archive is damaged / failed integrity check.
-    FileCorrupted { filename: String },
-
-    /// Password is needed to access the archive or entry.
-    PasswordNeeded,
-
-    /// The archive format or compression method isn't supported.
-    UnsupportedFormat { detail: String },
-
-    /// The archive contains potentially dangerous paths.
-    SecurityRisk { detail: String },
-
-    /// Network or I/O communication failed.
-    /// Contains a user-friendly message built from ReadFailure context.
-    ConnectionFailed { detail: String },
-
-    /// The operation was cancelled by the user.
-    Cancelled,
-
-    /// Cached data is invalid or unreadable (non-fatal, triggers re-parse).
-    CacheInvalid,
-
-    /// An unexpected internal error. Logged for debugging.
-    Internal { detail: String },
-
-    /// Opaque tunnel for decorator errors that passed through core untouched.
-    /// The product opens this box and downcasts to types it knows.
-    Transport(Box<dyn std::error::Error + Send + Sync>),
-}
-```
-
-**Key design points:**
-
-- **No `Archive(CoreError)` wrapping.** Core errors are translated, not wrapped. `CrcMismatch` becomes `FileCorrupted`. `PasswordRequired` becomes `PasswordNeeded` (or gets handled via prompt and disappears).
-- **No product-specific variants.** `AuthenticationFailed` and `QuotaExceeded` do not exist here. They belong to product-level error types (`ServerError`, `AppError`). Products downcast from `ArchiveError::Transport` to find them.
-- **`ConnectionFailed` is built from `ReadFailure` context.** The state layer reads `source`, `operation`, and `kind` from the `ReadFailure` inside `CoreError::Io(ReadError::Failed(..))` and constructs a helpful user-facing message. The raw `ReadError` is consumed — products never see it.
-- **Transport tunnel via Io unwrap.** State layer finds `CoreError::Io(ReadError::Transport(box))` and promotes it to `ArchiveError::Transport(box)`. Same blind forwarding, one extra pattern match.
-- **State-layer-only errors** like `CacheInvalid` never touch core. They're created and handled entirely within the state layer, or passed to the product if it should know.
-
----
-
-## The Translation Flow
-
-### State layer: translate core errors, tunnel decorator errors, build user messages
-
-```rust
-// Pseudocode — the state layer's error translation logic.
-
-fn call_core(&self, operation) -> Result<T, ArchiveError> {
-    match self.archive.do_operation(operation).await {
-        Ok(val) => Ok(val),
-
-        // --- I/O errors: extract ReadError, route by variant ---
-
-        Err(CoreError::Io(ReadError::Transport(err_box))) =>
-            // TUNNEL: decorator error. Blind forward to product.
-            Err(ArchiveError::Transport(err_box)),
-
-        Err(CoreError::Io(ReadError::Failed(f))) =>
-            // BUILD USER MESSAGE from structured ReadFailure context.
-            Err(ArchiveError::ConnectionFailed {
-                detail: build_user_message(&f)
-            }),
-
-        Err(CoreError::Io(ReadError::OutOfBounds { .. })) =>
-            // Should have been converted to CorruptHeader by parser.
-            // If it reaches here, it's a bug.
-            Err(ArchiveError::Internal {
-                detail: "unexpected OutOfBounds at state layer".into()
-            }),
-
-        // --- Core errors: translate or handle ---
-
-        Err(CoreError::CrcMismatch { entry, .. }) =>
-            Err(ArchiveError::FileCorrupted { filename: entry }),
-
-        Err(CoreError::PasswordRequired) => {
-            // HANDLE: prompt user for password, retry with password.
-            // If user provides correct password → Ok(val), error disappears.
-            // If user cancels → Err(ArchiveError::Cancelled)
-            // If wrong password → Err(ArchiveError::PasswordNeeded)
-        }
-
-        Err(CoreError::WrongPassword { method }) => {
-            // HANDLE: detect if fast failure (EarlyHeaderValidation) vs slow
-            Err(ArchiveError::PasswordNeeded)
-        }
-
-        Err(CoreError::PathTraversal { path }) =>
-            Err(ArchiveError::SecurityRisk {
-                detail: format!("dangerous path: {path}")
-            }),
-
-        Err(CoreError::SymlinkTargetEscape { path, target }) =>
-            Err(ArchiveError::SecurityRisk {
-                detail: format!("dangerous symlink: {path} -> {target}")
-            }),
-
-        Err(CoreError::UnsupportedCompression { algorithm }) =>
-            Err(ArchiveError::UnsupportedFormat { detail: algorithm }),
-
-        Err(CoreError::UnsupportedFormat { format }) =>
-            Err(ArchiveError::UnsupportedFormat { detail: format }),
-
-        Err(CoreError::InvalidFormat { message }) =>
-            Err(ArchiveError::UnsupportedFormat { detail: message }),
-
-        Err(CoreError::UnsupportedFeature { detail }) =>
-            Err(ArchiveError::UnsupportedFormat { detail }),
-
-        Err(CoreError::BitstreamError { detail }) =>
-            Err(ArchiveError::FileCorrupted { filename: format!("decompression: {detail}") }),
-
-        Err(CoreError::CorruptHeader { reason, .. }) =>
-            Err(ArchiveError::FileCorrupted { filename: format!("header: {reason}") }),
-
-        Err(CoreError::Cancelled) =>
-            Err(ArchiveError::Cancelled),
-
-        Err(other) =>
-            Err(ArchiveError::Internal { detail: other.to_string() }),
-    }
-}
-
-/// Build a user-facing message from structured ReadFailure context.
-fn build_user_message(f: &ReadFailure) -> String {
-    let source_name = match &f.source {
-        SourceInfo::LocalFile { path } => path.display().to_string(),
-        SourceInfo::Http { url } => url.clone(),
-    };
-    match &f.kind {
-        ReadErrorKind::NetworkTimeout { phase: NetworkPhase::Connect } =>
-            format!("Connection to '{}' timed out. Check your internet.", source_name),
-        ReadErrorKind::NetworkTimeout { phase: NetworkPhase::Transfer } =>
-            format!("Connection to '{}' dropped during download.", source_name),
-        ReadErrorKind::TlsFailure { reason } =>
-            format!("SSL error for '{}': {}", source_name, reason),
-        ReadErrorKind::DnsFailure { hostname } =>
-            format!("Cannot reach '{}'. Check your internet connection.", hostname),
-        ReadErrorKind::HttpStatus { code: 404, .. } =>
-            format!("File not found at '{}' (HTTP 404).", source_name),
-        ReadErrorKind::HttpStatus { code, .. } =>
-            format!("Server error {} from '{}'.", code, source_name),
-        ReadErrorKind::RangeNotSupported =>
-            format!("'{}' does not support partial downloads. Cloud sniping unavailable.", source_name),
-        ReadErrorKind::PermissionDenied =>
-            format!("Permission denied: cannot read '{}'.", source_name),
-        ReadErrorKind::FileNotFound =>
-            format!("'{}' was moved or deleted.", source_name),
-        ReadErrorKind::DiskIoError { os_code } =>
-            format!("Disk error reading '{}'. The storage device may be failing. (code: {:?})", source_name, os_code),
-        ReadErrorKind::FileLocked =>
-            format!("'{}' is locked by another program.", source_name),
-        _ =>
-            format!("I/O error reading '{}': {}", source_name, f.diagnostic),
-    }
-}
-```
-
-### Product layer: open the tunnel, handle what you know
-
-The product assembled the decorator stack. It knows what error types are possible because it depends on those horizontal crates. It opens `ArchiveError::Transport`, tries to downcast, handles or reports.
-
-```rust
-// Pseudocode — product-level error handling (e.g., server).
-
-fn handle_state_result<T>(&self, result: Result<T, ArchiveError>) -> Result<T, ServerError> {
-    match result {
-        Ok(val) => Ok(val),
-
-        // --- OPEN THE TUNNEL: downcast to types I know about ---
-
-        Err(ArchiveError::Transport(err_box)) => {
-            // I composed AuthReadAt, so I know AuthError exists
-            if let Some(auth) = err_box.downcast_ref::<AuthError>() {
-                match auth {
-                    AuthError::TokenExpired => {
-                        // HANDLE: refresh token, retry
-                        // if works: Ok(val) — error disappears
-                        // if fails: Err(ServerError::AuthenticationFailed)
-                    }
-                    AuthError::RefreshFailed { .. } =>
-                        Err(ServerError::AuthenticationFailed),
-                }
-            }
-            // I composed MeteredReadAt, so I know QuotaError exists
-            else if let Some(quota) = err_box.downcast_ref::<QuotaError>() {
-                match quota {
-                    QuotaError::Hit { used, limit } =>
-                        Err(ServerError::QuotaExceeded { used: *used, limit: *limit }),
-                }
-            }
-            // Unknown — nothing I composed produced this. Log and abort.
-            else {
-                Err(ServerError::Internal {
-                    detail: format!("unexpected transport error: {err_box}")
-                })
-            }
-        }
-
-        // --- STATE ERRORS: translate or forward ---
-
-        Err(ArchiveError::FileCorrupted { filename }) =>
-            Err(ServerError::FileCorrupted { filename }),
-        Err(ArchiveError::PasswordNeeded) =>
-            Err(ServerError::PasswordNeeded),
-        // ... remaining variants ...
-        Err(other) =>
-            Err(ServerError::Internal { detail: other.to_string() }),
-    }
-}
-```
-
-**Key insight:** A CLI that doesn't compose any decorators will never receive `ArchiveError::Transport`. It can map that variant straight to `Internal` — it's structurally unreachable. The tunnel only carries what you put into it.
-
----
-
-## Error Flow Summary
-
-```
-Layer 0 (I/O)           Layer 2 (Parser)          Layer 3 (Archive)        Layer 4 (Product)
-ReadError               CoreError              ArchiveError               Product error / UI
------------             ------------              ----------               ------------------
-
-ReadError::Failed       → Io(ReadError::Failed)   → ConnectionFailed       → "Connection timed out"
-  kind: NetworkTimeout                               (user message from        (shown to user)
-  source: Http{url}                                   ReadFailure context)
-  diagnostic: "..."
-
-ReadError::Failed       → Io(ReadError::Failed)   → ConnectionFailed       → "Permission denied:
-  kind: PermissionDenied                              (user message)            cannot read '...'"
-  source: LocalFile{path}
-
-ReadError::OutOfBounds  → CorruptHeader           → FileCorrupted          → "File is damaged"
-  (semantic upconversion)
-
-                          InvalidFormat            → UnsupportedFormat      → "Not an archive"
-                          UnsupportedFormat        → UnsupportedFormat      → "Can't read format"
-                          UnsupportedCompression   → UnsupportedFormat      → "Can't decompress"
-                          UnsupportedFeature       → UnsupportedFormat      → "Feature missing"
-
-                          CorruptHeader            → FileCorrupted          → "File is damaged"
-                          BitstreamError           → FileCorrupted          → "Extraction failed"
-                          CrcMismatch              → FileCorrupted          → "Integrity check failed"
-
-                          PasswordRequired         → [handle: prompt]       → (disappears)
-                                                   → PasswordNeeded         → password dialog
-                          WrongPassword            → [handle: retry]        → (disappears)
-
-                          PathTraversal            → SecurityRisk           → "Dangerous archive"
-                          SymlinkTargetEscape      → SecurityRisk           → "Dangerous link"
-                          ResourceLimitExceeded    → Internal               → "Resource limit hit"
-
-                          Cancelled                → Cancelled              → (operation stopped)
-
---- Decorator tunnel (Transport box journey) ---
+— Decorator tunnel (Transport box journey) ——————————————————————————————
 
 AuthDecorator sees 401:
   ReadError::Transport(AuthError::TokenExpired)
-  → CoreError::Io(ReadError::Transport(box))
-  → ArchiveError::Transport(box)          [blind forward]
-  → Product opens: downcast to AuthError → refresh token → (disappears)
-                                                          or "Sign in again"
-
-MeteredDecorator:
-  ReadError::Transport(QuotaError::Hit)
-  → CoreError::Io(ReadError::Transport(box))
-  → ArchiveError::Transport(box)          [blind forward]
-  → Product opens: QuotaExceeded → "Buy more credits"
+   → CoreError::Io(ReadError::Transport(box))   [parser wraps]
+   → ArchiveError::Transport(box)               [state layer blind-forwards]
+   → Product downcasts → refresh token → (disappears)
+                                       or "Sign in again"
 
 KEY:
-  "→"             = TRANSLATION (new type, old consumed)
-  "[handle: ...]" = error handled here, may never reach product
-  "(disappears)"  = retry/prompt succeeded, product never sees it
-  "[blind forward]" = layer re-wraps without inspecting the box
+  →            = TRANSLATION (new type, old consumed)
+  [handle: …]  = error handled here, may never reach product
+  (disappears) = retry/prompt succeeded, product never sees it
+  blind-forward = layer re-wraps without inspecting the box
 ```
 
 ---
 
-## Decorator Construction (Product Assembles the Stack)
+## Spokes — Read on Demand
 
-The **product** constructs the decorator stack using horizontal crates, then passes the composed `ReadAt` to the state layer. The state layer passes it to core. Neither the state layer nor core knows about decorators.
+- **[ReadError (Tier 0)](errors/read-error.md)** —
+  Full `ReadError`, `ReadFailure`, `SourceInfo`, `ReadOperation`,
+  `ReadErrorKind` variant table with user-message hints, `NetworkPhase`.
+  *Read when:* adding an I/O variant, building a new `ReadAt`, deciding
+  retryability for a failure mode.
 
-```rust
-// Server product builds the stack:
+- **[CoreError (Tier 1)](errors/core-error.md)** —
+  Full `CoreError` enum with `thiserror` annotations,
+  `PasswordDetectionMethod`, parser conversion pattern
+  (`map_err(CoreError::Io)`, `OutOfBounds → CorruptHeader`).
+  *Read when:* adding a parser-level error, changing CRC/password flow.
 
-fn open_cloud_archive(&self, url: &str) -> Result<Archive, ServerError> {
-    // Bottom: core's dumb HTTP reader (streams response, returns ReadError)
-    let http = HttpReadAt::new(url);
+- **[ArchiveError (Tier 2)](errors/archive-error.md)** —
+  Full `ArchiveError` enum, state-layer translation match arms,
+  `build_user_message()` reference impl.
+  *Read when:* editing the state layer, changing user-facing wording,
+  adding a new translatable core error.
 
-    // Decorate: product-level concerns from horizontal crates
-    let authed  = AuthReadAt::new(http, self.token_provider.clone());   // archive-auth
-    let retried = RetryReadAt::new(authed, self.retry_policy.clone());  // archive-retry
-    let metered = MeteredReadAt::new(retried, self.quota_tracker.clone()); // server-internal
-
-    // Pass composed ReadAt to state layer — returns Archive (the product-facing handle)
-    let archive = self.state.open(metered).await?;  // returns Result<Archive, ArchiveError>
-
-    Ok(archive)
-}
-```
-
-```
-What core sees:          impl ReadAt ──── "give me bytes / give me a stream"
-What's actually there:   MeteredReadAt → RetryReadAt → AuthReadAt → HttpReadAt
-                         (server)        (retry crate)  (auth crate)  (core)
-
-Error path:  HttpReadAt returns ReadError::Failed(kind: HttpStatus{401})
-             AuthReadAt intercepts → refreshes token → retries
-             If refresh fails → ReadError::Transport(AuthError::RefreshFailed)
-             RetryReadAt sees Transport → not retryable, passes through
-             MeteredReadAt sees Transport → not its concern, passes through
-             Parser wraps as CoreError::Io(ReadError::Transport(box))
-             State layer → ArchiveError::Transport(box)
-             Server opens box → downcast to AuthError → ServerError::AuthFailed
-```
-
-A KMP app's stack might look completely different:
-
-```rust
-// KMP app — OAuth handled in Kotlin, passed as static header
-fn open_cloud_archive(&self, url: &str, bearer_token: &str) -> Result<Archive, AppError> {
-    let http = HttpReadAt::new(url)
-        .with_headers(vec![("Authorization", format!("Bearer {bearer_token}"))]);
-
-    // No auth decorator, no metering — just hand to state layer
-    let archive = self.state.open(http).await?;
-    Ok(archive)
-}
-```
+- **[Decorator Errors & Transport Tunnel](errors/transport-tunnel.md)** —
+  `AuthError`, `RetryError`, `QuotaError` examples; decorator `ReadAt`
+  impl (401 intercept + token refresh, retry-after parsing); product
+  downcast pattern; multi-decorator stack assembly.
+  *Read when:* writing a horizontal crate, adding a product-level error
+  type, debugging where a decorator error went.
 
 ---
 
-## Platform Notes
+## Mid-Stream Error Recovery (one-liner — full detail in spoke)
 
-Error types are pure Rust enums — fully cross-platform. Platform-specific concerns:
+`read_stream` impls embed `ReadError` inside `io::Error` before returning
+the `AsyncRead`. Decompression code recovers it via `into_inner()` +
+`downcast::<ReadError>()`. Successful downcast → `CoreError::Io`; failure
+→ `CoreError::BitstreamError`. Preserves structured context across the
+async→sync boundary. See `architecture/layer1-codec.md` for the full
+pattern.
 
-- **Desktop (KMP):** `ArchiveError` crosses FFI via UniFFI into Kotlin. Product-level errors (`AppError`) are defined in Kotlin. The UniFFI surface only exposes `ArchiveError` — clean, no phantom variants for quota/auth that can't occur on local-only usage.
-- **iOS/Android (KMP):** same as desktop — Compose Multiplatform UI, Rust core via UniFFI. OAuth may be handled entirely in Kotlin/Swift, bypassing Rust-side auth decorators.
-- **Server:** pure Rust, no FFI. `ServerError` extends `ArchiveError` with billing/auth variants.
-- **CLI:** pure Rust. `CliError` is minimal — most `ArchiveError` variants map directly. `ArchiveError::Transport` is structurally unreachable (CLI doesn't compose decorators).
+---
 
-The state layer's logic (translation, caching, user-message building) is pure cross-platform Rust. Decorators and product-level error handling are composed at the product level — each product picks what it needs.
+## Platform Notes (one-liner)
+
+Pure Rust enums, fully cross-platform. KMP apps cross FFI via UniFFI
+exposing only `ArchiveError` (no phantom server-only variants). CLI
+never receives `ArchiveError::Transport` — it composes no decorators —
+so it can map that variant straight to `Internal`.

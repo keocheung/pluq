@@ -134,7 +134,7 @@ These commands define the CLI's public API. The TUI is the default entry point.
 
 *   **Write Support:** Archive creation (`snipe pack`). ZIP first, then 7z. TUI file browser for selecting files.
 *   **Format Expansion:** 7z, TAR.GZ, ISO read support.
-*   **SaaS Server:** HTTP API for web-based sniping. Metered/freemium. See `ARCHITECTURE.md` § Products.
-*   **KMP Apps:** Android/iOS/Desktop via Compose Multiplatform + UniFFI. See `ARCHITECTURE.md` § Products.
+*   **SaaS Server:** HTTP API for web-based sniping. Metered/freemium. See `architecture/layer4-products.md`.
+*   **KMP Apps:** Android/iOS/Desktop via Compose Multiplatform + UniFFI. See `architecture/layer4-products.md`.
 *   **Cloud Archiving (Vault):** Stream files from cloud → compress → stream archive back.
 *   **Plugin Hooks:** External tool integration (fzf, yazi) at search/select/browse decision points.

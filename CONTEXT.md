@@ -14,13 +14,20 @@
 ### The Knowledge Tiers (How to read this project)
 
 *   **Tier 1 (Switchboard):** `CONTEXT.md` (You are here). Read first for orientation.
-*   **Tier 2 (Canonical Pillars):** `docs/ARCHITECTURE.md`, `docs/ERRORS.md`, `docs/ROADMAP.md`. Concrete specs. **These docs override CONTEXT.md gist.**
+*   **Tier 2 (Canonical Switchboards):** `docs/ARCHITECTURE.md`, `docs/ERRORS.md`, `docs/ROADMAP.md`, `docs/SOURCE.md`. **Always-load.** Hold the load-bearing mental model: 5 layers, 6 Golden Rules, 4-tier error model, dependency direction. **These override the CONTEXT.md gist.**
+*   **Tier 2.5 (On-Demand Spokes):** `docs/architecture/*.md`, `docs/errors/*.md`. Implementation detail behind each switchboard section. Pull individually using the "Read when" hints in the switchboard's spoke index. **Do not bulk-read the whole directory.**
 *   **Tier 3 (Sandbox):** `docs/sandbox/`. Transient/Human docs (experiments, learning). **IGNORE BY DEFAULT**.
 *   **Tier 4 (The Plan):** `SESSION_PLAN.md`. The instruction set for today.
 
+> **Anti-spaghetti rule.** The 5-layer model, 6 Golden Rules, crate
+> dependency direction, and 4-tier error model are non-negotiable. Spokes
+> are implementation detail — they explain *how*, not *whether*. If a
+> spoke seems to contradict a switchboard rule, the switchboard wins;
+> flag it for Stefan.
+
 ### Agent Developer Guidelines
 
-1.  **Start of Session:** Read this file first. Consult Tier 2 docs on-demand for deeper context.
+1.  **Start of Session:** Read this file first. Consult Tier 2 switchboards on-demand for deeper context. Pull a spoke only when its "Read when" hint matches the work.
 2.  **Session Planning:** Use a "Master-Step" pattern at the project root: `SESSION_PLAN.md` (overview/index) + `SESSION_PLAN_STEP_N.md` (detailed steps in separate files). This naming convention ensures they are automatically ignored by `.gitignore`.
 3.  **During Work:** Keep `Current Active Task` pointing to the active `SESSION_PLAN.md` step.
 3.  **End of Task:** Update `[Dynamic State]` (task pointer + baseline). On plan completion, reset to `[HANDOVER]`.
