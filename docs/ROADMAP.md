@@ -1,8 +1,5 @@
 # Archive Sniper — Active Roadmap
 
-## Phase 3c: Style Guide Compliance & Home Screen
-- [ ] **Fix 'q' key inconsistency** — 'q' quits even when SnipeInput is focused (URLs with 'q' untypable). Need to balance global 'q' mandate with input requirements.
-
 ## Phase 4: Cloud Provider API Readers
 - [ ] **OneDrive** — `archive-onedrive` crate. Resolve share link → driveItem via Microsoft Graph API, download with Range headers. *(v1.x — deferred)*
 

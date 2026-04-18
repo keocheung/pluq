@@ -49,6 +49,7 @@
 - [x] **Password-protected archive support** — Inline TUI prompt for encrypted archives.
 
 ### Phase 3c: Style Guide Compliance & Home Screen
+- [x] **Fix 'q' key inconsistency** — 'q' quits even when SnipeInput is focused (URLs with 'q' untypable). Fixed via Ctrl+q for quitting when input is focused.
 - [x] **Migrate non-browse screens to borderless layout** — Opening, Scanning, Extracting, ExtractingBatch, ConfirmExtract, and Error phases still use bordered `Block`. Migrate to the Content Screen layout (5-row, `─` separators).
 - [x] **Fix scanning gauge color** — Change from `Color::Green` to `accent` (Cyan) per palette.
 - [x] **Esc never quits** — Esc should be "back one level" only; remove quit-on-Esc-at-root. `q` is the sole exit.

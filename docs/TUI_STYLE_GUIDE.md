@@ -104,7 +104,12 @@ Modal overlays are rendered on top of this layout with a dimmed backdrop, not in
 | Key   | Action                            |
 | ----- | --------------------------------- |
 | `Esc` | **Back one level** (see below)    |
-| `q`   | **Quit the app** (the only way)   |
+| `q`   | **Quit the app** (see below)      |
+
+### Global Quit Behavior
+
+1. **Standard Context:** `q` is the universal key to quit the application from any screen.
+2. **Text Input Focused:** When an input field (like `SnipeInput`) is active, `q` is captured for text entry. In this context, `Ctrl+q` is used to quit the application.
 
 ### Esc Behavior (The "Back" Button)
 

@@ -1147,12 +1147,12 @@ fn draw_home(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     } else {
         match app.home_focus {
             HomeFocus::SnipeInput if app.snipe_input.is_empty() => {
-                "  Paste a link or path. Tab cycle  q quit".into()
+                "  Paste a link or path. Tab cycle  Ctrl+q quit".into()
             }
             HomeFocus::SnipeInput if looks_like_url(&app.snipe_input) => {
-                "  Enter open  Tab cycle  q quit".into()
+                "  Enter open  Tab cycle  Ctrl+q quit".into()
             }
-            HomeFocus::SnipeInput => "  Enter open  Tab complete  q quit".into(),
+            HomeFocus::SnipeInput => "  Enter open  Tab complete  Ctrl+q quit".into(),
             HomeFocus::Recent if !visible_recent.is_empty() => {
                 "  Enter open  b bookmark  d delete  Tab cycle  q quit".into()
             }

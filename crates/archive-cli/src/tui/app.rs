@@ -1010,7 +1010,12 @@ impl App {
             KeyCode::BackTab => {
                 self.home_focus = self.home_focus.prev();
             }
-            KeyCode::Char('q') => {
+            KeyCode::Char('q')
+                if key
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::CONTROL)
+                    == (self.home_focus == HomeFocus::SnipeInput) =>
+            {
                 self.should_quit = true;
             }
             KeyCode::Esc => {
@@ -1126,9 +1131,9 @@ impl App {
                     let source = self.snipe_input.trim().to_string();
                     if source.is_empty() {
                         self.home_input_error = Some("Paste a link or path first.".into());
-                        return;
+                    } else {
+                        self.submit_home_source(source, _tx);
                     }
-                    self.submit_home_source(source, _tx);
                 }
                 HomeFocus::Recent => {
                     let visible = self.recent_visible();
@@ -1474,7 +1479,7 @@ impl App {
                     });
                 }
             }
-            KeyCode::Char('q') => {
+            KeyCode::Char('q') if !matches!(self.phase, AppPhase::Home) => {
                 if matches!(
                     self.phase,
                     AppPhase::Extracting { .. } | AppPhase::ExtractingBatch { .. }
@@ -2234,6 +2239,40 @@ mod home_tests {
         let mut app = App::new_home();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
+        // Focused on SnipeInput: 'q' should type "q", not quit.
+        app.handle_key(make_key(KeyCode::Char('q')), &tx);
+        assert!(!app.should_quit);
+        assert_eq!(app.snipe_input, "q");
+
+        // Focused on SnipeInput: Ctrl+q should quit.
+        let ctrl_q = KeyEvent {
+            code: KeyCode::Char('q'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        app.handle_key(ctrl_q, &tx);
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn test_q_from_home_recent_ignores_ctrl() {
+        let mut app = App::new_home();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        app.home_focus = HomeFocus::Recent;
+
+        // Focused on Recent: Ctrl+q should be ignored.
+        let ctrl_q = KeyEvent {
+            code: KeyCode::Char('q'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        app.handle_key(ctrl_q, &tx);
+        assert!(!app.should_quit);
+
+        // Focused on Recent: plain 'q' should quit.
         app.handle_key(make_key(KeyCode::Char('q')), &tx);
         assert!(app.should_quit);
     }

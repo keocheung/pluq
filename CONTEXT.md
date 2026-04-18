@@ -2,8 +2,8 @@
 
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
-* **Current Phase:** Phase 4 — Dropbox Provider complete (app auth).
-* **Current Active Task:** [HANDOVER] Dropbox provider refactored to App Authentication (Basic auth with app key + secret — no token expiry). Ready for CLI integration.
+* **Current Phase:** Phase 4 — Dropbox Provider complete. TUI 'q' conflict fixed.
+* **Current Active Task:** [HANDOVER] TUI 'q' key conflict resolved (Ctrl+q for inputs). Typing 'q' in SnipeInput now works.
 * **Baseline:** 360 tests pass. Clippy clean.
 
 
