@@ -2,7 +2,7 @@ use std::time::Duration;
 use oauth2::basic::BasicClient;
 use oauth2::{
     AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge,
-    RedirectUrl, Scope, TokenResponse, TokenUrl,
+    RedirectUrl, RefreshToken, Scope, TokenResponse, TokenUrl,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -123,6 +123,70 @@ pub async fn authenticate(
     })
 }
 
+/// Exchange a refresh token for a fresh access token.
+///
+/// Provider crates call this on 401. Returns a new `StoredToken` with
+/// updated `access_token` + `expires_at`. `refresh_token` is preserved
+/// (Google may omit it from refresh responses — fall back to the old one).
+pub async fn refresh(
+    config: &ProviderOAuthConfig,
+    client_id: &str,
+    client_secret: Option<&str>,
+    refresh_token: &str,
+) -> Result<StoredToken, AuthError> {
+    let mut client = BasicClient::new(ClientId::new(client_id.to_string()))
+        .set_auth_uri(
+            AuthUrl::new(config.auth_url.to_string())
+                .map_err(|e| AuthError::OAuth(e.to_string()))?,
+        )
+        .set_token_uri(
+            TokenUrl::new(config.token_url.to_string())
+                .map_err(|e| AuthError::OAuth(e.to_string()))?,
+        );
+
+    if let Some(secret) = client_secret {
+        client = client.set_client_secret(ClientSecret::new(secret.to_string()));
+    }
+
+    let http_client = reqwest::ClientBuilder::new()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| AuthError::OAuth(e.to_string()))?;
+
+    // Note: `extra_auth_params` (e.g. `access_type=offline`, `prompt=consent`) are
+    // authorization-URL parameters for the browser redirect flow and have no meaning
+    // in a token-endpoint refresh request — intentionally not forwarded here.
+    let token_result = client
+        .exchange_refresh_token(&RefreshToken::new(refresh_token.to_string()))
+        .request_async(&http_client)
+        .await
+        .map_err(|e| AuthError::OAuth(e.to_string()))?;
+
+    let expires_at = token_result.expires_in().map(|d| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + d.as_secs()
+    });
+
+    // Google may omit the refresh token on refresh responses — preserve the old one.
+    let new_refresh_token = token_result
+        .refresh_token()
+        .map(|r| r.secret().to_string())
+        .or_else(|| Some(refresh_token.to_string()));
+
+    Ok(StoredToken {
+        access_token: token_result.access_token().secret().to_string(),
+        refresh_token: new_refresh_token,
+        expires_at,
+        scopes: token_result
+            .scopes()
+            .map(|s| s.iter().map(|scope| scope.to_string()).collect())
+            .unwrap_or_default(),
+    })
+}
+
 fn parse_callback_query(path: &str) -> Result<(String, String), AuthError> {
     let url = Url::parse(&format!("http://localhost{}", path)).map_err(|_| AuthError::Callback("Invalid path".to_string()))?;
     let pairs = url.query_pairs();
@@ -147,6 +211,8 @@ fn parse_callback_query(path: &str) -> Result<(String, String), AuthError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn test_parse_callback_query() {
@@ -160,5 +226,44 @@ mod tests {
     fn test_parse_callback_query_missing() {
         let path = "/callback?code=abc";
         assert!(parse_callback_query(path).is_err());
+    }
+
+    #[tokio::test]
+    async fn refresh_sends_correct_form_body() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .and(body_string_contains("grant_type=refresh_token"))
+            .and(body_string_contains("refresh_token=my_refresh_tok"))
+            .and(body_string_contains("client_id=my_client_id"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "new_access",
+                "token_type": "Bearer",
+                "expires_in": 3600
+            })))
+            .mount(&server)
+            .await;
+
+        // ProviderOAuthConfig fields are &'static str; leak the dynamic URL for
+        // the test (acceptable in test-only code).
+        let token_url: &'static str =
+            Box::leak(format!("{}/token", server.uri()).into_boxed_str());
+
+        let config = ProviderOAuthConfig {
+            name: "test",
+            auth_url: "https://example.com/auth",
+            token_url,
+            scopes: &[],
+            extra_auth_params: &[],
+        };
+
+        let token = refresh(&config, "my_client_id", None, "my_refresh_tok")
+            .await
+            .unwrap();
+
+        assert_eq!(token.access_token, "new_access");
+        // Refresh token should be preserved (response omitted it).
+        assert_eq!(token.refresh_token.as_deref(), Some("my_refresh_tok"));
     }
 }

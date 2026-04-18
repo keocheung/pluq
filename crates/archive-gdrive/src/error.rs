@@ -23,4 +23,7 @@ pub enum GDriveError {
 
     #[error("Google Drive API error: {detail}")]
     Api { status: u16, detail: String },
+
+    #[error("Google Drive: OAuth token refresh failed — {reason}")]
+    TokenRefreshFailed { reason: String },
 }

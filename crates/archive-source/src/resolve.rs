@@ -1,6 +1,6 @@
 use archive_core::{CachingReadAt, HttpReadAt, LocalReadAt};
 use archive_dropbox::{self, DropboxReadAt};
-use archive_gdrive::{self, GoogleDriveReadAt};
+use archive_gdrive::{self, GDriveAuth, GoogleDriveReadAt};
 use tracing::info;
 
 use crate::config::SourceConfig;
@@ -30,7 +30,7 @@ pub fn resolve(input: &str, _config: &SourceConfig) -> Result<ResolvedSource, So
                 reason: "could not extract Google Drive file ID".into(),
             })?;
 
-        let reader = CachingReadAt::new(GoogleDriveReadAt::new(file_id.clone(), api_key));
+        let reader = CachingReadAt::new(GoogleDriveReadAt::new(file_id.clone(), GDriveAuth::ApiKey(api_key)));
         return Ok(ResolvedSource::GDrive(reader, input.to_string(), file_id));
     }
 

@@ -111,6 +111,9 @@ fn classify_gdrive(e: &GDriveError) -> ProviderError {
         GDriveError::Api { .. } => ProviderError::InvalidCredentials {
             provider: "Google Drive",
         },
+        GDriveError::TokenRefreshFailed { .. } => ProviderError::InvalidCredentials {
+            provider: "Google Drive",
+        },
     }
 }
 
