@@ -38,12 +38,13 @@ pub fn resolve(input: &str, _config: &SourceConfig) -> Result<ResolvedSource, So
     if archive_dropbox::is_dropbox_url(input) {
         info!(url = %input, "Dropbox URL detected");
 
-        let token = archive_dropbox::token().ok_or_else(|| SourceError::NoCredentials {
-            provider: "Dropbox",
-            guidance: "Set ARCHIVE_SNIPER_DROPBOX_TOKEN environment variable.".into(),
-        })?;
+        let (app_key, app_secret) =
+            archive_dropbox::app_credentials().ok_or_else(|| SourceError::NoCredentials {
+                provider: "Dropbox",
+                guidance: "Set ARCHIVE_SNIPER_DROPBOX_APP_KEY and ARCHIVE_SNIPER_DROPBOX_APP_SECRET environment variables.".into(),
+            })?;
 
-        let reader = CachingReadAt::new(DropboxReadAt::new(input.to_string(), token));
+        let reader = CachingReadAt::new(DropboxReadAt::new(input.to_string(), app_key, app_secret));
         return Ok(ResolvedSource::Dropbox(reader, input.to_string()));
     }
 
@@ -75,11 +76,12 @@ mod tests {
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn dropbox_url_without_token_returns_no_credentials() {
+    fn dropbox_url_without_app_credentials_returns_no_credentials() {
         let _guard = ENV_MUTEX.lock().unwrap();
         // SAFETY: test mutates process env. Run single-threaded if flaky.
         unsafe {
-            std::env::remove_var("ARCHIVE_SNIPER_DROPBOX_TOKEN");
+            std::env::remove_var("ARCHIVE_SNIPER_DROPBOX_APP_KEY");
+            std::env::remove_var("ARCHIVE_SNIPER_DROPBOX_APP_SECRET");
         }
         let result = resolve(
             "https://www.dropbox.com/s/abc/x.zip?dl=0",
@@ -95,11 +97,12 @@ mod tests {
     }
 
     #[test]
-    fn dropbox_url_with_token_returns_dropbox_variant() {
+    fn dropbox_url_with_app_credentials_returns_dropbox_variant() {
         let _guard = ENV_MUTEX.lock().unwrap();
         // SAFETY: test mutates process env. Run single-threaded if flaky.
         unsafe {
-            std::env::set_var("ARCHIVE_SNIPER_DROPBOX_TOKEN", "test-token");
+            std::env::set_var("ARCHIVE_SNIPER_DROPBOX_APP_KEY", "test-key");
+            std::env::set_var("ARCHIVE_SNIPER_DROPBOX_APP_SECRET", "test-secret");
         }
         let url = "https://www.dropbox.com/s/abc/x.zip?dl=0";
         let result = resolve(url, &SourceConfig::default());
@@ -110,7 +113,33 @@ mod tests {
         }
 
         unsafe {
-            std::env::remove_var("ARCHIVE_SNIPER_DROPBOX_TOKEN");
+            std::env::remove_var("ARCHIVE_SNIPER_DROPBOX_APP_KEY");
+            std::env::remove_var("ARCHIVE_SNIPER_DROPBOX_APP_SECRET");
+        }
+    }
+
+    #[test]
+    fn dropbox_url_with_only_key_returns_no_credentials() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        // SAFETY: test mutates process env. Run single-threaded if flaky.
+        unsafe {
+            std::env::remove_var("ARCHIVE_SNIPER_DROPBOX_APP_KEY");
+            std::env::remove_var("ARCHIVE_SNIPER_DROPBOX_APP_SECRET");
+            std::env::set_var("ARCHIVE_SNIPER_DROPBOX_APP_KEY", "test-key");
+        }
+        let result = resolve(
+            "https://www.dropbox.com/s/abc/x.zip?dl=0",
+            &SourceConfig::default(),
+        );
+        assert!(matches!(
+            result,
+            Err(SourceError::NoCredentials {
+                provider: "Dropbox",
+                ..
+            })
+        ));
+        unsafe {
+            std::env::remove_var("ARCHIVE_SNIPER_DROPBOX_APP_KEY");
         }
     }
 }

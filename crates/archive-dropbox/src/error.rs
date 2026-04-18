@@ -6,8 +6,10 @@ pub enum DropboxError {
     #[error("Dropbox: shared link is password-protected or private ({url})")]
     NotPublic { url: String },
 
-    #[error("Dropbox: access token invalid or expired")]
-    InvalidToken,
+    #[error(
+        "Dropbox: app credentials invalid — check ARCHIVE_SNIPER_DROPBOX_APP_KEY / ARCHIVE_SNIPER_DROPBOX_APP_SECRET"
+    )]
+    InvalidCredentials,
 
     #[error("Dropbox: rate limited — retry after {retry_after_secs}s")]
     RateLimited { retry_after_secs: u64 },
@@ -15,8 +17,10 @@ pub enum DropboxError {
     #[error("Dropbox: monthly bandwidth quota exceeded")]
     QuotaExceeded,
 
-    #[error("Dropbox: access token required — set ARCHIVE_SNIPER_DROPBOX_TOKEN")]
-    TokenMissing,
+    #[error(
+        "Dropbox: app credentials required — set ARCHIVE_SNIPER_DROPBOX_APP_KEY and ARCHIVE_SNIPER_DROPBOX_APP_SECRET"
+    )]
+    AppCredentialsMissing,
 
     #[error("Dropbox: invalid shared link URL ({url})")]
     InvalidUrl { url: String },

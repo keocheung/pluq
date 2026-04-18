@@ -10,7 +10,8 @@ use crate::error::DropboxError;
 
 pub struct DropboxReadAt {
     shared_url: String,
-    token: String,
+    app_key: String,
+    app_secret: String,
     client: Client,
     api_base_url: String,     // default: https://api.dropboxapi.com
     content_base_url: String, // default: https://content.dropboxapi.com
@@ -24,23 +25,31 @@ struct DropboxMetadata {
 }
 
 impl DropboxReadAt {
-    pub fn new(shared_url: String, token: String) -> Self {
+    pub fn new(shared_url: String, app_key: String, app_secret: String) -> Self {
         Self::build(
             shared_url,
-            token,
+            app_key,
+            app_secret,
             "https://api.dropboxapi.com",
             "https://content.dropboxapi.com",
         )
     }
 
-    fn build(shared_url: String, token: String, api_base: &str, content_base: &str) -> Self {
+    fn build(
+        shared_url: String,
+        app_key: String,
+        app_secret: String,
+        api_base: &str,
+        content_base: &str,
+    ) -> Self {
         let client = Client::builder()
             .user_agent("archive-sniper")
             .build()
             .expect("failed to create HTTP client");
         Self {
             shared_url,
-            token,
+            app_key,
+            app_secret,
             client,
             api_base_url: api_base.to_string(),
             content_base_url: content_base.to_string(),
@@ -51,11 +60,12 @@ impl DropboxReadAt {
     #[cfg(test)]
     pub(crate) fn new_with_base_urls(
         shared_url: String,
-        token: String,
+        app_key: String,
+        app_secret: String,
         api_base: &str,
         content_base: &str,
     ) -> Self {
-        Self::build(shared_url, token, api_base, content_base)
+        Self::build(shared_url, app_key, app_secret, api_base, content_base)
     }
 
     async fn ensure_metadata(&self) -> Result<&DropboxMetadata, ReadError> {
@@ -68,7 +78,7 @@ impl DropboxReadAt {
                 let resp = self
                     .client
                     .post(&url)
-                    .bearer_auth(&self.token)
+                    .basic_auth(&self.app_key, Some(&self.app_secret))
                     .json(&body)
                     .send()
                     .await
@@ -130,7 +140,7 @@ impl DropboxReadAt {
         let resp = self
             .client
             .post(&url)
-            .bearer_auth(&self.token)
+            .basic_auth(&self.app_key, Some(&self.app_secret))
             .header("Dropbox-API-Arg", api_arg)
             .header("Range", format!("bytes={offset}-{range_end}"))
             .send()
@@ -211,7 +221,7 @@ fn classify_api_error(status: u16, body: &str, shared_url: &str) -> DropboxError
         .and_then(|j| j["error"][".tag"].as_str().map(String::from));
 
     match status {
-        401 => DropboxError::InvalidToken,
+        401 => DropboxError::InvalidCredentials,
         409 => match tag.as_deref() {
             Some("shared_link_not_found") => DropboxError::FileNotFound {
                 url: shared_url.to_string(),
@@ -259,7 +269,8 @@ mod tests {
 
         let reader = DropboxReadAt::new_with_base_urls(
             "https://www.dropbox.com/s/abc/x.zip".to_string(),
-            "tok".to_string(),
+            "key".to_string(),
+            "secret".to_string(),
             &api.uri(),
             &content.uri(),
         );
@@ -281,7 +292,8 @@ mod tests {
 
         let reader = DropboxReadAt::new_with_base_urls(
             "https://www.dropbox.com/s/abc/folder".to_string(),
-            "tok".to_string(),
+            "key".to_string(),
+            "secret".to_string(),
             &api.uri(),
             &content.uri(),
         );
@@ -314,7 +326,8 @@ mod tests {
 
         let reader = DropboxReadAt::new_with_base_urls(
             "https://www.dropbox.com/s/abc/x.zip".to_string(),
-            "tok".to_string(),
+            "key".to_string(),
+            "secret".to_string(),
             &api.uri(),
             &content.uri(),
         );
@@ -323,7 +336,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_range_sends_bearer_and_api_arg_headers() {
+    async fn read_range_sends_basic_auth_and_api_arg_headers() {
         let api = MockServer::start().await;
         let content = MockServer::start().await;
 
@@ -332,7 +345,7 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path("/2/sharing/get_shared_link_file"))
-            .and(header("Authorization", "Bearer tok"))
+            .and(header("Authorization", "Basic a2V5OnNlY3JldA=="))
             .and(header("Dropbox-API-Arg", api_arg))
             .and(header("Range", "bytes=0-3"))
             .respond_with(ResponseTemplate::new(206).set_body_raw("test", "text/plain"))
@@ -341,12 +354,37 @@ mod tests {
 
         let reader = DropboxReadAt::new_with_base_urls(
             shared_url.to_string(),
-            "tok".to_string(),
+            "key".to_string(),
+            "secret".to_string(),
             &api.uri(),
             &content.uri(),
         );
         let bytes = reader.read_range(0, 4).await.unwrap();
         assert_eq!(bytes, "test");
+    }
+
+    #[tokio::test]
+    async fn metadata_uses_basic_auth_header() {
+        let api = MockServer::start().await;
+        let content = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/2/sharing/get_shared_link_metadata"))
+            .and(header("Authorization", "Basic a2V5OnNlY3JldA=="))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "name": "x.zip", "size": 42, ".tag": "file"
+            })))
+            .mount(&api)
+            .await;
+
+        let reader = DropboxReadAt::new_with_base_urls(
+            "https://www.dropbox.com/s/abc/x.zip".to_string(),
+            "key".to_string(),
+            "secret".to_string(),
+            &api.uri(),
+            &content.uri(),
+        );
+        assert_eq!(reader.size().await.unwrap(), 42);
     }
 
     #[tokio::test]
@@ -356,7 +394,8 @@ mod tests {
 
         let reader = DropboxReadAt::new_with_base_urls(
             "https://www.dropbox.com/s/abc/x.zip".to_string(),
-            "tok".to_string(),
+            "key".to_string(),
+            "secret".to_string(),
             &api.uri(),
             &content.uri(),
         );
@@ -380,7 +419,8 @@ mod tests {
 
         let reader = DropboxReadAt::new_with_base_urls(
             "https://www.dropbox.com/s/abc/x.zip".to_string(),
-            "tok".to_string(),
+            "key".to_string(),
+            "secret".to_string(),
             &api.uri(),
             &content.uri(),
         );
@@ -403,7 +443,8 @@ mod tests {
 
         let reader = DropboxReadAt::new_with_base_urls(
             "https://www.dropbox.com/s/abc/x.zip".to_string(),
-            "tok".to_string(),
+            "key".to_string(),
+            "secret".to_string(),
             &api.uri(),
             &content.uri(),
         );
@@ -418,7 +459,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn metadata_401_tunnels_invalid_token() {
+    async fn metadata_401_tunnels_invalid_credentials() {
         let api = MockServer::start().await;
         let content = MockServer::start().await;
 
@@ -433,7 +474,8 @@ mod tests {
 
         let reader = DropboxReadAt::new_with_base_urls(
             "https://www.dropbox.com/s/abc/x.zip".to_string(),
-            "tok".to_string(),
+            "key".to_string(),
+            "secret".to_string(),
             &api.uri(),
             &content.uri(),
         );
@@ -442,8 +484,8 @@ mod tests {
             Err(ReadError::Transport(e)) => {
                 let de = e.downcast_ref::<DropboxError>().unwrap();
                 match de {
-                    DropboxError::InvalidToken => {}
-                    _ => panic!("Expected InvalidToken error"),
+                    DropboxError::InvalidCredentials => {}
+                    _ => panic!("Expected InvalidCredentials error"),
                 }
             }
             _ => panic!("Expected Transport error"),
@@ -466,7 +508,8 @@ mod tests {
 
         let reader = DropboxReadAt::new_with_base_urls(
             "https://www.dropbox.com/s/abc/x.zip".to_string(),
-            "tok".to_string(),
+            "key".to_string(),
+            "secret".to_string(),
             &api.uri(),
             &content.uri(),
         );
@@ -499,7 +542,8 @@ mod tests {
 
         let reader = DropboxReadAt::new_with_base_urls(
             "https://www.dropbox.com/s/abc/x.zip".to_string(),
-            "tok".to_string(),
+            "key".to_string(),
+            "secret".to_string(),
             &api.uri(),
             &content.uri(),
         );
@@ -529,7 +573,8 @@ mod tests {
 
         let reader = DropboxReadAt::new_with_base_urls(
             "https://www.dropbox.com/s/abc/x.zip".to_string(),
-            "tok".to_string(),
+            "key".to_string(),
+            "secret".to_string(),
             &api.uri(),
             &content.uri(),
         );
@@ -559,7 +604,8 @@ mod tests {
 
         let reader = DropboxReadAt::new_with_base_urls(
             "https://www.dropbox.com/s/abc/x.zip".to_string(),
-            "tok".to_string(),
+            "key".to_string(),
+            "secret".to_string(),
             &api.uri(),
             &content.uri(),
         );

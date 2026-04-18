@@ -2,9 +2,9 @@
 
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
-* **Current Phase:** Phase 4 — Dropbox Provider complete.
-* **Current Active Task:** [HANDOVER] Dropbox provider (`archive-dropbox`) complete. Ready for CLI integration.
-* **Baseline:** 359 tests pass. Clippy clean.
+* **Current Phase:** Phase 4 — Dropbox Provider complete (app auth).
+* **Current Active Task:** [HANDOVER] Dropbox provider refactored to App Authentication (Basic auth with app key + secret — no token expiry). Ready for CLI integration.
+* **Baseline:** 360 tests pass. Clippy clean.
 
 
 ---

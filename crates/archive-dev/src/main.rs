@@ -147,26 +147,32 @@ fn run_dropbox_poc() {
         return;
     }
 
-    // Try to get token from env
-    let mut token = std::env::var("ARCHIVE_SNIPER_DROPBOX_TOKEN").ok();
+    // Try to get credentials from env
+    let mut app_key = std::env::var("ARCHIVE_SNIPER_DROPBOX_APP_KEY").ok();
+    let mut app_secret = std::env::var("ARCHIVE_SNIPER_DROPBOX_APP_SECRET").ok();
 
-    if token.is_none()
+    if (app_key.is_none() || app_secret.is_none())
         && let Ok(content) = std::fs::read_to_string(".env")
     {
         for line in content.lines() {
-            if let Some(val) = line.strip_prefix("ARCHIVE_SNIPER_DROPBOX_TOKEN=") {
-                token = Some(val.trim().trim_matches('\"').to_string());
-                break;
+            if let Some(val) = line.strip_prefix("ARCHIVE_SNIPER_DROPBOX_APP_KEY=") {
+                app_key = Some(val.trim().trim_matches('\"').to_string());
+            }
+            if let Some(val) = line.strip_prefix("ARCHIVE_SNIPER_DROPBOX_APP_SECRET=") {
+                app_secret = Some(val.trim().trim_matches('\"').to_string());
             }
         }
     }
 
-    if token.is_none() {
-        println!("⚠️  ARCHIVE_SNIPER_DROPBOX_TOKEN is not set.");
-        let t = prompt("🔑 Enter your Dropbox Access Token (or press Enter to try without): ");
-        let t = t.trim().to_string();
-        if !t.is_empty() {
-            token = Some(t);
+    if app_key.is_none() || app_secret.is_none() {
+        println!("⚠️  Dropbox app credentials are not fully set.");
+        if app_key.is_none() {
+            let k = prompt("🔑 Enter your Dropbox App Key: ");
+            app_key = Some(k.trim().to_string());
+        }
+        if app_secret.is_none() {
+            let s = prompt("🔑 Enter your Dropbox App Secret: ");
+            app_secret = Some(s.trim().to_string());
         }
     }
 
@@ -180,8 +186,8 @@ fn run_dropbox_poc() {
         .header("Content-Type", "application/json")
         .json(&json!({ "url": url }));
 
-    if let Some(ref t) = token {
-        meta_req = meta_req.header("Authorization", format!("Bearer {}", t));
+    if let (Some(k), Some(s)) = (app_key.as_ref(), app_secret.as_ref()) {
+        meta_req = meta_req.basic_auth(k, Some(s));
     }
 
     let meta_resp = meta_req.send().expect("failed to send metadata request");
@@ -211,8 +217,8 @@ fn run_dropbox_poc() {
         .header("Dropbox-API-Arg", json!({ "url": url }).to_string())
         .header("Range", "bytes=0-19");
 
-    if let Some(ref t) = token {
-        dl_req = dl_req.header("Authorization", format!("Bearer {}", t));
+    if let (Some(k), Some(s)) = (app_key.as_ref(), app_secret.as_ref()) {
+        dl_req = dl_req.basic_auth(k, Some(s));
     }
 
     let mut dl_resp = dl_req.send().expect("failed to send download request");

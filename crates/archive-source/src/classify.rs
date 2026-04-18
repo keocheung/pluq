@@ -122,7 +122,7 @@ fn classify_dropbox(e: &DropboxError) -> ProviderError {
         DropboxError::NotPublic { .. } => ProviderError::NotPublic {
             provider: "Dropbox",
         },
-        DropboxError::InvalidToken | DropboxError::TokenMissing => {
+        DropboxError::InvalidCredentials | DropboxError::AppCredentialsMissing => {
             ProviderError::InvalidCredentials {
                 provider: "Dropbox",
             }
@@ -172,8 +172,8 @@ mod tests {
     }
 
     #[test]
-    fn classify_dropbox_invalid_token() {
-        let err = DropboxError::InvalidToken;
+    fn classify_dropbox_invalid_credentials() {
+        let err = DropboxError::InvalidCredentials;
         let pe = classify_transport(&err).unwrap();
         assert!(matches!(
             pe,
