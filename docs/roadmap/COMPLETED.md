@@ -61,3 +61,11 @@
 ### Phase 4: Cloud Provider API Readers
 - [x] **Google Drive** — `archive-gdrive` crate (`GoogleDriveReadAt`). Uses Drive v3 API for size/metadata, delegates range reads to inner `HttpReadAt`. API key from env var or embedded default.
 - [x] **Dropbox** — `archive-dropbox` crate (`DropboxReadAt`). Shared-link metadata via `POST /2/sharing/get_shared_link_metadata`, range reads via `POST /2/sharing/get_shared_link_file`. App authentication via `Authorization: Basic base64(app_key:app_secret)` header. Credentials from `ARCHIVE_SNIPER_DROPBOX_APP_KEY` + `ARCHIVE_SNIPER_DROPBOX_APP_SECRET` (or embedded at build time). No expiry.
+
+### Phase 4.5: OAuth2 — Private File Access
+- [x] **`archive-auth` crate** — `TokenStore` (JSON, atomic write, Unix 0600 perms), PKCE loopback flow via `oauth2` v5 + reqwest, `authenticate()` + `refresh()` helpers, `GDRIVE_CONFIG` / `DROPBOX_CONFIG` constants.
+- [x] **Google Drive OAuth** — `GDriveAuth { ApiKey | OAuth }` enum. Reader refactored to direct-reqwest (dropped HttpReadAt). Refresh-on-401 under `tokio::sync::RwLock` with thundering-herd guard. Token persistence via `Arc<TokenStore>::save("gdrive", ...)`. `archive_gdrive::oauth::authenticate()` wrapper.
+- [x] **Dropbox OAuth** — `DropboxAuth { AppCredentials | OAuth }` enum. Same refresh pipeline. Token stored under `"dropbox"`. `archive_dropbox::oauth::authenticate()` wrapper.
+- [x] **`archive-source` wiring** — `SourceConfig.token_store: Option<Arc<TokenStore>>`. `resolve()` prefers OAuth when both token and client ID are present, falls back to API key / app credentials. Graceful warn-and-fallback when token exists but client ID is missing.
+- [x] **`snipe auth {add, remove, list}`** — CLI subcommand for managing stored OAuth tokens. `list` shows provider + status + refresh-token presence (no secrets printed).
+- [x] **TUI auth prompt** — `NotPublic` / `InvalidCredentials` on known providers surfaces an in-app prompt. Y runs the OAuth flow in a background task, N surfaces a hint to use `snipe auth add`. On success the failed archive open is retried transparently.

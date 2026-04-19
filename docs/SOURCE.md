@@ -365,3 +365,6 @@ Windows — documented limitation, not a blocker.
 **Scope.** v1 stores one token per provider (single Google account, single
 Dropbox account). Multi-account is deferred.
 
+### Status (Phase 4.5)
+
+Phase 4.5 is **Complete**. The OAuth flow, token persistence, credential selection via `archive-source`, and TUI/CLI auth prompts are fully implemented.

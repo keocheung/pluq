@@ -11,6 +11,24 @@ use crate::home::complete::looks_like_url;
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let area = frame.area();
 
+    if let AppPhase::AuthPrompt { provider, .. } = &app.phase {
+        let p = *provider;
+        draw_home(frame, app, area);
+        let buffer = frame.buffer_mut();
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                let cell = &mut buffer[(x, y)];
+                cell.set_style(cell.style().fg(Color::DarkGray));
+            }
+        }
+        draw_auth_prompt(frame, area, &p);
+
+        if app.show_help {
+            draw_help_popup(frame, area);
+        }
+        return;
+    }
+
     match &app.phase {
         AppPhase::Home => {
             draw_home(frame, app, area);
@@ -508,8 +526,22 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             frame.render_widget(Paragraph::new(sep).style(sep_style), chunks[3]);
 
             // Content
-            let para = Paragraph::new(msg)
-                .style(Style::default().fg(Color::Red))
+            let is_auth = msg.contains("private") || msg.contains("credentials invalid");
+            let hint = if is_auth {
+                Some("Tip: run `snipe auth add gdrive|dropbox` to authenticate.")
+            } else {
+                None
+            };
+            
+            let mut paras = vec![
+                ratatui::text::Line::from(ratatui::text::Span::styled(msg, Style::default().fg(Color::Red)))
+            ];
+            if let Some(h) = hint {
+                paras.push(ratatui::text::Line::from(""));
+                paras.push(ratatui::text::Line::from(ratatui::text::Span::styled(h, Style::default().fg(Color::DarkGray))));
+            }
+
+            let para = Paragraph::new(paras)
                 .alignment(Alignment::Center);
             frame.render_widget(para, chunks[2]);
 
@@ -518,6 +550,40 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 Paragraph::new(" Press q to quit").style(Style::default().fg(Color::DarkGray));
             frame.render_widget(footer, chunks[4]);
         }
+        AppPhase::Authenticating { provider, .. } => {
+            let provider_name = match provider {
+                crate::auth_cmd::AuthProvider::Gdrive => "Google Drive",
+                crate::auth_cmd::AuthProvider::Dropbox => "Dropbox",
+            };
+            let chunks = Layout::vertical([
+                Constraint::Length(1), // header
+                Constraint::Length(1), // separator
+                Constraint::Min(1),    // content
+                Constraint::Length(1), // separator
+                Constraint::Length(1), // footer
+            ])
+            .split(area);
+
+            let header = Paragraph::new(format!(" Authenticating with {provider_name}"))
+                .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+            frame.render_widget(header, chunks[0]);
+
+            let sep = "─".repeat(area.width as usize);
+            let sep_style = Style::default().fg(Color::DarkGray);
+            frame.render_widget(Paragraph::new(sep.clone()).style(sep_style), chunks[1]);
+            frame.render_widget(Paragraph::new(sep).style(sep_style), chunks[3]);
+
+            let content = "  Browser opened. Waiting for approval...\n  Token will be saved on success.";
+            let para = Paragraph::new(content)
+                .style(Style::default().fg(Color::White))
+                .alignment(Alignment::Left);
+            frame.render_widget(para, chunks[2]);
+
+            let footer = Paragraph::new("  Esc to cancel  ·  q to quit")
+                .style(Style::default().fg(Color::DarkGray));
+            frame.render_widget(footer, chunks[4]);
+        }
+        AppPhase::AuthPrompt { .. } => unreachable!(), // Handled above
     }
 
     if app.show_help {
@@ -1253,6 +1319,67 @@ fn draw_bookmark_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {
             );
         }
     }
+}
+
+fn draw_auth_prompt(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    provider: &crate::auth_cmd::AuthProvider,
+) {
+    let provider_name = match provider {
+        crate::auth_cmd::AuthProvider::Gdrive => "Google Drive",
+        crate::auth_cmd::AuthProvider::Dropbox => "Dropbox",
+    };
+
+    let modal_width: u16 = 40;
+    let modal_height: u16 = 6;
+
+    let popup_area = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(modal_height),
+            Constraint::Min(0),
+        ])
+        .split(area)[1];
+
+    let popup_area = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(modal_width),
+            Constraint::Min(0),
+        ])
+        .split(popup_area)[1];
+
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .title(" Authentication required ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    let inner_chunks = Layout::vertical([
+        Constraint::Length(1), // line 1 padding
+        Constraint::Length(1), // line 2 (provider is private)
+        Constraint::Length(1), // line 3 (blank)
+        Constraint::Length(1), // line 4 (question + y/n)
+    ]).split(inner);
+
+    let line2 = ratatui::text::Line::from(vec![
+        ratatui::text::Span::styled(format!(" {}", provider_name), Style::default().fg(Color::Cyan)),
+        ratatui::text::Span::raw(" file is private."),
+    ]);
+    frame.render_widget(Paragraph::new(line2), inner_chunks[1]);
+
+    let line4 = ratatui::text::Line::from(vec![
+        ratatui::text::Span::raw(format!(" Authenticate with {}? ", provider_name)),
+        ratatui::text::Span::styled("[Y/n]", Style::default().fg(Color::DarkGray)),
+    ]);
+    frame.render_widget(Paragraph::new(line4), inner_chunks[3]);
 }
 
 #[cfg(test)]

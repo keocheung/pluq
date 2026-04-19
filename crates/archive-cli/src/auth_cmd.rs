@@ -23,7 +23,7 @@ pub enum AuthAction {
     List,
 }
 
-#[derive(Copy, Clone, ValueEnum)]
+#[derive(Debug, Copy, Clone, PartialEq, ValueEnum)]
 pub enum AuthProvider {
     Gdrive,
     Dropbox,

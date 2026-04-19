@@ -3,14 +3,6 @@
 ## Phase 4: Cloud Provider API Readers
 - [ ] **OneDrive** — `archive-onedrive` crate. Resolve share link → driveItem via Microsoft Graph API, download with Range headers. *(v1.x — deferred)*
 
-## Phase 4.5: OAuth2 — Private File Access
-- [ ] OAuth2 flow for **Google Drive** (browser redirect, token exchange).
-- [ ] OAuth2 flow for **Dropbox**.
-- [ ] Token storage (`~/.config/archive-sniper/tokens.json`) and refresh.
-- [ ] `archive-auth` ReadAt decorator — injects `Authorization: Bearer` header, handles token refresh transparently.
-- [ ] TUI auth prompts — detect `NotPublic`/`Unauthenticated` errors, guide user through OAuth flow in-app.
-- [ ] **`snipe auth add/remove/list`** — CLI surface for managing stored OAuth tokens.
-
 ## Phase 5: Security Hardening & Release
 - [ ] **CLI rename to match product spec** — `browse` → bare default, `extract`/`extract-all` → `get [glob] [-o dir]`. Logic unchanged; clap surface only. Do before shell completions.
 - [ ] **`snipe feedback`** — open GitHub issues URL in default browser. Trivial.

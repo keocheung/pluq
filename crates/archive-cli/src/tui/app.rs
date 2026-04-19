@@ -30,6 +30,12 @@ pub enum AppMessage {
     /// Archive::extract_selected() completed.
     /// Ok contains the BatchResult. Err is only for unrecoverable errors (cancellation).
     BatchExtractionComplete(Result<BatchResult, ArchiveError>),
+    /// OAuth flow completed.
+    AuthComplete {
+        provider: crate::auth_cmd::AuthProvider,
+        result: Result<archive_auth::StoredToken, String>,
+        source: String,
+    },
 }
 
 /// Shared atomics for high-frequency progress updates.
@@ -255,6 +261,16 @@ pub enum AppPhase {
         total_bytes: u64,
         bytes_extracted: u64,
     },
+    /// Archive open returned a NotPublic / InvalidCredentials on an OAuth provider.
+    AuthPrompt {
+        provider: crate::auth_cmd::AuthProvider,
+        source: String,
+    },
+    /// OAuth browser flow is in-flight.
+    Authenticating {
+        provider: crate::auth_cmd::AuthProvider,
+        source: String,
+    },
     Error(String),
 }
 
@@ -345,6 +361,9 @@ pub struct App {
     pub bookmark_overlay: Option<BookmarkOverlay>,
 
     pub token_store: Option<Arc<archive_auth::TokenStore>>,
+    
+    /// Handle to the running OAuth background task.
+    pub auth_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl App {
@@ -409,6 +428,7 @@ impl App {
             launched_from_home: false,
             bookmark_overlay: None,
             token_store: None,
+            auth_task: None,
         }
     }
 
@@ -565,6 +585,21 @@ impl App {
                 }
             }
             AppMessage::ArchiveOpened(Err(e)) => {
+                // Try to route to AuthPrompt first.
+                if self.token_store.is_some()
+                    && self.launched_from_home
+                    && let Some(provider) = auth_provider_from_error(&e)
+                {
+                    info!(?provider, "NotPublic/InvalidCredentials on known OAuth provider → AuthPrompt");
+                    self.phase = AppPhase::AuthPrompt {
+                        provider,
+                        source: self.source.clone(),
+                    };
+                    self.home_pending_provider = None;
+                    self.home_pending_name = None;
+                    return;
+                }
+
                 if self.launched_from_home {
                     error!(error = %e, "archive open failed (Home) → stay on Home");
                     self.home_input_error = Some(self.format_home_error(&e));
@@ -723,6 +758,43 @@ impl App {
                     self.status_message = Some(format!("Extraction failed: {e}"));
                 }
             }
+            AppMessage::AuthComplete { provider, result, source } => {
+                if self.auth_task.is_none() {
+                    return; // Task was cancelled.
+                }
+                self.auth_task = None;
+                let store = match &self.token_store {
+                    Some(s) => s.clone(),
+                    None => {
+                        self.home_input_error = Some("Token store unavailable.".into());
+                        self.phase = AppPhase::Home;
+                        return;
+                    }
+                };
+
+                match result {
+                    Ok(token) => {
+                        let key = match provider {
+                            crate::auth_cmd::AuthProvider::Gdrive => "gdrive",
+                            crate::auth_cmd::AuthProvider::Dropbox => "dropbox",
+                        };
+                        if let Err(e) = store.save(key, token) {
+                            error!(error = %e, "failed to persist OAuth token");
+                            self.home_input_error = Some(format!("Token save failed: {e}"));
+                            self.phase = AppPhase::Home;
+                            return;
+                        }
+                        info!(?provider, "OAuth token saved → retrying archive open");
+                        // Retry the open through the normal home submit path.
+                        self.submit_home_source(source, tx);
+                    }
+                    Err(msg) => {
+                        error!(error = %msg, "OAuth flow failed");
+                        self.home_input_error = Some(format!("Authentication failed: {msg}"));
+                        self.phase = AppPhase::Home;
+                    }
+                }
+            }
         }
     }
 
@@ -797,6 +869,9 @@ impl App {
 
     /// Reset all archive-scoped state and return to the Home Screen.
     fn return_to_home(&mut self) {
+        if let Some(h) = self.auth_task.take() {
+            h.abort();
+        }
         self.phase = AppPhase::Home;
         self.source.clear();
         self.archive = None;
@@ -825,6 +900,66 @@ impl App {
         self.home_pending_name = None;
         self.home_focus = HomeFocus::SnipeInput;
         // Intentionally keep `launched_from_home = true`.
+    }
+
+    fn start_auth_flow(
+        &mut self,
+        provider: crate::auth_cmd::AuthProvider,
+        source: String,
+        tx: &mpsc::UnboundedSender<AppMessage>,
+    ) {
+        info!(?provider, "starting OAuth browser flow");
+        self.phase = AppPhase::Authenticating {
+            provider,
+            source: source.clone(),
+        };
+        let tx_auth = tx.clone();
+        let source_for_task = source.clone();
+        let handle = tokio::spawn(async move {
+            let result = match provider {
+                crate::auth_cmd::AuthProvider::Gdrive => {
+                    archive_gdrive::oauth::authenticate(300).await
+                }
+                crate::auth_cmd::AuthProvider::Dropbox => {
+                    archive_dropbox::oauth::authenticate(300).await
+                }
+            };
+            let _ = tx_auth.send(AppMessage::AuthComplete {
+                provider,
+                result: result.map_err(|e| e.to_string()),
+                source: source_for_task,
+            });
+        });
+        self.auth_task = Some(handle);
+    }
+
+    fn cancel_auth_prompt(&mut self) {
+        // Surface original NotPublic/InvalidCredentials message on Home.
+        let msg = match &self.phase {
+            AppPhase::AuthPrompt { provider, .. } => {
+                format!("{}: file is private. Run `snipe auth add {}` to authenticate.",
+                    match provider {
+                        crate::auth_cmd::AuthProvider::Gdrive => "Google Drive",
+                        crate::auth_cmd::AuthProvider::Dropbox => "Dropbox",
+                    },
+                    match provider {
+                        crate::auth_cmd::AuthProvider::Gdrive => "gdrive",
+                        crate::auth_cmd::AuthProvider::Dropbox => "dropbox",
+                    })
+            }
+            _ => "Authentication declined.".to_string(),
+        };
+        self.home_input_error = Some(msg);
+        self.phase = AppPhase::Home;
+    }
+
+    fn cancel_auth_in_flight(&mut self) {
+        if let Some(h) = self.auth_task.take() {
+            h.abort();
+        }
+        info!("OAuth flow cancelled by user");
+        self.home_input_error = Some("Authentication cancelled.".to_string());
+        self.phase = AppPhase::Home;
     }
 
     /// Formats an ArchiveError for display in the Home screen error row.
@@ -1235,6 +1370,30 @@ impl App {
 
         if self.bookmark_overlay.is_some() {
             self.handle_overlay_key(key);
+            return;
+        }
+
+        if let AppPhase::AuthPrompt { provider, source } = &self.phase {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                    let p = *provider;
+                    let s = source.clone();
+                    self.start_auth_flow(p, s, tx);
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    self.cancel_auth_prompt();
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        if let AppPhase::Authenticating { .. } = &self.phase {
+            if matches!(key.code, KeyCode::Esc) {
+                self.cancel_auth_in_flight();
+            } else if matches!(key.code, KeyCode::Char('q')) {
+                self.should_quit = true;
+            }
             return;
         }
 
@@ -1913,6 +2072,24 @@ impl App {
 
             let _ = tx_extract.send(AppMessage::BatchExtractionComplete(result));
         });
+    }
+}
+
+/// Map an ArchiveError::Transport into an AuthProvider if the error is
+/// NotPublic or InvalidCredentials on a known OAuth provider.
+fn auth_provider_from_error(e: &ArchiveError) -> Option<crate::auth_cmd::AuthProvider> {
+    use archive_source::{ProviderError, classify_transport};
+    let ArchiveError::Transport(inner) = e else { return None; };
+    let pe = classify_transport(inner.as_ref())?;
+    let provider_name = match pe {
+        ProviderError::NotPublic { provider }
+        | ProviderError::InvalidCredentials { provider } => provider,
+        _ => return None,
+    };
+    match provider_name {
+        "Google Drive" => Some(crate::auth_cmd::AuthProvider::Gdrive),
+        "Dropbox" => Some(crate::auth_cmd::AuthProvider::Dropbox),
+        _ => None,
     }
 }
 
@@ -3096,5 +3273,144 @@ mod home_tests {
 
         assert!(app.bookmark_overlay.is_none());
         assert!(app.home_bookmarks.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod auth_tests {
+    use super::*;
+    use archive::ArchiveError;
+
+    #[test]
+    fn auth_provider_from_error_returns_gdrive_on_notpublic() {
+        let err = archive_gdrive::GDriveError::NotPublic { file_id: "x".into() };
+        let e = ArchiveError::Transport(Box::new(err));
+        assert_eq!(auth_provider_from_error(&e), Some(crate::auth_cmd::AuthProvider::Gdrive));
+    }
+
+    #[test]
+    fn auth_provider_from_error_returns_dropbox_on_invalid_credentials() {
+        let err = archive_dropbox::DropboxError::InvalidCredentials;
+        let e = ArchiveError::Transport(Box::new(err));
+        assert_eq!(auth_provider_from_error(&e), Some(crate::auth_cmd::AuthProvider::Dropbox));
+    }
+
+    #[test]
+    fn auth_provider_from_error_returns_none_for_file_not_found() {
+        let err = archive_gdrive::GDriveError::FileNotFound { file_id: "x".into() };
+        let e = ArchiveError::Transport(Box::new(err));
+        assert_eq!(auth_provider_from_error(&e), None);
+    }
+
+    #[test]
+    fn auth_provider_from_error_returns_none_for_non_transport_error() {
+        let e = ArchiveError::Cancelled;
+        assert_eq!(auth_provider_from_error(&e), None);
+    }
+
+    #[test]
+    fn auth_prompt_transition_on_notpublic_when_store_present_and_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(archive_auth::TokenStore::load_from(tmp.path().join("tokens.json")).unwrap());
+        let mut app = App::new_home(Some(store));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        
+        app.source = "gdrive://foo".into();
+
+        let err = archive_gdrive::GDriveError::NotPublic { file_id: "x".into() };
+        let e = ArchiveError::Transport(Box::new(err));
+        app.handle_message(AppMessage::ArchiveOpened(Err(e)), &tx);
+
+        assert!(matches!(app.phase, AppPhase::AuthPrompt { provider: crate::auth_cmd::AuthProvider::Gdrive, .. }));
+    }
+
+    #[test]
+    fn auth_prompt_does_not_fire_without_token_store() {
+        let mut app = App::new_home(None);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let err = archive_gdrive::GDriveError::NotPublic { file_id: "x".into() };
+        let e = ArchiveError::Transport(Box::new(err));
+        app.handle_message(AppMessage::ArchiveOpened(Err(e)), &tx);
+
+        assert!(matches!(app.phase, AppPhase::Home));
+        assert!(app.home_input_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn auth_prompt_y_starts_authenticating_phase() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+        let mut app = App::new_home(None);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        app.phase = AppPhase::AuthPrompt {
+            provider: crate::auth_cmd::AuthProvider::Gdrive,
+            source: "gdrive://xyz".into(),
+        };
+
+        app.handle_key(KeyEvent {
+            code: KeyCode::Char('y'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }, &tx);
+
+        assert!(matches!(app.phase, AppPhase::Authenticating { .. }));
+        assert!(app.auth_task.is_some());
+        
+        app.cancel_auth_in_flight(); // cleanup task
+    }
+
+    #[test]
+    fn auth_prompt_n_returns_to_home_with_hint() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+        let mut app = App::new_home(None);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        app.phase = AppPhase::AuthPrompt {
+            provider: crate::auth_cmd::AuthProvider::Gdrive,
+            source: "gdrive://xyz".into(),
+        };
+
+        app.handle_key(KeyEvent {
+            code: KeyCode::Char('n'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }, &tx);
+
+        assert!(matches!(app.phase, AppPhase::Home));
+        assert!(app.home_input_error.unwrap().contains("auth add"));
+    }
+
+    #[tokio::test]
+    async fn auth_complete_ok_saves_token_and_retries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(archive_auth::TokenStore::load_from(tmp.path().join("tokens.json")).unwrap());
+        let mut app = App::new_home(Some(store.clone()));
+        let (tx, mut _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        app.phase = AppPhase::Authenticating {
+            provider: crate::auth_cmd::AuthProvider::Gdrive,
+            source: "gdrive".into(),
+        };
+        let handle = tokio::spawn(async move {});
+        app.auth_task = Some(handle);
+
+        let token = archive_auth::StoredToken {
+            access_token: "a".into(),
+            refresh_token: Some("r".into()),
+            expires_at: Some(3600),
+            scopes: vec![],
+        };
+
+        app.handle_message(AppMessage::AuthComplete {
+            provider: crate::auth_cmd::AuthProvider::Gdrive,
+            result: Ok(token),
+            source: "gdrive".into(),
+        }, &tx);
+
+        assert!(store.get("gdrive").is_some());
+        assert!(!matches!(app.phase, AppPhase::Authenticating { .. }));
     }
 }
