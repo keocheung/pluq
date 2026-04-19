@@ -143,6 +143,9 @@ fn classify_dropbox(e: &DropboxError) -> ProviderError {
         DropboxError::Api { .. } => ProviderError::InvalidCredentials {
             provider: "Dropbox",
         },
+        DropboxError::TokenRefreshFailed { .. } => ProviderError::InvalidCredentials {
+            provider: "Dropbox",
+        },
     }
 }
 

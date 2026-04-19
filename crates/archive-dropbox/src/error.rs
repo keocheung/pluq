@@ -25,6 +25,9 @@ pub enum DropboxError {
     #[error("Dropbox: invalid shared link URL ({url})")]
     InvalidUrl { url: String },
 
+    #[error("Dropbox: OAuth token refresh failed — {reason}")]
+    TokenRefreshFailed { reason: String },
+
     #[error("Dropbox API error: {detail}")]
     Api { status: u16, detail: String },
 }

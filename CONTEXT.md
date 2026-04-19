@@ -2,9 +2,9 @@
 
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
-* **Current Phase:** Phase 4.5 — OAuth (Google Drive + Dropbox). Step 2 complete (post-review). Step 3 pending.
-* **Current Active Task:** `SESSION_PLAN_STEP_3.md` — integrate OAuth into `archive-dropbox`. Mirrors step 2 pattern.
-* **Baseline:** 384 tests pass. Clippy clean.
+* **Current Phase:** Phase 4.5 — OAuth (Google Drive + Dropbox). Steps 1-3 complete (reviewed PASS). Step 4 scoped.
+* **Current Active Task:** `SESSION_PLAN_STEP_4.md`
+* **Baseline:** 391 tests pass. Clippy clean.
 
 
 ---

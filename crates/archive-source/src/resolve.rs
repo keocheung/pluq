@@ -1,5 +1,5 @@
 use archive_core::{CachingReadAt, HttpReadAt, LocalReadAt};
-use archive_dropbox::{self, DropboxReadAt};
+use archive_dropbox::{self, DropboxAuth, DropboxReadAt};
 use archive_gdrive::{self, GDriveAuth, GoogleDriveReadAt};
 use tracing::info;
 
@@ -44,7 +44,10 @@ pub fn resolve(input: &str, _config: &SourceConfig) -> Result<ResolvedSource, So
                 guidance: "Set ARCHIVE_SNIPER_DROPBOX_APP_KEY and ARCHIVE_SNIPER_DROPBOX_APP_SECRET environment variables.".into(),
             })?;
 
-        let reader = CachingReadAt::new(DropboxReadAt::new(input.to_string(), app_key, app_secret));
+        let reader = CachingReadAt::new(DropboxReadAt::new(
+            input.to_string(),
+            DropboxAuth::app_credentials(app_key, app_secret),
+        ));
         return Ok(ResolvedSource::Dropbox(reader, input.to_string()));
     }
 
