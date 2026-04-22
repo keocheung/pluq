@@ -30,9 +30,12 @@ fn write_tempfile(bytes: &[u8]) -> (tempfile::NamedTempFile, String) {
 }
 
 async fn open_rar4(path: &str) -> Rar4Archive<LocalReadAt> {
-    Rar4Archive::open(LocalReadAt::new(path))
-        .await
-        .expect("open RAR4")
+    Rar4Archive::open(
+        LocalReadAt::new(path),
+        &archive_core::ResourceLimits::default(),
+    )
+    .await
+    .expect("open RAR4")
 }
 
 async fn extract_bytes(
@@ -42,7 +45,7 @@ async fn extract_bytes(
 ) -> Result<Bytes, CoreError> {
     let mut buf = Vec::new();
     let progress = Arc::new(Mutex::new(()));
-    archive.extract(entry, &mut buf, progress, password).await?;
+    archive.extract(entry, &mut buf, progress, password, &archive_core::ResourceLimits::default()).await?;
     Ok(Bytes::from(buf))
 }
 
@@ -241,7 +244,7 @@ async fn rar4_test_integrity_passes() {
     let (_g, path) = write_tempfile(&bytes);
     let archive = open_rar4(&path).await;
     archive
-        .test(&archive.entries()[0], Arc::new(Mutex::new(())))
+        .test(&archive.entries()[0], Arc::new(Mutex::new(())), &archive_core::ResourceLimits::default())
         .await
         .expect("integrity check should pass");
 }
@@ -308,12 +311,15 @@ async fn rar4_elastic_scan_progress_callbacks() {
     let bytes = build_rar4_store_archive(&[("file1.txt", file1)]);
     let (_g, path) = write_tempfile(&bytes);
 
-    let mut archive = Rar4Archive::open(LocalReadAt::new(&path))
-        .await
-        .expect("open");
+    let mut archive = Rar4Archive::open(
+        LocalReadAt::new(&path),
+        &archive_core::ResourceLimits::default(),
+    )
+    .await
+    .expect("open");
     let recorder = Arc::new(Mutex::new(ScanRecorder::new()));
     archive
-        .scan_metadata(recorder.clone())
+        .scan_metadata(recorder.clone(), &archive_core::ResourceLimits::default())
         .await
         .expect("scan_metadata");
 
@@ -352,9 +358,12 @@ async fn rar4_extract_all_streaming_local_byte_count() {
     let bytes = build_rar4_store_archive(&[("file1.txt", file1), ("file2.txt", file2)]);
     let (_g, path) = write_tempfile(&bytes);
 
-    let mut archive = Rar4Archive::open(LocalReadAt::new(&path))
-        .await
-        .expect("open");
+    let mut archive = Rar4Archive::open(
+        LocalReadAt::new(&path),
+        &archive_core::ResourceLimits::default(),
+    )
+    .await
+    .expect("open");
     let progress = Arc::new(Mutex::new(()));
     let total = archive
         .extract_all_streaming(
@@ -362,6 +371,7 @@ async fn rar4_extract_all_streaming_local_byte_count() {
             |_entry| Some(Box::new(std::io::sink()) as Box<dyn std::io::Write + Send>),
             progress,
             None,
+            &archive_core::ResourceLimits::default(),
         )
         .await
         .expect("extract_all_streaming");
@@ -376,9 +386,12 @@ async fn rar4_extract_all_streaming_local_content() {
     let bytes = build_rar4_store_archive(&[("file1.txt", file1), ("file2.txt", file2)]);
     let (_g, path) = write_tempfile(&bytes);
 
-    let mut archive = Rar4Archive::open(LocalReadAt::new(&path))
-        .await
-        .expect("open");
+    let mut archive = Rar4Archive::open(
+        LocalReadAt::new(&path),
+        &archive_core::ResourceLimits::default(),
+    )
+    .await
+    .expect("open");
 
     let buf1 = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
     let buf2 = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
@@ -399,6 +412,7 @@ async fn rar4_extract_all_streaming_local_content() {
             },
             Arc::new(Mutex::new(())),
             None,
+            &archive_core::ResourceLimits::default(),
         )
         .await
         .expect("extract_all_streaming");
@@ -414,9 +428,12 @@ async fn rar4_extract_all_streaming_local_filter() {
     let bytes = build_rar4_store_archive(&[("file1.txt", file1), ("file2.txt", file2)]);
     let (_g, path) = write_tempfile(&bytes);
 
-    let mut archive = Rar4Archive::open(LocalReadAt::new(&path))
-        .await
-        .expect("open");
+    let mut archive = Rar4Archive::open(
+        LocalReadAt::new(&path),
+        &archive_core::ResourceLimits::default(),
+    )
+    .await
+    .expect("open");
     let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
     let bufc = buf.clone();
 
@@ -430,10 +447,29 @@ async fn rar4_extract_all_streaming_local_filter() {
                 },
                 progress,
                 None,
+                &archive_core::ResourceLimits::default(),
             )
             .await
             .expect("extract_all_streaming");
 
     assert_eq!(total, file1.len() as u64);
     assert_eq!(buf.lock().unwrap().as_slice(), file1 as &[u8]);
+}
+
+#[tokio::test]
+async fn rar4_limits_reject_excessive_entry_count() {
+    let file1 = b"Hello from file one\n";
+    let file2 = b"Second file content\n";
+    let bytes = build_rar4_store_archive(&[("file1.txt", file1), ("file2.txt", file2)]);
+    let (_g, path) = write_tempfile(&bytes);
+
+    let limits = archive_core::ResourceLimits {
+        max_entries: 1,
+        ..Default::default()
+    };
+    let result = Rar4Archive::open(LocalReadAt::new(&path), &limits).await;
+    assert!(matches!(
+        result,
+        Err(archive_core::CoreError::ResourceLimitExceeded { .. })
+    ));
 }

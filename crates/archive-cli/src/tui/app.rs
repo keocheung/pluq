@@ -7,7 +7,8 @@ use std::time::Instant;
 
 use crate::home::complete::{complete_path, looks_like_url};
 use archive::{
-    Archive, ArchiveEntry, ArchiveError, BatchResult, EntryTree, Opened, ProgressReporter, ScanInfo,
+    Archive, ArchiveConfig, ArchiveEntry, ArchiveError, BatchResult, EntryTree, Opened,
+    ProgressReporter, ScanInfo,
 };
 use archive_source::{ResolvedSource, SourceConfig, resolve};
 use chrono::Utc;
@@ -291,6 +292,7 @@ pub struct App {
     pub phase: AppPhase,
     pub source: String,
     pub archive: Option<Arc<Archive<ResolvedSource>>>,
+    pub archive_config: ArchiveConfig,
     pub entries: Vec<ArchiveEntry>,
     pub selected: usize,
     pub should_quit: bool,
@@ -393,6 +395,7 @@ impl App {
             phase: AppPhase::Opening,
             source: String::new(),
             archive: None,
+            archive_config: ArchiveConfig::default(),
             entries: Vec::new(),
             selected: 0,
             should_quit: false,
@@ -856,8 +859,9 @@ impl App {
 
                 let tx_open = tx.clone();
                 let source_for_task = source.clone();
+                let config = self.archive_config.clone();
                 tokio::spawn(async move {
-                    let result = Archive::open_reader(&source_for_task, reader).await;
+                    let result = Archive::open_reader(&source_for_task, reader, &config).await;
                     let _ = tx_open.send(AppMessage::ArchiveOpened(result));
                 });
             }
@@ -2149,6 +2153,10 @@ impl ProgressReporter for TuiProgressReporter {
 
     fn should_cancel(&self) -> bool {
         self.cancel.load(Ordering::SeqCst)
+    }
+
+    fn on_warning(&mut self, message: &str) {
+        tracing::warn!("TUI Archive warning: {}", message);
     }
 }
 

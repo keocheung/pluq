@@ -20,7 +20,11 @@ impl<R: Read + Send> LzmaDecoder<R> {
     /// Create a new LZMA decoder.
     ///
     /// `properties` must be at least 5 bytes (the raw LZMA property byte + 4-byte dict size).
-    pub fn new(input: R, properties: &[u8]) -> Result<Self, CoreError> {
+    pub fn new(
+        input: R,
+        properties: &[u8],
+        codec_config: &crate::limits::CodecConfig,
+    ) -> Result<Self, CoreError> {
         if properties.len() < 5 {
             return Err(CoreError::BitstreamError {
                 detail: format!(
@@ -28,6 +32,20 @@ impl<R: Read + Send> LzmaDecoder<R> {
                     properties.len()
                 ),
             });
+        }
+
+        // Bytes 1..5 encode the dictionary size as little-endian u32.
+        let dict_size =
+            u32::from_le_bytes([properties[1], properties[2], properties[3], properties[4]]) as u64;
+
+        if let Some(cap) = codec_config.max_lzma_dict_size {
+            if dict_size > cap {
+                return Err(CoreError::ResourceLimitExceeded {
+                    message: format!(
+                        "LZMA dictionary size {dict_size} bytes exceeds configured cap {cap} bytes"
+                    ),
+                });
+            }
         }
 
         // Reconstruct the "LZMA alone" format header:
@@ -38,7 +56,8 @@ impl<R: Read + Send> LzmaDecoder<R> {
 
         let chained = Cursor::new(header).chain(input);
 
-        let stream = Stream::new_lzma_decoder(u64::MAX).map_err(|e| CoreError::BitstreamError {
+        let memlimit = codec_config.max_lzma_dict_size.unwrap_or(u64::MAX);
+        let stream = Stream::new_lzma_decoder(memlimit).map_err(|e| CoreError::BitstreamError {
             detail: format!("LZMA decoder init: {e}"),
         })?;
 

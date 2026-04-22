@@ -114,6 +114,14 @@ impl archive::ProgressReporter for CliProgressReporter {
     fn should_cancel(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
     }
+
+    fn on_warning(&mut self, message: &str) {
+        if let Some(bar) = &self.bar {
+            bar.println(format!("⚠ {}", message));
+        } else {
+            eprintln!("⚠ {}", message);
+        }
+    }
 }
 
 /// Shorten long entry names for display (show last path component).

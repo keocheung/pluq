@@ -43,7 +43,9 @@ async fn zip_extract_selected_batches_into_single_cluster() {
     let reader = common::CountingReadAt::new(&path);
     let stream_calls = reader.stream_calls.clone();
 
-    let archive = ZipArchive::open(reader).await.expect("open ZIP");
+    let archive = ZipArchive::open(reader, &archive_core::ResourceLimits::default())
+        .await
+        .expect("open ZIP");
 
     let entries: Vec<&ArchiveEntry> = archive
         .entries()
@@ -63,6 +65,7 @@ async fn zip_extract_selected_batches_into_single_cluster() {
             |_| Some(Box::new(tokio::io::sink()) as Box<dyn tokio::io::AsyncWrite + Send + Unpin>),
             progress,
             None,
+            &archive_core::ResourceLimits::default(),
         )
         .await
         .expect("extract_selected failed");
@@ -79,5 +82,43 @@ async fn zip_extract_selected_batches_into_single_cluster() {
         delta < entries.len(),
         "expected fewer read_stream calls than entries (got {delta} for {} entries — batching not active?)",
         entries.len()
+    );
+}
+
+#[tokio::test]
+async fn zip_extract_selected_max_total_unpacked_rejected() {
+    let (_tmp, path) = build_multi_entry_zip();
+    let reader = common::CountingReadAt::new(&path);
+    let archive = ZipArchive::open(reader, &archive_core::ResourceLimits::default())
+        .await
+        .expect("open ZIP");
+
+    let entries: Vec<&ArchiveEntry> = archive
+        .entries()
+        .iter()
+        .filter(|e| !e.is_directory)
+        .collect();
+
+    // The two files together are around 40 bytes. We set limit to 10 bytes.
+    let limits = archive_core::ResourceLimits {
+        max_total_unpacked: 10,
+        ..Default::default()
+    };
+
+    let progress = Arc::new(Mutex::new(()));
+    let result = archive
+        .extract_selected(
+            &entries,
+            |_| Some(Box::new(tokio::io::sink()) as Box<dyn tokio::io::AsyncWrite + Send + Unpin>),
+            progress,
+            None,
+            &limits,
+        )
+        .await;
+
+    assert!(
+        matches!(result, Err(archive_core::CoreError::ResourceLimitExceeded { .. })),
+        "expected ResourceLimitExceeded for max_total_unpacked, got: {:?}",
+        result
     );
 }

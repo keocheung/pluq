@@ -115,7 +115,7 @@ impl<R: ReadAt> Rar4Archive<R> {
     ///
     /// Returns [`CoreError::InvalidFormat`] if the RAR4 signature is absent.
     /// Returns [`CoreError::UnsupportedFeature`] for solid archives.
-    pub async fn open(reader: R) -> Result<Self, CoreError>
+    pub async fn open(reader: R, limits: &crate::ResourceLimits) -> Result<Self, CoreError>
     where
         R: LocalPath,
     {
@@ -158,7 +158,8 @@ impl<R: ReadAt> Rar4Archive<R> {
         if local_path.is_some() {
             let no_op: Arc<Mutex<dyn ProgressReporter>> = Arc::new(Mutex::new(()));
             let (entries, locations) =
-                Self::run_elastic_scan(&reader, preamble_end as u64, size, &no_op, None).await?;
+                Self::run_elastic_scan(&reader, preamble_end as u64, size, &no_op, None, limits)
+                    .await?;
             Ok(Self {
                 reader,
                 entries,
@@ -262,11 +263,13 @@ impl<R: ReadAt> Rar4Archive<R> {
         size: u64,
         progress: &Arc<Mutex<dyn ProgressReporter>>,
         snippet_config: Option<SnippetConfig>,
+        limits: &crate::ResourceLimits,
     ) -> Result<(Vec<ArchiveEntry>, Vec<Rar4EntryLocation>), CoreError> {
         const LARGE_THRESHOLD: u64 = 10 * 1024 * 1024; // 10 MiB
 
         let mut entries: Vec<ArchiveEntry> = Vec::new();
         let mut locations: Vec<Rar4EntryLocation> = Vec::new();
+        let mut header_bytes_read: u64 = 0;
 
         if start_offset >= size {
             return Ok((entries, locations));
@@ -326,11 +329,31 @@ impl<R: ReadAt> Rar4Archive<R> {
             let block = parse_block_header(&buf[buf_pos..], offset)?;
             let head_size = block.head_size as usize;
 
+            let this_header_len = head_size as u64;
+            header_bytes_read += this_header_len;
+            if header_bytes_read > limits.max_header_bytes {
+                return Err(CoreError::ResourceLimitExceeded {
+                    message: format!(
+                        "RAR4 cumulative header size exceeds max_header_bytes {}",
+                        limits.max_header_bytes
+                    ),
+                });
+            }
+
             // Ensure full file header is in buf (head_size bytes from block start).
             fill!(head_size);
 
             match block.head_type {
                 BLOCK_FILE => {
+                    if entries.len() >= limits.max_entries {
+                        return Err(CoreError::ResourceLimitExceeded {
+                            message: format!(
+                                "RAR4 entry count exceeds max_entries {}",
+                                limits.max_entries
+                            ),
+                        });
+                    }
+
                     let file_hdr = parse_file_header(&buf[buf_pos..], block)?;
 
                     let is_solid = file_hdr.raw.head_flags & FLAG_SOLID != 0;
@@ -442,10 +465,12 @@ impl<R: ReadAt> Rar4Archive<R> {
                                 .send(SnippetMsg {
                                     path: snippet_path.clone(),
                                     entry: entry.clone(),
+                                    data_size: pack_size,
                                     crc32: Some(file_hdr.file_crc),
                                     blake2_hash: None,
                                 })
                                 .await
+
                                 .is_err()
                             {
                                 let _ = std::fs::remove_file(&snippet_path);
@@ -541,10 +566,20 @@ impl<R: ReadAt> Rar4Archive<R> {
         sink: &mut W,
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
+        limits: &crate::ResourceLimits,
     ) -> Result<u64, CoreError> {
         if entry.is_directory {
             return Ok(0);
         }
+
+        limits.check_extraction_limits(
+            &entry.name,
+            entry.compressed_size,
+            entry.uncompressed_size,
+            &progress,
+            false,
+            false,
+        )?;
 
         let loc = &self.locations[entry.index];
 
@@ -555,14 +590,14 @@ impl<R: ReadAt> Rar4Archive<R> {
         // Encrypted entries must go through unrar (it handles AES decryption).
         if loc.is_encrypted {
             return self
-                .extract_compressed(entry, loc, sink, progress, password)
+                .extract_compressed(entry, loc, sink, progress, password, limits)
                 .await;
         }
 
         match loc.method {
-            0x30 => self.extract_store(entry, loc, sink, progress).await,
+            0x30 => self.extract_store(entry, loc, sink, progress, limits).await,
             0x31..=0x35 => {
-                self.extract_compressed(entry, loc, sink, progress, None)
+                self.extract_compressed(entry, loc, sink, progress, None, limits)
                     .await
             }
             m => Err(CoreError::UnsupportedCompression {
@@ -576,8 +611,9 @@ impl<R: ReadAt> Rar4Archive<R> {
         &self,
         entry: &ArchiveEntry,
         progress: Arc<Mutex<dyn ProgressReporter>>,
+        limits: &crate::ResourceLimits,
     ) -> Result<(), CoreError> {
-        self.extract(entry, &mut tokio::io::sink(), progress, None)
+        self.extract(entry, &mut tokio::io::sink(), progress, None, limits)
             .await
             .map(|_| ())
     }
@@ -589,10 +625,12 @@ impl<R: ReadAt> Rar4Archive<R> {
         loc: &Rar4EntryLocation,
         sink: &mut W,
         progress: Arc<Mutex<dyn ProgressReporter>>,
+        limits: &crate::ResourceLimits,
     ) -> Result<u64, CoreError> {
         let entry_name = entry.name.clone();
         let uncompressed_size = entry.uncompressed_size;
         let expected_crc = loc.crc32;
+        let compressed_size = loc.data_size;
 
         // Step 1 (async): streaming AsyncRead for the raw stored data.
         let stream = self
@@ -604,6 +642,7 @@ impl<R: ReadAt> Rar4Archive<R> {
         // Step 2 (spawn_blocking): read chunks, compute CRC32, accumulate.
         let handle = tokio::runtime::Handle::current();
         let mut sync_reader = SyncIoBridge::new_with_handle(stream, handle);
+        let limits_clone = limits.clone();
 
         use std::io::Write;
         let temp_file =
@@ -613,6 +652,7 @@ impl<R: ReadAt> Rar4Archive<R> {
                 let mut crc_hasher = crc32fast::Hasher::new();
                 let mut total_written: u64 = 0;
                 let mut chunk_buf = vec![0u8; CHUNK_SIZE];
+                let mut ratio_warned = false;
 
                 let temp_file =
                     tempfile::NamedTempFile::new().map_err(|e| CoreError::BitstreamError {
@@ -649,6 +689,26 @@ impl<R: ReadAt> Rar4Archive<R> {
                     })?;
 
                     total_written += n as u64;
+
+                    if !ratio_warned {
+                        ratio_warned = limits_clone.check_extraction_limits(
+                            &entry_name,
+                            compressed_size,
+                            total_written,
+                            &progress,
+                            true,
+                            false,
+                        )?;
+                    } else {
+                        limits_clone.check_extraction_limits(
+                            &entry_name,
+                            compressed_size,
+                            total_written,
+                            &progress,
+                            true,
+                            true,
+                        )?;
+                    }
 
                     {
                         let mut p = progress.lock().unwrap();
@@ -712,13 +772,14 @@ impl<R: ReadAt> Rar4Archive<R> {
         sink: &mut W,
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
+        limits: &crate::ResourceLimits,
     ) -> Result<u64, CoreError> {
         if let Some(path) = &self.local_path {
             return self
-                .extract_via_unrar_local(entry, loc, path, sink, progress, password)
+                .extract_via_unrar_local(entry, loc, path, sink, progress, password, limits)
                 .await;
         }
-        self.extract_via_unrar_cloud(entry, loc, sink, progress, password)
+        self.extract_via_unrar_cloud(entry, loc, sink, progress, password, limits)
             .await
     }
 
@@ -731,6 +792,7 @@ impl<R: ReadAt> Rar4Archive<R> {
         sink: &mut W,
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
+        limits: &crate::ResourceLimits,
     ) -> Result<u64, CoreError> {
         let path = archive_path.to_path_buf();
         let target_name = entry.name.clone();
@@ -793,8 +855,10 @@ impl<R: ReadAt> Rar4Archive<R> {
             &entry_name,
             Some(expected_crc),
             None,
+            loc.data_size,
             sink,
             &progress,
+            limits,
         )
         .await
     }
@@ -810,6 +874,7 @@ impl<R: ReadAt> Rar4Archive<R> {
         sink: &mut W,
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
+        limits: &crate::ResourceLimits,
     ) -> Result<u64, CoreError> {
         let entry_name = entry.name.clone();
         let uncompressed_size = entry.uncompressed_size;
@@ -923,8 +988,10 @@ impl<R: ReadAt> Rar4Archive<R> {
             &entry_name,
             Some(expected_crc),
             None,
+            loc.data_size,
             sink,
             &progress,
+            limits,
         )
         .await
     }
@@ -939,22 +1006,25 @@ impl<R: ReadAt> Rar4Archive<R> {
         mut sink_factory: SinkFn,
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
+        limits: &crate::ResourceLimits,
     ) -> Result<BatchResult, CoreError>
     where
         R: Send + Sync + 'static,
         SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn AsyncWrite + Send + Unpin>> + Send,
     {
-        if entries.is_empty() {
-            return Ok(BatchResult {
-                bytes_written: 0,
-                succeeded: 0,
-                failed: vec![],
+        let total_size: u64 = entries.iter().map(|e| e.uncompressed_size).sum();
+        if total_size > limits.max_total_unpacked {
+            return Err(CoreError::ResourceLimitExceeded {
+                message: format!(
+                    "batch extraction total size {} exceeds max_total_unpacked {}",
+                    total_size, limits.max_total_unpacked
+                ),
             });
         }
 
         // Local path: delegate to default loop (unrar opens the real file directly).
         if self.local_path.is_some() {
-            return extract_selected_default(self, entries, sink_factory, progress, password).await;
+            return extract_selected_default(self, entries, sink_factory, progress, password, limits).await;
         }
 
         // Cloud path: build clusters.
@@ -1080,8 +1150,10 @@ impl<R: ReadAt> Rar4Archive<R> {
                                 &entry.name,
                                 Some(loc.crc32),
                                 None,
+                                loc.data_size,
                                 &mut sink,
                                 &progress,
+                                limits,
                             )
                             .await;
 
@@ -1124,16 +1196,18 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for Rar4Archive<R> {
         sink: &mut W,
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
+        limits: &crate::ResourceLimits,
     ) -> Result<u64, CoreError> {
-        Rar4Archive::extract(self, entry, sink, progress, password).await
+        Rar4Archive::extract(self, entry, sink, progress, password, limits).await
     }
 
     async fn test(
         &self,
         entry: &ArchiveEntry,
         progress: Arc<Mutex<dyn ProgressReporter>>,
+        limits: &crate::ResourceLimits,
     ) -> Result<(), CoreError> {
-        Rar4Archive::test(self, entry, progress).await
+        Rar4Archive::test(self, entry, progress, limits).await
     }
 
     fn extract_selected<SinkFn>(
@@ -1142,12 +1216,13 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for Rar4Archive<R> {
         sink_factory: SinkFn,
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
+        limits: &crate::ResourceLimits,
     ) -> impl std::future::Future<Output = Result<BatchResult, CoreError>> + Send
     where
         SinkFn:
             FnMut(&ArchiveEntry) -> Option<Box<dyn tokio::io::AsyncWrite + Send + Unpin>> + Send,
     {
-        Rar4Archive::extract_selected(self, entries, sink_factory, progress, password)
+        Rar4Archive::extract_selected(self, entries, sink_factory, progress, password, limits)
     }
 
     fn scan_info(&self) -> crate::scan::ScanInfo {
@@ -1164,6 +1239,7 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for Rar4Archive<R> {
     async fn scan_metadata(
         &mut self,
         progress: Arc<Mutex<dyn ProgressReporter>>,
+        limits: &crate::ResourceLimits,
     ) -> Result<(), CoreError> {
         let preamble_end = self.archive_preamble.len() as u64;
         let size = self.archive_size;
@@ -1171,7 +1247,8 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for Rar4Archive<R> {
             progress.lock().unwrap().on_scan_start(size);
         }
         let (entries, locations) =
-            Self::run_elastic_scan(&self.reader, preamble_end, size, &progress, None).await?;
+            Self::run_elastic_scan(&self.reader, preamble_end, size, &progress, None, limits)
+                .await?;
         let entry_count = entries.len();
         self.entries = entries;
         self.locations = locations;
@@ -1188,6 +1265,7 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for Rar4Archive<R> {
         mut sink_factory: SinkFn,
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
+        limits: &crate::ResourceLimits,
     ) -> Result<u64, CoreError>
     where
         Filter: Fn(&ArchiveEntry) -> bool + Send + Sync + 'static,
@@ -1210,7 +1288,7 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for Rar4Archive<R> {
                 };
                 let mut buf = Vec::new();
                 let bytes =
-                    Rar4Archive::extract(self, &entry, &mut buf, progress.clone(), password)
+                    Rar4Archive::extract(self, &entry, &mut buf, progress.clone(), password, limits)
                         .await?;
                 use std::io::Write;
                 sync_sink
@@ -1237,6 +1315,7 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for Rar4Archive<R> {
             sink_factory,
             consumer_progress,
             password_owned,
+            limits.clone(),
         ));
 
         // Build snippet config.
@@ -1251,10 +1330,15 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for Rar4Archive<R> {
             progress.lock().unwrap().on_scan_start(size);
         }
 
-        // Run producer (in current task — borrows self.reader).
-        let (entries, locations) =
-            Self::run_elastic_scan(&self.reader, preamble_end, size, &progress, Some(config))
-                .await?;
+        let (entries, locations) = Self::run_elastic_scan(
+            &self.reader,
+            preamble_end,
+            size,
+            &progress,
+            Some(config),
+            limits,
+        )
+        .await?;
 
         // Await consumer.
         let total_bytes = consumer.await.map_err(|e| CoreError::BitstreamError {

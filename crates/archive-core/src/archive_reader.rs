@@ -80,6 +80,7 @@ pub trait ArchiveReader {
         sink: &mut W,
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
+        limits: &crate::ResourceLimits,
     ) -> impl std::future::Future<Output = Result<u64, CoreError>> + Send;
 
     /// Decompress and verify CRC without retaining output.
@@ -90,6 +91,7 @@ pub trait ArchiveReader {
         &self,
         entry: &ArchiveEntry,
         progress: Arc<Mutex<dyn ProgressReporter>>,
+        limits: &crate::ResourceLimits,
     ) -> impl std::future::Future<Output = Result<(), CoreError>> + Send;
 
     /// Whether this archive's entry list is ready or requires a scan first.
@@ -104,6 +106,7 @@ pub trait ArchiveReader {
     fn scan_metadata(
         &mut self,
         _progress: Arc<Mutex<dyn ProgressReporter>>,
+        _limits: &crate::ResourceLimits,
     ) -> impl std::future::Future<Output = Result<(), CoreError>> + Send {
         async { Ok(()) }
     }
@@ -127,13 +130,14 @@ pub trait ArchiveReader {
         sink_factory: SinkFn,
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
+        limits: &crate::ResourceLimits,
     ) -> impl std::future::Future<Output = Result<BatchResult, CoreError>> + Send
     where
         SinkFn:
             FnMut(&ArchiveEntry) -> Option<Box<dyn tokio::io::AsyncWrite + Send + Unpin>> + Send,
         Self: Send + Sync + Sized,
     {
-        extract_selected_default(self, entries, sink_factory, progress, password)
+        extract_selected_default(self, entries, sink_factory, progress, password, limits)
     }
 
     /// Extract entries in a single streaming pass.
@@ -155,13 +159,14 @@ pub trait ArchiveReader {
         sink_factory: SinkFn,
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
+        limits: &crate::ResourceLimits,
     ) -> impl std::future::Future<Output = Result<u64, CoreError>> + Send
     where
         Filter: Fn(&ArchiveEntry) -> bool + Send + Sync + 'static,
         SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn std::io::Write + Send>> + Send + 'static,
     {
         async move {
-            let _ = (filter, sink_factory, progress, password);
+            let _ = (filter, sink_factory, progress, password, limits);
             Err(CoreError::UnsupportedFeature {
                 detail: "streaming extraction not supported for this format".into(),
             })
@@ -179,11 +184,22 @@ pub async fn extract_selected_default<R, SinkFn>(
     mut sink_factory: SinkFn,
     progress: Arc<Mutex<dyn ProgressReporter>>,
     password: Option<&[u8]>,
+    limits: &crate::ResourceLimits,
 ) -> Result<BatchResult, CoreError>
 where
     R: ArchiveReader + Send + Sync,
     SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn tokio::io::AsyncWrite + Send + Unpin>> + Send,
 {
+    let total_size: u64 = entries.iter().map(|e| e.uncompressed_size).sum();
+    if total_size > limits.max_total_unpacked {
+        return Err(CoreError::ResourceLimitExceeded {
+            message: format!(
+                "batch extraction total size {} exceeds max_total_unpacked {}",
+                total_size, limits.max_total_unpacked
+            ),
+        });
+    }
+
     let mut bytes_written = 0u64;
     let mut succeeded = 0usize;
     let mut failed = Vec::new();
@@ -212,7 +228,7 @@ where
         }
 
         match reader
-            .extract(entry, &mut sink, progress.clone(), password)
+            .extract(entry, &mut sink, progress.clone(), password, limits)
             .await
         {
             Ok(bytes) => {

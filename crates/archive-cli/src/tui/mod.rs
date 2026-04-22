@@ -42,7 +42,7 @@ pub async fn run_with_source(
             move |tx: tokio::sync::mpsc::UnboundedSender<app::AppMessage>| {
                 debug!("spawning Archive::open task");
                 tokio::spawn(async move {
-                    let result = archive::Archive::open_reader(&source, reader).await;
+                    let result = archive::Archive::open_reader(&source, reader, &archive::ArchiveConfig::default()).await;
                     let _ = tx.send(app::AppMessage::ArchiveOpened(result));
                 });
             },

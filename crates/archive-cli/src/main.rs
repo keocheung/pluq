@@ -409,7 +409,7 @@ async fn open_with_progress(
     eprintln!("  Opening {source}...");
     let config = source_config(token_store);
     let reader = resolve(source, &config)?;
-    let opened = Archive::open_reader(source, reader).await?;
+    let opened = Archive::open_reader(source, reader, &archive::ArchiveConfig::default()).await?;
     match opened {
         archive::Opened::Ready(a) => Ok(a),
         archive::Opened::NeedsScan(pending) => {

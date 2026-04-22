@@ -5,8 +5,6 @@
 
 ## Phase 5: Security Hardening & Release
 - [ ] **`snipe feedback`** — open GitHub issues URL in default browser. Trivial.
-- [ ] Anti-bomb safeguards: enforce entry count, compression ratio, and header size limits.
-- [ ] Memory-safe decoding: cap dictionary sizes for LZMA/LZMA2 to prevent OOM attacks.
 - [ ] Path traversal guard — currently only in `archive-cli/src/main.rs` (Get handler). Move into `archive-core` so all extraction paths are protected, not just the CLI.
 - [ ] Symlink target verification to ensure links stay within the output directory.
 - [ ] Cross-platform release pipeline (GitHub Actions).

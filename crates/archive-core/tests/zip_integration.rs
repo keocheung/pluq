@@ -14,9 +14,12 @@ use archive_core::{
 };
 
 async fn open_zip(path: &str) -> ZipArchive<LocalReadAt> {
-    ZipArchive::open(LocalReadAt::new(path))
-        .await
-        .expect("open ZIP")
+    ZipArchive::open(
+        LocalReadAt::new(path),
+        &archive_core::ResourceLimits::default(),
+    )
+    .await
+    .expect("open ZIP")
 }
 
 async fn extract_bytes(
@@ -26,7 +29,7 @@ async fn extract_bytes(
 ) -> Result<bytes::Bytes, CoreError> {
     let mut buf = Vec::new();
     let progress = std::sync::Arc::new(std::sync::Mutex::new(()));
-    archive.extract(entry, &mut buf, progress, password).await?;
+    archive.extract(entry, &mut buf, progress, password, &archive_core::ResourceLimits::default()).await?;
     Ok(bytes::Bytes::from(buf))
 }
 use zip::CompressionMethod as ZipMethod;
@@ -313,7 +316,7 @@ async fn test_integrity_unencrypted_ok_encrypted_requires_password() {
         .find(|e| e.name == "plain_large.txt")
         .unwrap();
     archive
-        .test(plain_large, Arc::new(Mutex::new(())))
+        .test(plain_large, Arc::new(Mutex::new(())), &archive_core::ResourceLimits::default())
         .await
         .unwrap();
 
@@ -323,7 +326,7 @@ async fn test_integrity_unencrypted_ok_encrypted_requires_password() {
         .find(|e| e.name == "plain_small.bin")
         .unwrap();
     archive
-        .test(plain_small, Arc::new(Mutex::new(())))
+        .test(plain_small, Arc::new(Mutex::new(())), &archive_core::ResourceLimits::default())
         .await
         .unwrap();
 
@@ -333,7 +336,7 @@ async fn test_integrity_unencrypted_ok_encrypted_requires_password() {
         .iter()
         .find(|e| e.name == "zipcrypto_deflated.txt")
         .unwrap();
-    let result = archive.test(zipcrypto, Arc::new(Mutex::new(()))).await;
+    let result = archive.test(zipcrypto, Arc::new(Mutex::new(())), &archive_core::ResourceLimits::default()).await;
     assert!(
         matches!(result, Err(CoreError::PasswordRequired)),
         "expected PasswordRequired for ZipCrypto test(), got: {result:?}"
@@ -344,7 +347,7 @@ async fn test_integrity_unencrypted_ok_encrypted_requires_password() {
         .iter()
         .find(|e| e.name == "aes256_stored.bin")
         .unwrap();
-    let result = archive.test(aes, Arc::new(Mutex::new(()))).await;
+    let result = archive.test(aes, Arc::new(Mutex::new(())), &archive_core::ResourceLimits::default()).await;
     assert!(
         matches!(result, Err(CoreError::PasswordRequired)),
         "expected PasswordRequired for AES test(), got: {result:?}"
@@ -402,7 +405,7 @@ async fn progress_callbacks_recorded_correctly() {
 
     let mut buf = Vec::new();
     archive
-        .extract(entry, &mut buf, progress, None)
+        .extract(entry, &mut buf, progress, None, &archive_core::ResourceLimits::default())
         .await
         .unwrap();
     assert_eq!(
@@ -634,7 +637,7 @@ async fn cancel_after_50_percent_returns_cancelled() {
     }));
 
     let mut buf = Vec::new();
-    let result = archive.extract(entry, &mut buf, progress, None).await;
+    let result = archive.extract(entry, &mut buf, progress, None, &archive_core::ResourceLimits::default()).await;
 
     assert!(
         matches!(result, Err(CoreError::Cancelled)),
@@ -711,7 +714,13 @@ async fn extract_selected_map(
 
     let progress = Arc::new(Mutex::new(()));
     archive
-        .extract_selected(entries, sink_factory, progress, None)
+        .extract_selected(
+            entries,
+            sink_factory,
+            progress,
+            None,
+            &archive_core::ResourceLimits::default(),
+        )
         .await
         .expect("extract_selected failed");
 
@@ -776,6 +785,7 @@ async fn extract_selected_empty_returns_ok() {
             |_| -> Option<Box<dyn tokio::io::AsyncWrite + Send + Unpin>> { None },
             progress,
             None,
+            &archive_core::ResourceLimits::default(),
         )
         .await
         .expect("extract_selected on empty slice should succeed");
@@ -808,4 +818,60 @@ async fn extract_selected_single_entry_matches_extract() {
         via_extract.as_ref(),
         "extract_selected output must match extract() output"
     );
+}
+
+#[tokio::test]
+async fn limits_reject_excessive_entry_count() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    {
+        let mut buf = Vec::new();
+        // Standard EOCD (22 bytes)
+        buf.extend_from_slice(&0x06054b50u32.to_le_bytes()); // signature
+        buf.extend_from_slice(&0u16.to_le_bytes()); // disk number
+        buf.extend_from_slice(&0u16.to_le_bytes()); // CD start disk
+        buf.extend_from_slice(&10u16.to_le_bytes()); // entries this disk
+        buf.extend_from_slice(&10u16.to_le_bytes()); // total entries
+        buf.extend_from_slice(&0u32.to_le_bytes()); // CD size
+        buf.extend_from_slice(&0u32.to_le_bytes()); // CD offset
+        buf.extend_from_slice(&0u16.to_le_bytes()); // comment length
+        std::fs::write(tmp.path(), &buf).unwrap();
+    }
+    let reader = LocalReadAt::new(tmp.path());
+    let limits = archive_core::ResourceLimits {
+        max_entries: 5,
+        ..Default::default()
+    };
+    let result = ZipArchive::open(reader, &limits).await;
+    assert!(matches!(
+        result,
+        Err(archive_core::CoreError::ResourceLimitExceeded { .. })
+    ));
+}
+
+#[tokio::test]
+async fn limits_reject_excessive_cd_size() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    {
+        let mut buf = Vec::new();
+        // Standard EOCD (22 bytes)
+        buf.extend_from_slice(&0x06054b50u32.to_le_bytes()); // signature
+        buf.extend_from_slice(&0u16.to_le_bytes()); // disk number
+        buf.extend_from_slice(&0u16.to_le_bytes()); // CD start disk
+        buf.extend_from_slice(&0u16.to_le_bytes()); // entries this disk
+        buf.extend_from_slice(&0u16.to_le_bytes()); // total entries
+        buf.extend_from_slice(&10_000_000u32.to_le_bytes()); // CD size
+        buf.extend_from_slice(&0u32.to_le_bytes()); // CD offset
+        buf.extend_from_slice(&0u16.to_le_bytes()); // comment length
+        std::fs::write(tmp.path(), &buf).unwrap();
+    }
+    let reader = LocalReadAt::new(tmp.path());
+    let limits = archive_core::ResourceLimits {
+        max_header_bytes: 1_000,
+        ..Default::default()
+    };
+    let result = ZipArchive::open(reader, &limits).await;
+    assert!(matches!(
+        result,
+        Err(archive_core::CoreError::ResourceLimitExceeded { .. })
+    ));
 }

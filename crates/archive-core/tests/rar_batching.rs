@@ -25,11 +25,13 @@ async fn rar5_extract_selected_batches_into_single_cluster() {
     let reader = common::CountingReadAt::new(&path);
     let stream_calls = reader.stream_calls.clone();
 
-    let mut archive = RarArchive::open(reader).await.expect("open RAR5");
+    let mut archive = RarArchive::open(reader, &archive_core::ResourceLimits::default())
+        .await
+        .expect("open RAR5");
 
     let progress: Arc<Mutex<dyn archive_core::ProgressReporter>> = Arc::new(Mutex::new(()));
     archive
-        .scan_metadata(progress.clone())
+        .scan_metadata(progress.clone(), &archive_core::ResourceLimits::default())
         .await
         .expect("scan_metadata");
 
@@ -50,6 +52,7 @@ async fn rar5_extract_selected_batches_into_single_cluster() {
             |_| Some(Box::new(tokio::io::sink()) as Box<dyn tokio::io::AsyncWrite + Send + Unpin>),
             progress,
             None,
+            &archive_core::ResourceLimits::default(),
         )
         .await
         .expect("extract_selected failed");

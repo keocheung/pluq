@@ -37,8 +37,10 @@ pub(crate) async fn verify_and_stream_from_file<W: AsyncWrite + Send + Unpin>(
     entry_name: &str,
     expected_crc: Option<u32>,
     expected_blake2: Option<[u8; 32]>,
+    compressed_size: u64,
     sink: &mut W,
     progress: &Arc<Mutex<dyn ProgressReporter>>,
+    limits: &crate::ResourceLimits,
 ) -> Result<u64, CoreError> {
     use std::io::Seek;
     file.seek(std::io::SeekFrom::Start(0))
@@ -51,6 +53,7 @@ pub(crate) async fn verify_and_stream_from_file<W: AsyncWrite + Send + Unpin>(
     let mut blake_state = blake2sp::State::new();
     let mut buf = vec![0u8; 256 * 1024];
     let mut total_bytes = 0u64;
+    let mut ratio_warned = false;
 
     loop {
         let n = file
@@ -79,6 +82,26 @@ pub(crate) async fn verify_and_stream_from_file<W: AsyncWrite + Send + Unpin>(
             })?;
 
         total_bytes += n as u64;
+
+        if !ratio_warned {
+            ratio_warned = limits.check_extraction_limits(
+                entry_name,
+                compressed_size,
+                total_bytes,
+                progress,
+                true,
+                false,
+            )?;
+        } else {
+            limits.check_extraction_limits(
+                entry_name,
+                compressed_size,
+                total_bytes,
+                progress,
+                true,
+                true,
+            )?;
+        }
     }
 
     // Finalize hashes and compare.
@@ -120,8 +143,10 @@ pub(crate) fn verify_and_stream_from_file_sync<W: Write>(
     entry_name: &str,
     expected_crc: Option<u32>,
     expected_blake2: Option<[u8; 32]>,
+    compressed_size: u64,
     sink: &mut W,
     progress: &Arc<Mutex<dyn ProgressReporter>>,
+    limits: &crate::ResourceLimits,
 ) -> Result<u64, CoreError> {
     use std::io::Seek;
     file.seek(std::io::SeekFrom::Start(0))
@@ -133,6 +158,7 @@ pub(crate) fn verify_and_stream_from_file_sync<W: Write>(
     let mut blake_state = blake2sp::State::new();
     let mut buf = vec![0u8; 256 * 1024];
     let mut total_bytes = 0u64;
+    let mut ratio_warned = false;
 
     loop {
         let n = file.read(&mut buf).map_err(|e| CoreError::BitstreamError {
@@ -157,6 +183,26 @@ pub(crate) fn verify_and_stream_from_file_sync<W: Write>(
             })?;
 
         total_bytes += n as u64;
+
+        if !ratio_warned {
+            ratio_warned = limits.check_extraction_limits(
+                entry_name,
+                compressed_size,
+                total_bytes,
+                progress,
+                true,
+                false,
+            )?;
+        } else {
+            limits.check_extraction_limits(
+                entry_name,
+                compressed_size,
+                total_bytes,
+                progress,
+                true,
+                true,
+            )?;
+        }
     }
 
     // Finalize hashes and compare.
@@ -247,6 +293,8 @@ pub(crate) struct SnippetMsg {
     pub(crate) path: std::path::PathBuf,
     /// The discovered entry metadata.
     pub(crate) entry: ArchiveEntry,
+    /// Compressed data size.
+    pub(crate) data_size: u64,
     /// CRC32 of uncompressed data (for verification after unrar).
     pub(crate) crc32: Option<u32>,
     /// BLAKE2sp hash (RAR5 only; None for RAR4).
@@ -324,7 +372,7 @@ impl<R: ReadAt> RarArchive<R> {
     ///
     /// Returns [`CoreError::InvalidFormat`] if the RAR5 signature is absent.
     /// Returns [`CoreError::UnsupportedFormat`] if a RAR4 signature is detected.
-    pub async fn open(reader: R) -> Result<Self, CoreError>
+    pub async fn open(reader: R, limits: &crate::ResourceLimits) -> Result<Self, CoreError>
     where
         R: LocalPath,
     {
@@ -380,7 +428,7 @@ impl<R: ReadAt> RarArchive<R> {
             let qo_abs = main_header.raw.archive_offset + qo_offset;
             debug!(qo_offset = qo_abs, "attempting Quick Open");
             if let Ok(Some((entries, locations))) =
-                Self::try_quick_open(&reader, qo_abs, size).await
+                Self::try_quick_open(&reader, qo_abs, size, limits).await
             {
                 info!(entries = entries.len(), "RAR opened via Quick Open");
                 return Ok(Self {
@@ -404,7 +452,8 @@ impl<R: ReadAt> RarArchive<R> {
             debug!("local source: running immediate elastic scan");
             let no_op: Arc<Mutex<dyn ProgressReporter>> = Arc::new(Mutex::new(()));
             let (entries, locations) =
-                Self::run_elastic_scan(&reader, preamble_end as u64, size, &no_op, None).await?;
+                Self::run_elastic_scan(&reader, preamble_end as u64, size, &no_op, None, limits)
+                    .await?;
             return Ok(Self {
                 reader,
                 entries,
@@ -499,12 +548,14 @@ impl<R: ReadAt> RarArchive<R> {
         size: u64,
         progress: &Arc<Mutex<dyn ProgressReporter>>,
         snippet_config: Option<SnippetConfig>,
+        limits: &crate::ResourceLimits,
     ) -> Result<(Vec<ArchiveEntry>, Vec<RarEntryLocation>), CoreError> {
         const LARGE_THRESHOLD: u64 = 10 * 1024 * 1024; // 10 MiB
         debug!(start_offset, size, "elastic scan starting");
 
         let mut entries: Vec<ArchiveEntry> = Vec::new();
         let mut locations: Vec<RarEntryLocation> = Vec::new();
+        let mut header_bytes_read: u64 = 0;
 
         if start_offset >= size {
             return Ok((entries, locations));
@@ -582,8 +633,28 @@ impl<R: ReadAt> RarArchive<R> {
             let total_size = block.total_size;
             let data_size = block.data_size;
 
+            let this_header_len = total_size - data_size;
+            header_bytes_read += this_header_len;
+            if header_bytes_read > limits.max_header_bytes {
+                return Err(CoreError::ResourceLimitExceeded {
+                    message: format!(
+                        "RAR5 cumulative header size exceeds max_header_bytes {}",
+                        limits.max_header_bytes
+                    ),
+                });
+            }
+
             match block.block_type {
                 2 => {
+                    if entries.len() >= limits.max_entries {
+                        return Err(CoreError::ResourceLimitExceeded {
+                            message: format!(
+                                "RAR5 entry count exceeds max_entries {}",
+                                limits.max_entries
+                            ),
+                        });
+                    }
+
                     // File block.
                     let file_hdr = parse_file_header(&buf[buf_pos..], block)?;
                     let is_solid = file_hdr.compression.solid;
@@ -688,6 +759,7 @@ impl<R: ReadAt> RarArchive<R> {
                             .send(SnippetMsg {
                                 path: snippet_path.clone(),
                                 entry: entry.clone(),
+                                data_size,
                                 crc32,
                                 blake2_hash,
                             })
@@ -788,6 +860,7 @@ impl<R: ReadAt> RarArchive<R> {
         sink_factory: F,
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
+        limits: &crate::ResourceLimits,
     ) -> Result<u64, CoreError>
     where
         R: Send + Sync + 'static,
@@ -809,7 +882,7 @@ impl<R: ReadAt> RarArchive<R> {
             }
 
             info!(entries = work.len(), "RAR extract_all: local path");
-            return extract_all_via_unrar(path.clone(), work, sink_factory, progress, password)
+            return extract_all_via_unrar(path.clone(), work, sink_factory, progress, password, limits)
                 .await;
         }
 
@@ -820,6 +893,7 @@ impl<R: ReadAt> RarArchive<R> {
             sink_factory,
             progress,
             password,
+            limits,
         )
         .await
     }
@@ -834,11 +908,22 @@ impl<R: ReadAt> RarArchive<R> {
         mut sink_factory: SinkFn,
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
+        limits: &crate::ResourceLimits,
     ) -> Result<BatchResult, CoreError>
     where
         R: Send + Sync + 'static,
         SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn AsyncWrite + Send + Unpin>> + Send,
     {
+        let total_size: u64 = entries.iter().map(|e| e.uncompressed_size).sum();
+        if total_size > limits.max_total_unpacked {
+            return Err(CoreError::ResourceLimitExceeded {
+                message: format!(
+                    "batch extraction total size {} exceeds max_total_unpacked {}",
+                    total_size, limits.max_total_unpacked
+                ),
+            });
+        }
+
         if entries.is_empty() {
             return Ok(BatchResult {
                 bytes_written: 0,
@@ -855,6 +940,7 @@ impl<R: ReadAt> RarArchive<R> {
                 sink_factory,
                 progress,
                 password,
+                limits,
             )
             .await;
         }
@@ -1002,8 +1088,10 @@ impl<R: ReadAt> RarArchive<R> {
                                 &entry.name,
                                 loc.crc32,
                                 loc.blake2_hash,
+                                loc.data_size,
                                 &mut sink,
                                 &progress,
+                                limits,
                             )
                             .await;
 
@@ -1056,10 +1144,20 @@ impl<R: ReadAt> RarArchive<R> {
         sink: &mut W,
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
+        limits: &crate::ResourceLimits,
     ) -> Result<u64, CoreError> {
         if entry.is_directory {
             return Ok(0);
         }
+
+        limits.check_extraction_limits(
+            &entry.name,
+            entry.compressed_size,
+            entry.uncompressed_size,
+            &progress,
+            false,
+            false,
+        )?;
 
         let loc = &self.locations[entry.index];
 
@@ -1088,20 +1186,21 @@ impl<R: ReadAt> RarArchive<R> {
         if loc.is_encrypted {
             debug!(name = %entry.name, "encrypted entry — routing to unrar");
             return self
-                .extract_compressed(entry, loc, sink, progress, password)
+                .extract_compressed(entry, loc, sink, progress, password, limits)
                 .await;
         }
 
         match loc.method {
             0 => {
                 debug!(name = %entry.name, "store extraction (method 0)");
-                self.extract_store(entry, loc, sink, progress).await
+                self.extract_store(entry, loc, sink, progress, limits).await
             }
             1..=5 => {
                 debug!(name = %entry.name, method = loc.method, "compressed extraction via unrar");
-                self.extract_compressed(entry, loc, sink, progress, None)
+                self.extract_compressed(entry, loc, sink, progress, password, limits)
                     .await
             }
+
             m => Err(CoreError::UnsupportedCompression {
                 algorithm: format!("RAR method {m}"),
             }),
@@ -1115,8 +1214,9 @@ impl<R: ReadAt> RarArchive<R> {
         &self,
         entry: &ArchiveEntry,
         progress: Arc<Mutex<dyn ProgressReporter>>,
+        limits: &crate::ResourceLimits,
     ) -> Result<(), CoreError> {
-        self.extract(entry, &mut tokio::io::sink(), progress, None)
+        self.extract(entry, &mut tokio::io::sink(), progress, None, limits)
             .await
             .map(|_| ())
     }
@@ -1133,12 +1233,14 @@ impl<R: ReadAt> RarArchive<R> {
         loc: &RarEntryLocation,
         sink: &mut W,
         progress: Arc<Mutex<dyn ProgressReporter>>,
+        limits: &crate::ResourceLimits,
     ) -> Result<u64, CoreError> {
         // Capture owned values before the async/blocking boundary.
         let entry_name = entry.name.clone();
         let uncompressed_size = entry.uncompressed_size;
         let expected_crc = loc.crc32;
         let expected_blake2 = loc.blake2_hash;
+        let compressed_size = loc.data_size;
 
         // Step 1 (async): get a streaming AsyncRead for the raw (stored) data.
         let stream = self
@@ -1150,6 +1252,7 @@ impl<R: ReadAt> RarArchive<R> {
         // Step 2 (spawn_blocking): read chunks, compute hashes, accumulate.
         let handle = tokio::runtime::Handle::current();
         let mut sync_reader = SyncIoBridge::new_with_handle(stream, handle);
+        let limits_clone = limits.clone();
 
         use std::io::Write;
         let temp_file =
@@ -1165,6 +1268,7 @@ impl<R: ReadAt> RarArchive<R> {
 
                 let mut total_written: u64 = 0;
                 let mut chunk_buf = vec![0u8; CHUNK_SIZE];
+                let mut ratio_warned = false;
 
                 let temp_file =
                     tempfile::NamedTempFile::new().map_err(|e| CoreError::BitstreamError {
@@ -1204,6 +1308,26 @@ impl<R: ReadAt> RarArchive<R> {
                     })?;
 
                     total_written += n as u64;
+
+                    if !ratio_warned {
+                        ratio_warned = limits_clone.check_extraction_limits(
+                            &entry_name,
+                            compressed_size,
+                            total_written,
+                            &progress,
+                            true,
+                            false,
+                        )?;
+                    } else {
+                        limits_clone.check_extraction_limits(
+                            &entry_name,
+                            compressed_size,
+                            total_written,
+                            &progress,
+                            true,
+                            true,
+                        )?;
+                    }
 
                     {
                         let mut p = progress.lock().unwrap();
@@ -1286,15 +1410,16 @@ impl<R: ReadAt> RarArchive<R> {
         sink: &mut W,
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
+        limits: &crate::ResourceLimits,
     ) -> Result<u64, CoreError> {
         if let Some(path) = &self.local_path {
             debug!(name = %entry.name, path = %path.display(), "unrar local path");
             return self
-                .extract_via_unrar_local(entry, loc, path, sink, progress, password)
+                .extract_via_unrar_local(entry, loc, path, sink, progress, password, limits)
                 .await;
         }
         debug!(name = %entry.name, "unrar cloud path (synthetic archive)");
-        self.extract_via_unrar_cloud(entry, loc, sink, progress, password)
+        self.extract_via_unrar_cloud(entry, loc, sink, progress, password, limits)
             .await
     }
 
@@ -1311,6 +1436,7 @@ impl<R: ReadAt> RarArchive<R> {
         sink: &mut W,
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
+        limits: &crate::ResourceLimits,
     ) -> Result<u64, CoreError> {
         let path = archive_path.to_path_buf();
         let target_name = entry.name.clone();
@@ -1374,8 +1500,10 @@ impl<R: ReadAt> RarArchive<R> {
             &entry_name,
             expected_crc,
             expected_blake2,
+            loc.data_size,
             sink,
             &progress,
+            limits,
         )
         .await
     }
@@ -1392,6 +1520,7 @@ impl<R: ReadAt> RarArchive<R> {
         sink: &mut W,
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
+        limits: &crate::ResourceLimits,
     ) -> Result<u64, CoreError> {
         let entry_name = entry.name.clone();
         let uncompressed_size = entry.uncompressed_size;
@@ -1447,8 +1576,10 @@ impl<R: ReadAt> RarArchive<R> {
             &entry_name,
             expected_crc,
             expected_blake2,
+            loc.data_size,
             sink,
             &progress,
+            limits,
         )
         .await
     }
@@ -1461,6 +1592,7 @@ impl<R: ReadAt> RarArchive<R> {
         reader: &R,
         qo_abs: u64,
         archive_size: u64,
+        limits: &crate::ResourceLimits,
     ) -> Result<Option<(Vec<ArchiveEntry>, Vec<RarEntryLocation>)>, CoreError> {
         // Guard: QO offset must be within the archive.
         if qo_abs >= archive_size {
@@ -1523,6 +1655,15 @@ impl<R: ReadAt> RarArchive<R> {
             // Only process file headers (type 2).
             if raw_block.block_type != 2 {
                 continue;
+            }
+
+            if entries.len() >= limits.max_entries {
+                return Err(CoreError::ResourceLimitExceeded {
+                    message: format!(
+                        "RAR5 entry count exceeds max_entries {}",
+                        limits.max_entries
+                    ),
+                });
             }
 
             // Note: cached headers in QO blocks do NOT include the data area bytes.
@@ -1590,8 +1731,9 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for RarArchive<R> {
         sink: &mut W,
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
+        limits: &crate::ResourceLimits,
     ) -> Result<u64, CoreError> {
-        RarArchive::extract(self, entry, sink, progress, password).await
+        RarArchive::extract(self, entry, sink, progress, password, limits).await
     }
 
     async fn extract_selected<SinkFn>(
@@ -1600,19 +1742,21 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for RarArchive<R> {
         sink_factory: SinkFn,
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
+        limits: &crate::ResourceLimits,
     ) -> Result<BatchResult, CoreError>
     where
         SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn AsyncWrite + Send + Unpin>> + Send,
     {
-        RarArchive::extract_selected(self, entries, sink_factory, progress, password).await
+        RarArchive::extract_selected(self, entries, sink_factory, progress, password, limits).await
     }
 
     async fn test(
         &self,
         entry: &ArchiveEntry,
         progress: Arc<Mutex<dyn ProgressReporter>>,
+        limits: &crate::ResourceLimits,
     ) -> Result<(), CoreError> {
-        RarArchive::test(self, entry, progress).await
+        RarArchive::test(self, entry, progress, limits).await
     }
 
     fn scan_info(&self) -> crate::scan::ScanInfo {
@@ -1629,6 +1773,7 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for RarArchive<R> {
     async fn scan_metadata(
         &mut self,
         progress: Arc<Mutex<dyn ProgressReporter>>,
+        limits: &crate::ResourceLimits,
     ) -> Result<(), CoreError> {
         let preamble_end = self.archive_preamble.len() as u64;
         let size = self.archive_size;
@@ -1639,7 +1784,8 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for RarArchive<R> {
         }
 
         let (entries, locations) =
-            Self::run_elastic_scan(&self.reader, preamble_end, size, &progress, None).await?;
+            Self::run_elastic_scan(&self.reader, preamble_end, size, &progress, None, limits)
+                .await?;
 
         let entry_count = entries.len();
         self.entries = entries;
@@ -1660,6 +1806,7 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for RarArchive<R> {
         sink_factory: SinkFn,
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
+        limits: &crate::ResourceLimits,
     ) -> Result<u64, CoreError>
     where
         Filter: Fn(&ArchiveEntry) -> bool + Send + Sync + 'static,
@@ -1679,7 +1826,28 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for RarArchive<R> {
                 return Ok(0);
             }
 
-            return extract_all_via_unrar(path.clone(), work, sink_factory, progress, password)
+            let total_size: u64 = work.iter().map(|(e, _)| e.uncompressed_size).sum();
+            if total_size > limits.max_total_unpacked {
+                return Err(CoreError::ResourceLimitExceeded {
+                    message: format!(
+                        "batch extraction total size {} exceeds max_total_unpacked {}",
+                        total_size, limits.max_total_unpacked
+                    ),
+                });
+            }
+
+            for (entry, _) in &work {
+                limits.check_extraction_limits(
+                    &entry.name,
+                    entry.compressed_size,
+                    entry.uncompressed_size,
+                    &progress,
+                    false,
+                    false,
+                )?;
+            }
+
+            return extract_all_via_unrar(path.clone(), work, sink_factory, progress, password, limits)
                 .await;
         }
 
@@ -1692,11 +1860,13 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for RarArchive<R> {
 
         // Spawn consumer.
         let consumer_progress = progress.clone();
+        let limits_clone = limits.clone();
         let consumer = tokio::spawn(consume_snippets(
             rx,
             sink_factory,
             consumer_progress,
             password_owned,
+            limits_clone,
         ));
 
         // Build snippet config.
@@ -1715,9 +1885,15 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for RarArchive<R> {
         // Run producer (in current task — borrows self.reader).
         // When run_elastic_scan returns, config is dropped, tx is dropped,
         // signaling the consumer that no more snippets are coming.
-        let (entries, locations) =
-            Self::run_elastic_scan(&self.reader, preamble_end, size, &progress, Some(config))
-                .await?;
+        let (entries, locations) = Self::run_elastic_scan(
+            &self.reader,
+            preamble_end,
+            size,
+            &progress,
+            Some(config),
+            limits,
+        )
+        .await?;
 
         // Await consumer.
         let total_bytes = consumer.await.map_err(|e| CoreError::BitstreamError {
@@ -1954,11 +2130,13 @@ async fn extract_all_via_unrar<F>(
     mut sink_factory: F,
     progress: Arc<Mutex<dyn ProgressReporter>>,
     password: Option<&[u8]>,
+    limits: &crate::ResourceLimits,
 ) -> Result<u64, CoreError>
 where
     F: FnMut(&ArchiveEntry) -> Option<Box<dyn std::io::Write + Send>> + Send + 'static,
 {
     let password_bytes = password.map(|p| p.to_vec());
+    let limits_clone = limits.clone();
 
     // Build name → work-index lookup for O(1) dispatch inside spawn_blocking.
     let wanted: std::collections::HashMap<String, usize> = work
@@ -2020,8 +2198,10 @@ where
                         &name,
                         loc.crc32,
                         loc.blake2_hash,
+                        loc.data_size,
                         &mut sink,
                         &progress,
+                        &limits_clone,
                     )?;
 
                     total_bytes += bytes;
@@ -2054,6 +2234,7 @@ pub(crate) async fn consume_snippets<SinkFn>(
     mut sink_factory: SinkFn,
     progress: Arc<Mutex<dyn ProgressReporter>>,
     password: Option<Vec<u8>>,
+    limits: crate::ResourceLimits,
 ) -> Result<u64, CoreError>
 where
     SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn std::io::Write + Send>> + Send + 'static,
@@ -2062,7 +2243,7 @@ where
 
     while let Some(msg) = rx.recv().await {
         let result =
-            extract_single_snippet(&msg, &mut sink_factory, &progress, password.as_deref()).await;
+            extract_single_snippet(&msg, &mut sink_factory, &progress, password.as_deref(), &limits).await;
 
         // Always clean up snippet, even on error.
         let _ = tokio::fs::remove_file(&msg.path).await;
@@ -2078,6 +2259,7 @@ async fn extract_single_snippet<SinkFn>(
     sink_factory: &mut SinkFn,
     progress: &Arc<Mutex<dyn ProgressReporter>>,
     password: Option<&[u8]>,
+    limits: &crate::ResourceLimits,
 ) -> Result<u64, CoreError>
 where
     SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn std::io::Write + Send>> + Send,
@@ -2092,6 +2274,7 @@ where
     let expected_blake2 = msg.blake2_hash;
     let snippet_path = msg.path.clone();
     let password_bytes = password.map(|p| p.to_vec());
+    let limits_clone = limits.clone();
 
     {
         progress
@@ -2104,6 +2287,9 @@ where
 
     // Extract and verify via unrar in a single blocking task.
     let progress_sync = progress.clone();
+    let data_size = msg.data_size;
+    let snippet_path_clone = snippet_path.clone();
+    
     tokio::task::spawn_blocking(move || -> Result<u64, CoreError> {
         let out_tmp = tempfile::NamedTempFile::new().map_err(|e| CoreError::BitstreamError {
             detail: format!("failed to create extraction temp file: {e}"),
@@ -2111,10 +2297,10 @@ where
         let out_path = out_tmp.path().to_path_buf();
 
         let archive = match &password_bytes {
-            Some(pw) => unrar::Archive::with_password(&snippet_path, pw.as_slice())
+            Some(pw) => unrar::Archive::with_password(&snippet_path_clone, pw.as_slice())
                 .open_for_processing()
                 .map_err(map_unrar_error)?,
-            None => unrar::Archive::new(&snippet_path)
+            None => unrar::Archive::new(&snippet_path_clone)
                 .open_for_processing()
                 .map_err(map_unrar_error)?,
         };
@@ -2134,8 +2320,10 @@ where
             &entry_name,
             expected_crc,
             expected_blake2,
+            data_size,
             &mut sink,
             &progress_sync,
+            &limits_clone,
         )
     })
     .await
@@ -2280,7 +2468,9 @@ mod tests {
         std::fs::write(tmp.path(), &archive_bytes).unwrap();
 
         let reader = LocalReadAt::new(tmp.path().to_str().unwrap());
-        let rar = RarArchive::open(reader).await.unwrap();
+        let rar = RarArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
 
         assert_eq!(rar.entries().len(), 1);
         let entry = &rar.entries()[0];
@@ -2305,7 +2495,7 @@ mod tests {
         std::fs::write(tmp.path(), &bytes).unwrap();
 
         let reader = LocalReadAt::new(tmp.path().to_str().unwrap());
-        let result = RarArchive::open(reader).await;
+        let result = RarArchive::open(reader, &crate::ResourceLimits::default()).await;
         assert!(
             matches!(result, Err(CoreError::UnsupportedFormat { .. })),
             "expected UnsupportedFormat, got: {result:?}"
@@ -2321,7 +2511,7 @@ mod tests {
         std::fs::write(tmp.path(), bytes).unwrap();
 
         let reader = LocalReadAt::new(tmp.path().to_str().unwrap());
-        let result = RarArchive::open(reader).await;
+        let result = RarArchive::open(reader, &crate::ResourceLimits::default()).await;
         assert!(
             matches!(result, Err(CoreError::InvalidFormat { .. })),
             "expected InvalidFormat, got: {result:?}"
@@ -2339,7 +2529,9 @@ mod tests {
         std::fs::write(tmp.path(), &archive_bytes).unwrap();
 
         let reader = LocalReadAt::new(tmp.path().to_str().unwrap());
-        let rar = RarArchive::open(reader).await.unwrap();
+        let rar = RarArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
 
         // Solid entries are listed so the user can see them; extract() rejects.
         assert_eq!(rar.entries().len(), 1);
@@ -2357,7 +2549,9 @@ mod tests {
         std::fs::write(tmp.path(), &archive_bytes).unwrap();
 
         let reader = LocalReadAt::new(tmp.path().to_str().unwrap());
-        let rar = RarArchive::open(reader).await.unwrap();
+        let rar = RarArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
 
         // end_block must be a valid RAR5 end-of-archive block.
         let hdr = parse_block_header(&rar.end_block, 0).unwrap();
@@ -2375,7 +2569,9 @@ mod tests {
         std::fs::write(tmp.path(), &archive_bytes).unwrap();
 
         let reader = LocalReadAt::new(tmp.path().to_str().unwrap());
-        let rar = RarArchive::open(reader).await.unwrap();
+        let rar = RarArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
 
         assert!(
             rar.archive_preamble.starts_with(&RAR5_SIGNATURE),
@@ -2394,7 +2590,9 @@ mod tests {
         std::fs::write(tmp.path(), &archive_bytes).unwrap();
 
         let reader = LocalReadAt::new(tmp.path().to_str().unwrap());
-        let rar = RarArchive::open(reader).await.unwrap();
+        let rar = RarArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
 
         assert_eq!(rar.entries().len(), 1);
         let loc = &rar.locations[0];
@@ -2510,7 +2708,9 @@ mod tests {
         std::fs::write(tmp.path(), &archive_bytes).unwrap();
 
         let reader = LocalReadAt::new(tmp.path().to_str().unwrap());
-        let rar = RarArchive::open(reader).await.unwrap();
+        let rar = RarArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
 
         assert_eq!(rar.entries().len(), 1);
         assert_eq!(rar.entries()[0].name, "qo_fallback.txt");
@@ -2538,7 +2738,8 @@ mod tests {
         let size = service_block.len() as u64;
 
         let reader = LocalReadAt::new(tmp.path().to_str().unwrap());
-        let result = RarArchive::try_quick_open(&reader, 0, size).await;
+        let result =
+            RarArchive::try_quick_open(&reader, 0, size, &crate::ResourceLimits::default()).await;
 
         assert!(result.is_ok());
         let opt = result.unwrap();
@@ -2573,7 +2774,13 @@ mod tests {
 
         let reader = LocalReadAt::new(tmp.path().to_str().unwrap());
         // An offset beyond the archive size must return Ok(None) without panicking.
-        let result = RarArchive::try_quick_open(&reader, size + 1000, size).await;
+        let result = RarArchive::try_quick_open(
+            &reader,
+            size + 1000,
+            size,
+            &crate::ResourceLimits::default(),
+        )
+        .await;
         assert!(matches!(result, Ok(None)));
     }
 
@@ -2586,7 +2793,9 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), archive_bytes).unwrap();
         let reader = crate::io::LocalReadAt::new(tmp.path().to_str().unwrap());
-        let rar = RarArchive::open(reader).await.unwrap();
+        let rar = RarArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
         (tmp, rar)
     }
 
@@ -2599,7 +2808,7 @@ mod tests {
         let entry = &rar.entries()[0];
         let mut out = Vec::new();
         let progress = Arc::new(Mutex::new(()));
-        let n = rar.extract(entry, &mut out, progress, None).await.unwrap();
+        let n = rar.extract(entry, &mut out, progress, None, &crate::ResourceLimits::default()).await.unwrap();
 
         assert_eq!(n, data.len() as u64);
         assert_eq!(out.as_slice(), data.as_ref());
@@ -2613,7 +2822,7 @@ mod tests {
         let entry = &rar.entries()[0];
         let mut out = Vec::new();
         let progress = Arc::new(Mutex::new(()));
-        let n = rar.extract(entry, &mut out, progress, None).await.unwrap();
+        let n = rar.extract(entry, &mut out, progress, None, &crate::ResourceLimits::default()).await.unwrap();
 
         assert_eq!(n, 0);
         assert!(out.is_empty());
@@ -2635,7 +2844,7 @@ mod tests {
         let entry = &rar.entries()[0];
         let mut out = Vec::new();
         let progress = Arc::new(Mutex::new(()));
-        let result = rar.extract(entry, &mut out, progress, None).await;
+        let result = rar.extract(entry, &mut out, progress, None, &crate::ResourceLimits::default()).await;
 
         assert!(
             matches!(result, Err(CoreError::CrcMismatch { .. })),
@@ -2672,7 +2881,7 @@ mod tests {
         assert!(!entry.is_encrypted);
         let mut out = Vec::new();
         let progress = Arc::new(Mutex::new(()));
-        rar.extract(entry, &mut out, progress, None).await.unwrap();
+        rar.extract(entry, &mut out, progress, None, &crate::ResourceLimits::default()).await.unwrap();
     }
 
     #[tokio::test]
@@ -2686,7 +2895,7 @@ mod tests {
         let mut out = Vec::new();
         let progress = Arc::new(Mutex::new(()));
         let err = rar
-            .extract(&entry, &mut out, progress, None)
+            .extract(&entry, &mut out, progress, None, &crate::ResourceLimits::default())
             .await
             .unwrap_err();
         assert!(
@@ -2711,7 +2920,7 @@ mod tests {
         let mut out = Vec::new();
         let progress = Arc::new(Mutex::new(()));
         let n = rar
-            .extract(&dir_entry, &mut out, progress, None)
+            .extract(&dir_entry, &mut out, progress, None, &crate::ResourceLimits::default())
             .await
             .unwrap();
         assert_eq!(n, 0);
@@ -2754,7 +2963,7 @@ mod tests {
         let entry = &rar.entries()[0];
         let reporter = Arc::new(Mutex::new(RecordingReporter::new()));
         let mut out = Vec::new();
-        rar.extract(entry, &mut out, reporter.clone(), None)
+        rar.extract(entry, &mut out, reporter.clone(), None, &crate::ResourceLimits::default())
             .await
             .unwrap();
 
@@ -2792,7 +3001,7 @@ mod tests {
         let entry = &rar.entries()[0];
         let progress = Arc::new(Mutex::new(CancelAfterFirstUpdate));
         let mut out = Vec::new();
-        let result = rar.extract(entry, &mut out, progress, None).await;
+        let result = rar.extract(entry, &mut out, progress, None, &crate::ResourceLimits::default()).await;
 
         assert!(
             matches!(result, Err(CoreError::Cancelled)),

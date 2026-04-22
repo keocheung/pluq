@@ -167,9 +167,13 @@ mod tests {
             stream_calls: stream_calls.clone(),
         };
 
-        let mut rar4 = Rar4Archive::open(reader).await.unwrap();
+        let mut rar4 = Rar4Archive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
         let progress: Arc<Mutex<dyn ProgressReporter>> = Arc::new(Mutex::new(()));
-        rar4.scan_metadata(progress.clone()).await.unwrap();
+        rar4.scan_metadata(progress.clone(), &crate::ResourceLimits::default())
+            .await
+            .unwrap();
 
         let entries = rar4.entries();
         assert_eq!(entries.len(), 2);
@@ -182,6 +186,7 @@ mod tests {
                 |_| Some(Box::new(tokio::io::sink()) as Box<dyn AsyncWrite + Send + Unpin>),
                 progress,
                 None,
+                &crate::ResourceLimits::default(),
             )
             .await
             .unwrap();
@@ -203,12 +208,16 @@ mod tests {
             stream_calls: Arc::new(AtomicUsize::new(0)),
         };
 
-        let mut rar4 = Rar4Archive::open(reader).await.unwrap();
+        let mut rar4 = Rar4Archive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
         let progress: Arc<Mutex<dyn ProgressReporter>> = Arc::new(Mutex::new(()));
-        rar4.scan_metadata(progress.clone()).await.unwrap();
+        rar4.scan_metadata(progress.clone(), &crate::ResourceLimits::default())
+            .await
+            .unwrap();
 
         let batch: BatchResult = rar4
-            .extract_selected(&[], |_| None, progress, None)
+            .extract_selected(&[], |_| None, progress, None, &crate::ResourceLimits::default())
             .await
             .unwrap();
 

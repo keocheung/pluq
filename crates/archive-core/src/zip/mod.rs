@@ -2,7 +2,7 @@
 //!
 //! ```ignore
 //! let reader = LocalReadAt::new("archive.zip");
-//! let zip = ZipArchive::open(reader).await?;
+//! let zip = ZipArchive::open(reader, &crate::ResourceLimits::default()).await?;
 //!
 //! for entry in zip.entries() {
 //!     println!("{} ({} bytes)", entry.name, entry.uncompressed_size);
@@ -47,6 +47,7 @@ struct DecompressParams<'a> {
     is_encrypted: bool,
     password: Option<&'a [u8]>,
     progress: &'a Arc<Mutex<dyn ProgressReporter>>,
+    limits: &'a crate::ResourceLimits,
 }
 
 /// A parsed ZIP archive backed by any [`ReadAt`] source.
@@ -72,9 +73,28 @@ impl<R: ReadAt> ZipArchive<R> {
     /// Open a ZIP archive by reading its EOCD and Central Directory.
     ///
     /// This issues exactly **2 range reads** (or 1 if the file is small).
-    pub async fn open(reader: R) -> Result<Self, CoreError> {
+    pub async fn open(reader: R, limits: &crate::ResourceLimits) -> Result<Self, CoreError> {
         info!("opening ZIP archive");
         let eocd = parse::find_eocd(&reader).await?;
+
+        if eocd.cd_size > limits.max_header_bytes {
+            return Err(CoreError::ResourceLimitExceeded {
+                message: format!(
+                    "ZIP central directory size {} exceeds max_header_bytes {}",
+                    eocd.cd_size, limits.max_header_bytes
+                ),
+            });
+        }
+
+        if eocd.entry_count as usize > limits.max_entries {
+            return Err(CoreError::ResourceLimitExceeded {
+                message: format!(
+                    "ZIP entry count {} exceeds max_entries {}",
+                    eocd.entry_count, limits.max_entries
+                ),
+            });
+        }
+
         debug!(
             cd_offset = eocd.cd_offset,
             cd_size = eocd.cd_size,
@@ -149,10 +169,20 @@ impl<R: ReadAt> ZipArchive<R> {
         sink: &mut W,
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
+        limits: &crate::ResourceLimits,
     ) -> Result<u64, CoreError> {
         if entry.is_directory {
             return Ok(0);
         }
+
+        limits.check_extraction_limits(
+            &entry.name,
+            entry.compressed_size,
+            entry.uncompressed_size,
+            &progress,
+            false,
+            false,
+        )?;
 
         info!(
             name = %entry.name,
@@ -207,6 +237,7 @@ impl<R: ReadAt> ZipArchive<R> {
         let password_bytes: Option<Vec<u8>> = password.map(|p| p.to_vec());
         let handle = tokio::runtime::Handle::current();
         let sync_reader = SyncIoBridge::new_with_handle(compressed_stream, handle);
+        let limits_clone = limits.clone();
 
         let temp_file: tempfile::NamedTempFile =
             tokio::task::spawn_blocking(move || -> Result<tempfile::NamedTempFile, CoreError> {
@@ -219,6 +250,7 @@ impl<R: ReadAt> ZipArchive<R> {
 
                 {
                     let mut temp_writer = std::io::BufWriter::new(temp_file.as_file());
+                    let limits = &limits_clone;
                     decompress_and_verify(
                         sync_reader,
                         &mut temp_writer,
@@ -233,6 +265,7 @@ impl<R: ReadAt> ZipArchive<R> {
                             is_encrypted,
                             password: password_bytes.as_deref(),
                             progress: &progress,
+                            limits,
                         },
                     )?;
                     temp_writer.flush().map_err(|e| CoreError::BitstreamError {
@@ -272,8 +305,9 @@ impl<R: ReadAt> ZipArchive<R> {
         &self,
         entry: &ArchiveEntry,
         progress: Arc<Mutex<dyn ProgressReporter>>,
+        limits: &crate::ResourceLimits,
     ) -> Result<(), CoreError> {
-        self.extract(entry, &mut tokio::io::sink(), progress, None)
+        self.extract(entry, &mut tokio::io::sink(), progress, None, limits)
             .await
             .map(|_| ())
     }
@@ -293,6 +327,7 @@ impl<R: ReadAt> ZipArchive<R> {
         sink_factory: F,
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
+        limits: &crate::ResourceLimits,
     ) -> Result<u64, CoreError>
     where
         F: FnMut(&ArchiveEntry) -> Option<Box<dyn std::io::Write + Send>> + Send + 'static,
@@ -328,6 +363,7 @@ impl<R: ReadAt> ZipArchive<R> {
 
         let handle = tokio::runtime::Handle::current();
         let password_bytes: Option<Vec<u8>> = password.map(|p| p.to_vec());
+        let limits_clone = limits.clone();
 
         // Everything runs in spawn_blocking — sync I/O for both read and write.
         tokio::task::spawn_blocking(move || -> Result<u64, CoreError> {
@@ -335,6 +371,7 @@ impl<R: ReadAt> ZipArchive<R> {
             let mut sink_factory = sink_factory;
             let mut stream_pos = stream_start;
             let mut total_bytes: u64 = 0;
+            let limits = &limits_clone;
 
             for (entry, location) in &work {
                 // ── Skip gap bytes to reach this entry's LFH ─────────────
@@ -401,6 +438,7 @@ impl<R: ReadAt> ZipArchive<R> {
                                 is_encrypted: entry.is_encrypted,
                                 password: password_bytes.as_deref(),
                                 progress: &progress,
+                                limits,
                             },
                         )?;
                         temp_writer.flush().map_err(|e| CoreError::BitstreamError {
@@ -457,10 +495,21 @@ impl<R: ReadAt> ZipArchive<R> {
         mut sink_factory: SinkFn,
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
+        limits: &crate::ResourceLimits,
     ) -> Result<BatchResult, CoreError>
     where
         SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn AsyncWrite + Send + Unpin>> + Send,
     {
+        let total_size: u64 = entries.iter().map(|e| e.uncompressed_size).sum();
+        if total_size > limits.max_total_unpacked {
+            return Err(CoreError::ResourceLimitExceeded {
+                message: format!(
+                    "batch extraction total size {} exceeds max_total_unpacked {}",
+                    total_size, limits.max_total_unpacked
+                ),
+            });
+        }
+
         // 1. Filter directories, map to (entry, location) pairs.
         let work: Vec<(&ArchiveEntry, &ZipEntryLocation)> = entries
             .iter()
@@ -544,13 +593,14 @@ impl<R: ReadAt> ZipArchive<R> {
                 .collect();
             let pw = password_bytes.clone();
             let prog = progress.clone();
+            let lims = limits.clone();
             let handle = tokio::runtime::Handle::current();
             let sync_reader = SyncIoBridge::new_with_handle(stream, handle);
 
             // Decompress all entries in this cluster from a single stream into temp files.
             let decompressed: Vec<Result<tempfile::NamedTempFile, CoreError>> =
                 tokio::task::spawn_blocking(move || {
-                    decompress_cluster(sync_reader, cluster_start, &cluster_data, pw, prog)
+                    decompress_cluster(sync_reader, cluster_start, &cluster_data, pw, prog, lims)
                 })
                 .await
                 .map_err(|e| CoreError::BitstreamError {
@@ -613,16 +663,18 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for ZipArchive<R> {
         sink: &mut W,
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
+        limits: &crate::ResourceLimits,
     ) -> Result<u64, CoreError> {
-        ZipArchive::extract(self, entry, sink, progress, password).await
+        ZipArchive::extract(self, entry, sink, progress, password, limits).await
     }
 
     async fn test(
         &self,
         entry: &ArchiveEntry,
         progress: Arc<Mutex<dyn ProgressReporter>>,
+        limits: &crate::ResourceLimits,
     ) -> Result<(), CoreError> {
-        ZipArchive::test(self, entry, progress).await
+        ZipArchive::test(self, entry, progress, limits).await
     }
 
     fn extract_selected<SinkFn>(
@@ -631,12 +683,13 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for ZipArchive<R> {
         sink_factory: SinkFn,
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
+        limits: &crate::ResourceLimits,
     ) -> impl std::future::Future<Output = Result<BatchResult, CoreError>> + Send
     where
         SinkFn:
             FnMut(&ArchiveEntry) -> Option<Box<dyn tokio::io::AsyncWrite + Send + Unpin>> + Send,
     {
-        ZipArchive::extract_selected(self, entries, sink_factory, progress, password)
+        ZipArchive::extract_selected(self, entries, sink_factory, progress, password, limits)
     }
 }
 
@@ -654,6 +707,7 @@ fn decompress_cluster(
     cluster_data: &[(ArchiveEntry, ZipEntryLocation)],
     password: Option<Vec<u8>>,
     progress: Arc<Mutex<dyn ProgressReporter>>,
+    limits: crate::ResourceLimits,
 ) -> Result<Vec<Result<tempfile::NamedTempFile, CoreError>>, CoreError> {
     let mut stream_pos = cluster_start;
     let mut results = Vec::with_capacity(cluster_data.len());
@@ -730,6 +784,7 @@ fn decompress_cluster(
                         is_encrypted: entry.is_encrypted,
                         password: password.as_deref(),
                         progress: &progress,
+                        limits: &limits,
                     },
                 )?;
                 temp_writer.flush().map_err(|e| CoreError::BitstreamError {
@@ -832,7 +887,12 @@ fn decompress_and_verify<R: Read + Send, W: std::io::Write>(
         } else {
             vec![]
         };
-        build_decoder(method, aes_stream, &properties)?
+        build_decoder(
+            method,
+            aes_stream,
+            &properties,
+            &crate::limits::CodecConfig::default(),
+        )?
     } else if params.is_encrypted {
         let pwd = params.password.ok_or(CoreError::PasswordRequired)?;
         let mut enc_header = [0u8; 12];
@@ -878,7 +938,12 @@ fn decompress_and_verify<R: Read + Send, W: std::io::Write>(
         } else {
             vec![]
         };
-        build_decoder(method, crypto_reader, &properties)?
+        build_decoder(
+            method,
+            crypto_reader,
+            &properties,
+            &crate::limits::CodecConfig::default(),
+        )?
     } else {
         let method = parse::zip_method_to_codec(params.method_id).ok_or_else(|| {
             CoreError::UnsupportedCompression {
@@ -890,19 +955,17 @@ fn decompress_and_verify<R: Read + Send, W: std::io::Write>(
         } else {
             vec![]
         };
-        build_decoder(method, reader, &properties)?
+        build_decoder(
+            method,
+            reader,
+            &properties,
+            &crate::limits::CodecConfig::default(),
+        )?
     };
 
     // ── Decompress + CRC verify ──────────────────────────────────────────
     const CHUNK_SIZE: usize = 64 * 1024;
-    let max_output = if params.compressed_size > 0 {
-        params
-            .compressed_size
-            .saturating_mul(1000)
-            .max(10 * 1024 * 1024)
-    } else {
-        params.uncompressed_size.max(10 * 1024 * 1024)
-    };
+    let mut ratio_warned = false;
 
     let mut hasher = crc32fast::Hasher::new();
     let mut total_written: u64 = 0;
@@ -934,13 +997,26 @@ fn decompress_and_verify<R: Read + Send, W: std::io::Write>(
             })?;
         total_written += n as u64;
 
-        if total_written > max_output {
-            return Err(CoreError::ResourceLimitExceeded {
-                message: format!(
-                    "decompression ratio exceeded for '{}': {} bytes from {} compressed",
-                    params.entry_name, total_written, params.compressed_size
-                ),
-            });
+        if !ratio_warned {
+            ratio_warned = params.limits.check_extraction_limits(
+                params.entry_name,
+                params.compressed_size,
+                total_written,
+                params.progress,
+                true,
+                false,
+            )?;
+        } else {
+            // Already warned about ratio, but still check max_entry_unpacked.
+            // Pass skip_warn=true to suppress additional warnings.
+            params.limits.check_extraction_limits(
+                params.entry_name,
+                params.compressed_size,
+                total_written,
+                params.progress,
+                true,
+                true,
+            )?;
         }
 
         {
@@ -1023,9 +1099,15 @@ mod tests {
     /// Helper: extract entry to a Vec<u8> (convenience for tests, no password).
     async fn extract_to_vec(zip: &ZipArchive<LocalReadAt>, entry: &ArchiveEntry) -> Vec<u8> {
         let mut buf = Vec::new();
-        zip.extract(entry, &mut buf, Arc::new(Mutex::new(())), None)
-            .await
-            .unwrap();
+        zip.extract(
+            entry,
+            &mut buf,
+            Arc::new(Mutex::new(())),
+            None,
+            &crate::ResourceLimits::default(),
+        )
+        .await
+        .unwrap();
         buf
     }
 
@@ -1040,7 +1122,9 @@ mod tests {
             ),
         ]);
 
-        let zip = ZipArchive::open(reader).await.unwrap();
+        let zip = ZipArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
         let entries = zip.entries();
 
         assert_eq!(entries.len(), 2);
@@ -1058,7 +1142,9 @@ mod tests {
         let (_tmp, reader) =
             create_test_zip(&[("compressed.txt", content, ZipCrateMethod::Deflated)]);
 
-        let zip = ZipArchive::open(reader).await.unwrap();
+        let zip = ZipArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
         let data = extract_to_vec(&zip, &zip.entries()[0]).await;
 
         assert_eq!(data.as_slice(), content);
@@ -1069,7 +1155,9 @@ mod tests {
         let content = b"\x00\x01\x02\x03\x04\x05\x06\x07";
         let (_tmp, reader) = create_test_zip(&[("raw.bin", content, ZipCrateMethod::Stored)]);
 
-        let zip = ZipArchive::open(reader).await.unwrap();
+        let zip = ZipArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
         let data = extract_to_vec(&zip, &zip.entries()[0]).await;
 
         assert_eq!(data.as_slice(), content);
@@ -1079,7 +1167,9 @@ mod tests {
     async fn handles_empty_zip() {
         let (_tmp, reader) = create_test_zip(&[]);
 
-        let zip = ZipArchive::open(reader).await.unwrap();
+        let zip = ZipArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
         assert!(zip.entries().is_empty());
     }
 
@@ -1089,7 +1179,9 @@ mod tests {
             ("deflated.txt", b"hello", ZipCrateMethod::Deflated),
             ("stored.bin", b"hello", ZipCrateMethod::Stored),
         ]);
-        let zip = ZipArchive::open(reader).await.unwrap();
+        let zip = ZipArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
         let entries = zip.entries();
         assert_eq!(
             entries[0].compression_method,
@@ -1104,7 +1196,9 @@ mod tests {
     #[tokio::test]
     async fn modified_at_is_parsed() {
         let (_tmp, reader) = create_test_zip(&[("file.txt", b"data", ZipCrateMethod::Stored)]);
-        let zip = ZipArchive::open(reader).await.unwrap();
+        let zip = ZipArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
         // The zip crate writes a real timestamp, so modified_at should be Some.
         assert!(zip.entries()[0].modified_at.is_some());
     }
@@ -1113,8 +1207,10 @@ mod tests {
     async fn test_passes_on_valid_entry() {
         let content = b"integrity check content";
         let (_tmp, reader) = create_test_zip(&[("file.txt", content, ZipCrateMethod::Deflated)]);
-        let zip = ZipArchive::open(reader).await.unwrap();
-        zip.test(&zip.entries()[0], Arc::new(Mutex::new(())))
+        let zip = ZipArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
+        zip.test(&zip.entries()[0], Arc::new(Mutex::new(())), &crate::ResourceLimits::default())
             .await
             .unwrap();
     }
@@ -1123,10 +1219,18 @@ mod tests {
     async fn extract_returns_bytes_written() {
         let content = b"counting bytes";
         let (_tmp, reader) = create_test_zip(&[("count.txt", content, ZipCrateMethod::Stored)]);
-        let zip = ZipArchive::open(reader).await.unwrap();
+        let zip = ZipArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
         let mut sink = Vec::new();
         let bytes_written = zip
-            .extract(&zip.entries()[0], &mut sink, Arc::new(Mutex::new(())), None)
+            .extract(
+                &zip.entries()[0],
+                &mut sink,
+                Arc::new(Mutex::new(())),
+                None,
+                &crate::ResourceLimits::default(),
+            )
             .await
             .unwrap();
         assert_eq!(bytes_written, content.len() as u64);
@@ -1149,10 +1253,18 @@ mod tests {
         std::fs::write(&path, &raw).unwrap();
 
         let reader2 = LocalReadAt::new(&path);
-        let zip = ZipArchive::open(reader2).await.unwrap();
+        let zip = ZipArchive::open(reader2, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
         let mut sink = tokio::io::sink();
         let result = zip
-            .extract(&zip.entries()[0], &mut sink, Arc::new(Mutex::new(())), None)
+            .extract(
+                &zip.entries()[0],
+                &mut sink,
+                Arc::new(Mutex::new(())),
+                None,
+                &crate::ResourceLimits::default(),
+            )
             .await;
 
         // Should be either CrcMismatch or an InvalidFormat decompression error
@@ -1183,7 +1295,9 @@ mod tests {
         std::fs::write(&path, &raw).unwrap();
 
         let reader2 = LocalReadAt::new(&path);
-        let zip = ZipArchive::open(reader2).await.unwrap();
+        let zip = ZipArchive::open(reader2, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
 
         assert!(
             zip.entries()[0].is_encrypted,
@@ -1193,7 +1307,13 @@ mod tests {
         // Must fail immediately with PasswordRequired — before any decompression attempt.
         let mut sink = tokio::io::sink();
         let result = zip
-            .extract(&zip.entries()[0], &mut sink, Arc::new(Mutex::new(())), None)
+            .extract(
+                &zip.entries()[0],
+                &mut sink,
+                Arc::new(Mutex::new(())),
+                None,
+                &crate::ResourceLimits::default(),
+            )
             .await;
         assert!(
             matches!(result, Err(CoreError::PasswordRequired)),
@@ -1213,7 +1333,9 @@ mod tests {
             ),
         ]);
 
-        let zip = ZipArchive::open(reader).await.unwrap();
+        let zip = ZipArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
         assert_eq!(zip.entries().len(), 3, "entries() must return all 3");
 
         let clean = zip.entries_clean();
@@ -1253,7 +1375,9 @@ mod tests {
         std::fs::write(&path, &raw).unwrap();
 
         let reader2 = LocalReadAt::new(&path);
-        let zip = ZipArchive::open(reader2).await.unwrap();
+        let zip = ZipArchive::open(reader2, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
 
         // open() must succeed — unknown methods are deferred (not an error at parse time).
         assert_eq!(zip.entries()[0].name, "file.txt");
@@ -1266,7 +1390,13 @@ mod tests {
         // extract() must fail with UnsupportedCompression — not a panic or InvalidFormat.
         let mut sink = tokio::io::sink();
         let result = zip
-            .extract(&zip.entries()[0], &mut sink, Arc::new(Mutex::new(())), None)
+            .extract(
+                &zip.entries()[0],
+                &mut sink,
+                Arc::new(Mutex::new(())),
+                None,
+                &crate::ResourceLimits::default(),
+            )
             .await;
         assert!(
             matches!(result, Err(CoreError::UnsupportedCompression { .. })),
@@ -1284,7 +1414,9 @@ mod tests {
             .collect();
 
         let (_tmp, reader) = create_test_zip(&[("large.bin", &content, ZipCrateMethod::Deflated)]);
-        let zip = ZipArchive::open(reader).await.unwrap();
+        let zip = ZipArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
         let data = extract_to_vec(&zip, &zip.entries()[0]).await;
 
         assert_eq!(
@@ -1332,7 +1464,9 @@ mod tests {
             .collect();
 
         let (_tmp, reader) = create_test_zip(&[("large.bin", &content, ZipCrateMethod::Deflated)]);
-        let zip = ZipArchive::open(reader).await.unwrap();
+        let zip = ZipArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
 
         let state = Arc::new(Mutex::new(State::default()));
         let progress: Arc<Mutex<dyn ProgressReporter>> =
@@ -1342,7 +1476,13 @@ mod tests {
 
         let mut sink = tokio::io::sink();
         let result = zip
-            .extract(&zip.entries()[0], &mut sink, progress, None)
+            .extract(
+                &zip.entries()[0],
+                &mut sink,
+                progress,
+                None,
+                &crate::ResourceLimits::default(),
+            )
             .await;
 
         assert!(
@@ -1388,7 +1528,9 @@ mod tests {
         let uncompressed_size = content.len() as u64;
 
         let (_tmp, reader) = create_test_zip(&[("large.bin", &content, ZipCrateMethod::Deflated)]);
-        let zip = ZipArchive::open(reader).await.unwrap();
+        let zip = ZipArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
 
         let state = Arc::new(Mutex::new(State::default()));
         let progress: Arc<Mutex<dyn ProgressReporter>> = Arc::new(Mutex::new(ByteRecorder {
@@ -1396,9 +1538,15 @@ mod tests {
         }));
 
         let mut sink = tokio::io::sink();
-        zip.extract(&zip.entries()[0], &mut sink, progress, None)
-            .await
-            .unwrap();
+        zip.extract(
+            &zip.entries()[0],
+            &mut sink,
+            progress,
+            None,
+            &crate::ResourceLimits::default(),
+        )
+        .await
+        .unwrap();
 
         let s = state.lock().unwrap();
         assert!(
@@ -1429,7 +1577,7 @@ mod tests {
         std::fs::write(&path, &raw).unwrap();
 
         let reader2 = LocalReadAt::new(&path);
-        let result = ZipArchive::open(reader2).await;
+        let result = ZipArchive::open(reader2, &crate::ResourceLimits::default()).await;
 
         assert!(
             matches!(result, Err(CoreError::InvalidFormat { .. })),
@@ -1468,7 +1616,9 @@ mod tests {
             "secret",
             &[("file.txt", b"hello", ZipCrateMethod::Stored)],
         );
-        let zip = ZipArchive::open(reader).await.unwrap();
+        let zip = ZipArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
         let entry = &zip.entries()[0];
         assert!(entry.is_encrypted, "AES entry must be flagged as encrypted");
         // compression_method must reflect the real method (Store), not AES marker 99
@@ -1488,7 +1638,9 @@ mod tests {
             password,
             &[("secret.txt", content, ZipCrateMethod::Stored)],
         );
-        let zip = ZipArchive::open(reader).await.unwrap();
+        let zip = ZipArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
         assert!(zip.entries()[0].is_encrypted);
 
         let mut buf = Vec::new();
@@ -1497,6 +1649,7 @@ mod tests {
             &mut buf,
             Arc::new(Mutex::new(())),
             Some(password.as_bytes()),
+            &crate::ResourceLimits::default(),
         )
         .await
         .unwrap();
@@ -1518,7 +1671,9 @@ mod tests {
             password,
             &[("large.txt", &content, ZipCrateMethod::Deflated)],
         );
-        let zip = ZipArchive::open(reader).await.unwrap();
+        let zip = ZipArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
         assert_eq!(
             zip.entries()[0].compression_method,
             Some(CompressionMethod::Deflate),
@@ -1531,6 +1686,7 @@ mod tests {
             &mut buf,
             Arc::new(Mutex::new(())),
             Some(password.as_bytes()),
+            &crate::ResourceLimits::default(),
         )
         .await
         .unwrap();
@@ -1547,7 +1703,9 @@ mod tests {
             password,
             &[("secret.txt", content, ZipCrateMethod::Stored)],
         );
-        let zip = ZipArchive::open(reader).await.unwrap();
+        let zip = ZipArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
 
         let mut sink = tokio::io::sink();
         let result = zip
@@ -1556,6 +1714,7 @@ mod tests {
                 &mut sink,
                 Arc::new(Mutex::new(())),
                 Some(b"wrong-password"),
+                &crate::ResourceLimits::default(),
             )
             .await;
 
@@ -1605,7 +1764,9 @@ mod tests {
         let (_tmp, reader) =
             create_encrypted_test_zip(password, &[("secret.txt", content, ZipCrateMethod::Stored)]);
 
-        let zip = ZipArchive::open(reader).await.unwrap();
+        let zip = ZipArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
         assert!(
             zip.entries()[0].is_encrypted,
             "entry must be marked as encrypted"
@@ -1617,6 +1778,7 @@ mod tests {
             &mut buf,
             Arc::new(Mutex::new(())),
             Some(password),
+            &crate::ResourceLimits::default(),
         )
         .await
         .unwrap();
@@ -1632,7 +1794,9 @@ mod tests {
         let (_tmp, reader) =
             create_encrypted_test_zip(password, &[("secret.txt", content, ZipCrateMethod::Stored)]);
 
-        let zip = ZipArchive::open(reader).await.unwrap();
+        let zip = ZipArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
 
         let mut sink = tokio::io::sink();
         let result = zip
@@ -1641,6 +1805,7 @@ mod tests {
                 &mut sink,
                 Arc::new(Mutex::new(())),
                 Some(b"wrong-password"),
+                &crate::ResourceLimits::default(),
             )
             .await;
 
@@ -1669,7 +1834,9 @@ mod tests {
         let (_tmp, reader) = create_test_zip(&[("bomb.bin", &content, ZipCrateMethod::Deflated)]);
 
         // Confirm the archive actually compresses well (ratio > 1000:1).
-        let zip = ZipArchive::open(reader).await.unwrap();
+        let zip = ZipArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
         let entry = &zip.entries()[0];
         assert!(
             entry.compressed_size < entry.uncompressed_size / 1000,
@@ -1680,12 +1847,92 @@ mod tests {
 
         let mut sink = tokio::io::sink();
         let result = zip
-            .extract(entry, &mut sink, Arc::new(Mutex::new(())), None)
+            .extract(
+                entry,
+                &mut sink,
+                Arc::new(Mutex::new(())),
+                None,
+                &crate::ResourceLimits::default(),
+            )
             .await;
 
         assert!(
             matches!(result, Err(CoreError::ResourceLimitExceeded { .. })),
             "expected ResourceLimitExceeded for zip bomb, got: {result:?}"
+        );
+    }
+
+    struct WarnReporter {
+        warnings: Vec<String>,
+    }
+    impl crate::progress::ProgressReporter for WarnReporter {
+        fn on_warning(&mut self, msg: &str) {
+            self.warnings.push(msg.to_string());
+        }
+    }
+
+    #[tokio::test]
+    async fn zip_bomb_ratio_warned() {
+        let content = vec![0u8; 11 * 1024 * 1024];
+        let (_tmp, reader) = create_test_zip(&[("bomb.bin", &content, ZipCrateMethod::Deflated)]);
+        let zip = ZipArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
+        
+        let limits = crate::ResourceLimits {
+            ratio_limit: Some(crate::limits::RatioLimit {
+                max_ratio: 1000,
+                mode: crate::limits::LimitMode::Warn,
+            }),
+            ..Default::default()
+        };
+
+        let mut sink = tokio::io::sink();
+        let reporter = Arc::new(Mutex::new(WarnReporter { warnings: vec![] }));
+        let result = zip
+            .extract(
+                &zip.entries()[0],
+                &mut sink,
+                reporter.clone(),
+                None,
+                &limits,
+            )
+            .await;
+
+        assert!(result.is_ok(), "warn mode must not block extraction, got err: {:?}", result.err());
+        assert!(
+            reporter.lock().unwrap().warnings.iter().any(|w| w.contains("suspicious compression ratio")),
+            "warning was not recorded by reporter"
+        );
+    }
+
+    #[tokio::test]
+    async fn max_entry_unpacked_rejected() {
+        let content: Vec<u8> = (0u8..=255).cycle().take(100 * 1024).collect(); // 100KB
+        let (_tmp, reader) = create_test_zip(&[("normal.bin", &content, ZipCrateMethod::Deflated)]);
+        let zip = ZipArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
+
+        let limits = crate::ResourceLimits {
+            max_entry_unpacked: 50 * 1024, // 50KB limit
+            ..Default::default()
+        };
+
+        let mut sink = tokio::io::sink();
+        let result = zip
+            .extract(
+                &zip.entries()[0],
+                &mut sink,
+                Arc::new(Mutex::new(())),
+                None,
+                &limits,
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(CoreError::ResourceLimitExceeded { .. })),
+            "expected ResourceLimitExceeded for max_entry_unpacked, got: {result:?}"
         );
     }
 
@@ -1695,7 +1942,9 @@ mod tests {
         // 1000:1), so the ratio check must not reject it.
         let content: Vec<u8> = (0u8..=255).cycle().take(100 * 1024).collect();
         let (_tmp, reader) = create_test_zip(&[("normal.bin", &content, ZipCrateMethod::Deflated)]);
-        let zip = ZipArchive::open(reader).await.unwrap();
+        let zip = ZipArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
 
         let entry = &zip.entries()[0];
         assert!(
@@ -1715,7 +1964,7 @@ mod tests {
     #[tokio::test]
     async fn excessive_entry_count_rejected() {
         // Construct a fake ZIP64 archive that claims 20 million entries.
-        // MAX_ENTRY_COUNT is 10M, so parse_central_directory must reject it immediately.
+        // max_entries default is 1M, so ZipArchive::open must reject it immediately.
         let tmp = tempfile::NamedTempFile::new().unwrap();
         {
             let absurd_count: u64 = 20_000_000;
@@ -1753,7 +2002,7 @@ mod tests {
         }
 
         let reader = LocalReadAt::new(tmp.path());
-        let result = ZipArchive::open(reader).await;
+        let result = ZipArchive::open(reader, &crate::ResourceLimits::default()).await;
 
         assert!(
             matches!(result, Err(CoreError::ResourceLimitExceeded { .. })),
@@ -1778,7 +2027,9 @@ mod tests {
             &[("deflated_secret.txt", &content, ZipCrateMethod::Deflated)],
         );
 
-        let zip = ZipArchive::open(reader).await.unwrap();
+        let zip = ZipArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
         assert!(
             zip.entries()[0].is_encrypted,
             "entry must be marked as encrypted"
@@ -1790,6 +2041,7 @@ mod tests {
             &mut buf,
             Arc::new(Mutex::new(())),
             Some(password),
+            &crate::ResourceLimits::default(),
         )
         .await
         .unwrap();

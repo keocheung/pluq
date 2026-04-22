@@ -1,3 +1,5 @@
+use tracing::warn;
+
 /// Callbacks for tracking extraction progress and requesting cancellation.
 ///
 /// Default implementations are no-ops — callers that don't need progress
@@ -18,6 +20,13 @@ pub trait ProgressReporter: Send {
 
     /// Called when scan finishes.
     fn on_scan_complete(&mut self, _entries_found: usize) {}
+
+    /// A non-fatal safety warning was raised. Typical source:
+    /// `ResourceLimits` check in `LimitMode::Warn` (e.g. "suspicious
+    /// 800:1 ratio"). The operation continues.
+    fn on_warning(&mut self, message: &str) {
+        warn!("Archive warning: {}", message);
+    }
 }
 
 /// No-op implementation — use when progress reporting is not needed.

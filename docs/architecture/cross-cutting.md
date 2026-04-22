@@ -26,12 +26,24 @@ flow through layers.
 
 ---
 
-## Progress Reporting *[to build]*
+## Progress Reporting
+
+**Status:** implemented
 
 ```rust
 pub trait ProgressReporter: Send {
     fn on_entry_start(&mut self, name: &str, size: u64) {}
     fn on_entry_complete(&mut self, name: &str, success: bool) {}
+    fn on_bytes_progress(&mut self, bytes_so_far: u64) {}
+    fn on_scan_start(&mut self, total_bytes: u64) {}
+    fn on_scan_progress(&mut self, bytes_scanned: u64, entries_found: usize) {}
+    fn on_scan_complete(&mut self, entries_found: usize) {}
+
+    /// A non-fatal safety warning was raised. Typical source:
+    /// `ResourceLimits` check in `LimitMode::Warn` (e.g. "suspicious
+    /// 800:1 ratio"). The operation continues.
+    fn on_warning(&mut self, message: &str) {}
+
     fn should_cancel(&self) -> bool { false }
 }
 ```
@@ -62,6 +74,8 @@ Volume naming conventions:
 ---
 
 ## Resource Limits (anti-bomb)
+
+**Status:** implemented
 
 Apply at parse time (header reading) and extraction time. Checked before
 any decompression begins.

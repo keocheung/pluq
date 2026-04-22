@@ -84,6 +84,10 @@ pub fn translate_core_error(err: CoreError) -> ArchiveError {
         CoreError::UnsupportedFeature { detail } => ArchiveError::UnsupportedFormat { detail },
 
         // Security.
+        CoreError::ResourceLimitExceeded { message } => {
+            warn!(message = %message, "resource limit exceeded");
+            ArchiveError::SecurityRisk { detail: message }
+        }
         CoreError::PathTraversal { ref path } => {
             warn!(path = %path, "path traversal detected");
             ArchiveError::SecurityRisk {

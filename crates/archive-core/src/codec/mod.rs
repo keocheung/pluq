@@ -137,6 +137,7 @@ pub fn build_decoder<'a>(
     method: CompressionMethod,
     input: impl Read + Send + 'a,
     properties: &[u8],
+    codec_config: &crate::limits::CodecConfig,
 ) -> Result<Box<dyn Decoder + 'a>, CoreError> {
     debug!(method = %method, properties_len = properties.len(), "building decoder");
     match method {
@@ -144,7 +145,7 @@ pub fn build_decoder<'a>(
         CompressionMethod::Deflate => Ok(Box::new(DeflateDecoder::new(input))),
         CompressionMethod::Deflate64 => Ok(Box::new(Deflate64Decoder::new(input))),
         CompressionMethod::BZip2 => Ok(Box::new(BZip2Decoder::new(input))),
-        CompressionMethod::Lzma => Ok(Box::new(LzmaDecoder::new(input, properties)?)),
+        CompressionMethod::Lzma => Ok(Box::new(LzmaDecoder::new(input, properties, codec_config)?)),
         CompressionMethod::Zstd => Ok(Box::new(ZstdDecoder::new(input).map_err(|e| {
             CoreError::BitstreamError {
                 detail: format!("Zstd frame header: {e}"),
@@ -185,7 +186,13 @@ mod tests {
     #[test]
     fn build_decoder_store_passes_through() {
         let input = b"hello, world!";
-        let mut decoder = build_decoder(CompressionMethod::Store, &input[..], &[]).unwrap();
+        let mut decoder = build_decoder(
+            CompressionMethod::Store,
+            &input[..],
+            &[],
+            &crate::limits::CodecConfig::default(),
+        )
+        .unwrap();
         let mut out = Vec::new();
         decoder.read_to_end(&mut out).unwrap();
         assert_eq!(out, input);
@@ -203,7 +210,13 @@ mod tests {
         enc.write_all(input).unwrap();
         let compressed = enc.finish().unwrap();
 
-        let mut decoder = build_decoder(CompressionMethod::Deflate, &compressed[..], &[]).unwrap();
+        let mut decoder = build_decoder(
+            CompressionMethod::Deflate,
+            &compressed[..],
+            &[],
+            &crate::limits::CodecConfig::default(),
+        )
+        .unwrap();
         let mut out = Vec::new();
         decoder.read_to_end(&mut out).unwrap();
         assert_eq!(out, input);
@@ -220,7 +233,13 @@ mod tests {
         enc.write_all(input).unwrap();
         let compressed = enc.finish().unwrap();
 
-        let mut decoder = build_decoder(CompressionMethod::BZip2, &compressed[..], &[]).unwrap();
+        let mut decoder = build_decoder(
+            CompressionMethod::BZip2,
+            &compressed[..],
+            &[],
+            &crate::limits::CodecConfig::default(),
+        )
+        .unwrap();
         let mut out = Vec::new();
         decoder.read_to_end(&mut out).unwrap();
         assert_eq!(out, input);
@@ -238,7 +257,13 @@ mod tests {
             enc.finish().unwrap();
         }
 
-        let mut decoder = build_decoder(CompressionMethod::Zstd, &compressed[..], &[]).unwrap();
+        let mut decoder = build_decoder(
+            CompressionMethod::Zstd,
+            &compressed[..],
+            &[],
+            &crate::limits::CodecConfig::default(),
+        )
+        .unwrap();
         let mut out = Vec::new();
         decoder.read_to_end(&mut out).unwrap();
         assert_eq!(out, input);
@@ -254,7 +279,13 @@ mod tests {
         let properties = compressed[..5].to_vec();
         let data = &compressed[13..]; // skip 5 props + 8 size
 
-        let mut decoder = build_decoder(CompressionMethod::Lzma, data, &properties).unwrap();
+        let mut decoder = build_decoder(
+            CompressionMethod::Lzma,
+            data,
+            &properties,
+            &crate::limits::CodecConfig::default(),
+        )
+        .unwrap();
         let mut out = Vec::new();
         decoder.read_to_end(&mut out).unwrap();
         assert_eq!(out, input);
@@ -273,7 +304,13 @@ mod tests {
         let compressed: &[u8] = &[0x01, 0x05, 0x00, 0xFA, 0xFF, 1, 2, 3, 4, 5];
         let expected: &[u8] = &[1, 2, 3, 4, 5];
 
-        let mut decoder = build_decoder(CompressionMethod::Deflate64, compressed, &[]).unwrap();
+        let mut decoder = build_decoder(
+            CompressionMethod::Deflate64,
+            compressed,
+            &[],
+            &crate::limits::CodecConfig::default(),
+        )
+        .unwrap();
         let mut out = Vec::new();
         decoder.read_to_end(&mut out).unwrap();
         assert_eq!(out, expected);
@@ -283,12 +320,75 @@ mod tests {
     fn build_decoder_returns_unsupported_for_missing_codecs() {
         let dummy: &[u8] = &[];
         for method in [CompressionMethod::Lzma2, CompressionMethod::Ppmd] {
-            let result = build_decoder(method, dummy, &[]);
+            let result = build_decoder(method, dummy, &[], &crate::limits::CodecConfig::default());
             assert!(
                 matches!(result, Err(CoreError::UnsupportedCompression { .. })),
                 "{method} should return UnsupportedCompression, got: {:?}",
                 result.err()
             );
         }
+    }
+
+    #[test]
+    fn build_decoder_lzma_rejects_oversized_dictionary() {
+        use crate::limits::CodecConfig;
+
+        // Craft 5-byte properties with dict_size = 1 GiB.
+        let mut props = [0u8; 5];
+        props[0] = 0x5D; // standard lc=3 lp=0 pb=2
+        props[1..5].copy_from_slice(&(1_073_741_824u32).to_le_bytes());
+
+        let cap = CodecConfig {
+            max_lzma_dict_size: Some(128 * 1024 * 1024),
+        };
+        let dummy: &[u8] = &[];
+        let result = build_decoder(CompressionMethod::Lzma, dummy, &props, &cap);
+        assert!(matches!(
+            result,
+            Err(CoreError::ResourceLimitExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn build_decoder_lzma_accepts_within_cap() {
+        use crate::limits::CodecConfig;
+
+        let input = b"Archive Sniper codec test - LZMA round-trip (cap OK)";
+        let mut compressed = Vec::new();
+        lzma_rs::lzma_compress(&mut &input[..], &mut compressed).unwrap();
+
+        let properties = compressed[..5].to_vec();
+        let data = &compressed[13..];
+
+        let cap = CodecConfig {
+            max_lzma_dict_size: Some(256 * 1024 * 1024),
+        };
+        let mut decoder = build_decoder(CompressionMethod::Lzma, data, &properties, &cap).unwrap();
+        let mut out = Vec::new();
+        decoder.read_to_end(&mut out).unwrap();
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn build_decoder_lzma_no_cap_when_config_unset() {
+        let input = b"Archive Sniper codec test - LZMA round-trip (no cap)";
+        let mut compressed = Vec::new();
+        lzma_rs::lzma_compress(&mut &input[..], &mut compressed).unwrap();
+
+        let properties = compressed[..5].to_vec();
+        let data = &compressed[13..];
+
+        // Using default which is None
+        let mut decoder = build_decoder(
+            CompressionMethod::Lzma,
+            data,
+            &properties,
+            &crate::limits::CodecConfig::default(),
+        )
+        .unwrap();
+
+        let mut out = Vec::new();
+        decoder.read_to_end(&mut out).unwrap();
+        assert_eq!(out, input);
     }
 }

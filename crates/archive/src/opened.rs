@@ -27,6 +27,7 @@ pub struct PendingArchive<R: ReadAt + LocalPath + 'static> {
     info: ScanInfo,
     pub(crate) fingerprint: ArchiveFingerprint,
     pub(crate) source: String,
+    pub(crate) config: crate::config::ArchiveConfig,
 }
 
 impl<R: ReadAt + LocalPath + 'static> Opened<R> {
@@ -48,12 +49,14 @@ impl<R: ReadAt + LocalPath + 'static> PendingArchive<R> {
         info: ScanInfo,
         fingerprint: ArchiveFingerprint,
         source: String,
+        config: crate::config::ArchiveConfig,
     ) -> Self {
         Self {
             inner,
             info,
             fingerprint,
             source,
+            config,
         }
     }
 
@@ -74,18 +77,21 @@ impl<R: ReadAt + LocalPath + 'static> PendingArchive<R> {
                 debug!("ZIP scan no-op (should not happen)");
             }
             ArchiveInner::Rar(r) => {
-                r.scan_metadata(progress)
+                r.scan_metadata(progress, &self.config.limits)
                     .await
                     .map_err(translate_core_error)?;
             }
             ArchiveInner::Rar4(r) => {
-                r.scan_metadata(progress)
+                r.scan_metadata(progress, &self.config.limits)
                     .await
                     .map_err(translate_core_error)?;
             }
         }
 
-        let archive = Archive { inner: self.inner };
+        let archive = Archive {
+            inner: self.inner,
+            config: self.config,
+        };
         info!(
             entries = archive.entries().len(),
             "PendingArchive::scan complete"
@@ -122,16 +128,19 @@ impl<R: ReadAt + LocalPath + 'static> PendingArchive<R> {
                 }));
             }
             ArchiveInner::Rar(r) => r
-                .extract_all_streaming(filter, sink_factory, progress.clone(), password)
+                .extract_all_streaming(filter, sink_factory, progress.clone(), password, &self.config.limits)
                 .await
                 .map_err(translate_core_error)?,
             ArchiveInner::Rar4(r) => r
-                .extract_all_streaming(filter, sink_factory, progress.clone(), password)
+                .extract_all_streaming(filter, sink_factory, progress.clone(), password, &self.config.limits)
                 .await
                 .map_err(translate_core_error)?,
         };
 
-        let archive = Archive { inner: self.inner };
+        let archive = Archive {
+            inner: self.inner,
+            config: self.config,
+        };
 
         // Save cache (same pattern as PendingArchive::scan).
         if let Some(cache_path) = cache_path_for(&self.source) {

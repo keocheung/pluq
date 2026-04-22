@@ -81,9 +81,13 @@ mod tests {
             stream_calls: stream_calls.clone(),
         };
 
-        let mut rar = RarArchive::open(reader).await.unwrap();
+        let mut rar = RarArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
         let progress: Arc<Mutex<dyn ProgressReporter>> = Arc::new(Mutex::new(()));
-        rar.scan_metadata(progress.clone()).await.unwrap();
+        rar.scan_metadata(progress.clone(), &crate::ResourceLimits::default())
+            .await
+            .unwrap();
 
         let entries = rar.entries();
         assert_eq!(entries.len(), 2);
@@ -97,6 +101,7 @@ mod tests {
                 |_| Some(Box::new(tokio::io::sink()) as Box<dyn AsyncWrite + Send + Unpin>),
                 progress,
                 None,
+                &crate::ResourceLimits::default(),
             )
             .await
             .unwrap();
@@ -123,9 +128,13 @@ mod tests {
             stream_calls: Arc::new(AtomicUsize::new(0)),
         };
 
-        let mut rar = RarArchive::open(reader).await.unwrap();
+        let mut rar = RarArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
         let progress: Arc<Mutex<dyn ProgressReporter>> = Arc::new(Mutex::new(()));
-        rar.scan_metadata(progress.clone()).await.unwrap();
+        rar.scan_metadata(progress.clone(), &crate::ResourceLimits::default())
+            .await
+            .unwrap();
 
         let entries = rar.entries();
         let selected = vec![&entries[0], &entries[1]];
@@ -136,6 +145,7 @@ mod tests {
                 |_| Some(Box::new(tokio::io::sink()) as Box<dyn AsyncWrite + Send + Unpin>),
                 progress,
                 None,
+                &crate::ResourceLimits::default(),
             )
             .await
             .unwrap();

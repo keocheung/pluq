@@ -13,9 +13,12 @@ use archive_core::{
 use bytes::Bytes;
 
 async fn open_rar(path: &str) -> RarArchive<LocalReadAt> {
-    RarArchive::open(LocalReadAt::new(path))
-        .await
-        .expect("open RAR")
+    RarArchive::open(
+        LocalReadAt::new(path),
+        &archive_core::ResourceLimits::default(),
+    )
+    .await
+    .expect("open RAR")
 }
 
 async fn extract_bytes(
@@ -25,7 +28,7 @@ async fn extract_bytes(
 ) -> Result<Bytes, CoreError> {
     let mut buf = Vec::new();
     let progress = Arc::new(Mutex::new(()));
-    archive.extract(entry, &mut buf, progress, password).await?;
+    archive.extract(entry, &mut buf, progress, password, &archive_core::ResourceLimits::default()).await?;
     Ok(Bytes::from(buf))
 }
 
@@ -50,7 +53,11 @@ async fn rar5_format_detection() {
 #[tokio::test]
 async fn rar4_gives_unsupported_format_error() {
     // rar4_sample.rar carries the 7-byte RAR4 magic — must return UnsupportedFormat.
-    let result = RarArchive::open(LocalReadAt::new(fixture("rar4_sample.rar"))).await;
+    let result = RarArchive::open(
+        LocalReadAt::new(fixture("rar4_sample.rar")),
+        &archive_core::ResourceLimits::default(),
+    )
+    .await;
     assert!(
         matches!(result, Err(CoreError::UnsupportedFormat { .. })),
         "expected UnsupportedFormat for RAR4 archive, got an unexpected result"
@@ -133,7 +140,7 @@ async fn rar5_progress_reporting_on_extraction() {
 
     let mut buf = Vec::new();
     archive
-        .extract(entry, &mut buf, reporter.clone(), None)
+        .extract(entry, &mut buf, reporter.clone(), None, &archive_core::ResourceLimits::default())
         .await
         .expect("extract");
 
@@ -152,7 +159,7 @@ async fn rar5_test_integrity_passes() {
     let archive = open_rar(&fixture("rar5_unicode_entry.rar")).await;
     let entry = &archive.entries()[0];
     archive
-        .test(entry, Arc::new(Mutex::new(())))
+        .test(entry, Arc::new(Mutex::new(())), &archive_core::ResourceLimits::default())
         .await
         .expect("test integrity check should pass");
 }
@@ -414,9 +421,12 @@ async fn rar5_elastic_scan_parity_compressed() {
 #[tokio::test]
 async fn rar5_extract_all_streaming_local_byte_count() {
     // rar5_store.rar: file1.txt (20 B) + file2.txt (20 B)
-    let mut archive = RarArchive::open(LocalReadAt::new(fixture("rar5_store.rar")))
-        .await
-        .expect("open");
+    let mut archive = RarArchive::open(
+        LocalReadAt::new(fixture("rar5_store.rar")),
+        &archive_core::ResourceLimits::default(),
+    )
+    .await
+    .expect("open");
 
     let progress = Arc::new(Mutex::new(()));
     let total = archive
@@ -425,6 +435,7 @@ async fn rar5_extract_all_streaming_local_byte_count() {
             |_entry| Some(Box::new(std::io::sink()) as Box<dyn std::io::Write + Send>),
             progress,
             None,
+            &archive_core::ResourceLimits::default(),
         )
         .await
         .expect("extract_all_streaming");
@@ -440,9 +451,12 @@ async fn rar5_extract_all_streaming_local_byte_count() {
 #[tokio::test]
 async fn rar5_extract_all_streaming_local_content() {
     // Verify the bytes written to memory sinks match the expected file contents.
-    let mut archive = RarArchive::open(LocalReadAt::new(fixture("rar5_store.rar")))
-        .await
-        .expect("open");
+    let mut archive = RarArchive::open(
+        LocalReadAt::new(fixture("rar5_store.rar")),
+        &archive_core::ResourceLimits::default(),
+    )
+    .await
+    .expect("open");
 
     let buf1 = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
     let buf2 = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
@@ -463,6 +477,7 @@ async fn rar5_extract_all_streaming_local_content() {
             },
             Arc::new(Mutex::new(())),
             None,
+            &archive_core::ResourceLimits::default(),
         )
         .await
         .expect("extract_all_streaming");
@@ -518,13 +533,16 @@ impl ProgressReporter for ScanRecorder {
 async fn rar5_elastic_scan_progress_callbacks() {
     // Open local RAR5 fixture. scan_metadata can be called even on an already-scanned
     // archive — it just re-scans (safe, idempotent).
-    let mut archive = RarArchive::open(LocalReadAt::new(fixture("rar5_store.rar")))
-        .await
-        .expect("open");
+    let mut archive = RarArchive::open(
+        LocalReadAt::new(fixture("rar5_store.rar")),
+        &archive_core::ResourceLimits::default(),
+    )
+    .await
+    .expect("open");
 
     let recorder = Arc::new(Mutex::new(ScanRecorder::new()));
     archive
-        .scan_metadata(recorder.clone())
+        .scan_metadata(recorder.clone(), &archive_core::ResourceLimits::default())
         .await
         .expect("scan_metadata");
 
@@ -551,4 +569,17 @@ async fn rar5_elastic_scan_progress_callbacks() {
         r.scan_completed[0], 2,
         "on_scan_complete receives correct count"
     );
+}
+
+#[tokio::test]
+async fn rar5_limits_reject_excessive_entry_count() {
+    let limits = archive_core::ResourceLimits {
+        max_entries: 1,
+        ..Default::default()
+    };
+    let result = RarArchive::open(LocalReadAt::new(fixture("rar5_store.rar")), &limits).await;
+    assert!(matches!(
+        result,
+        Err(archive_core::CoreError::ResourceLimitExceeded { .. })
+    ));
 }

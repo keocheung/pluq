@@ -18,8 +18,10 @@ pub use archive_reader::{ArchiveReader, BatchResult, extract_selected_default};
 pub use codec::CompressionMethod;
 
 // Data types.
+pub mod limits;
 pub use core_error::{CoreError, PasswordDetectionMethod};
 pub use entry::ArchiveEntry;
+pub use limits::{CodecConfig, LimitMode, RatioLimit, ResourceLimits};
 
 // Progress reporting + cancellation.
 pub use progress::ProgressReporter;

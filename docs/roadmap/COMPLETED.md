@@ -73,3 +73,6 @@
 ### Phase 5: Security Hardening & Release (in progress)
 - [x] **CLI rename to match product spec** — Folded `extract` + `extract-all` into `snipe get [glob] [-o dir] [--all]`. Gitignore-style glob (pattern with `/` matches full path, else basename) via `glob` crate. Binary renamed to `snipe` via `[[bin]]` in `archive-cli/Cargo.toml`.
 - [x] **Shell completions** — `snipe completions {bash,zsh,fish,powershell,elvish}` emits script to stdout via `clap_complete`. Install pattern documented in subcommand help.
+- [x] **Anti-bomb safeguards** — Implementation of `ResourceLimits` (max entries, header size, total unpacked, per-entry unpacked, and compression ratio guards). Enforced at the boundary of `ArchiveReader` in ZIP, RAR5, and RAR4 parsers.
+- [x] **LZMA dictionary cap** — Memory-safe decoding safeguard that rejects or caps LZMA dictionary sizes to prevent OOM attacks (e.g., a 10KB archive requesting 4GB decompression buffer). Threaded through the `CodecConfig` layer.
+- [x] **Consistent guard enforcement** — Limits are threaded through all extraction paths (`extract`, `test`, `extract_selected`, `extract_all_streaming`) across both `archive-core` readers and the high-level `Archive` facade.
