@@ -29,7 +29,7 @@ impl CliProgressReporter {
         }
     }
 
-    /// Set total entry count for multi-entry operations (ExtractAll, Test).
+    /// Set total entry count for multi-entry operations (Get, Test).
     pub fn set_total_entries(&mut self, total: u64) {
         self.total_entries = total;
     }

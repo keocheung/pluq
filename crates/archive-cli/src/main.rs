@@ -7,7 +7,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 use tracing::{info, warn};
 
 use tokio::io::AsyncWrite;
@@ -45,20 +46,16 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
-    /// Extract a single file from an archive.
-    Extract {
+    /// Extract files from an archive. With no glob, extracts everything.
+    ///
+    /// Glob matching is gitignore-style: a pattern containing `/` matches the
+    /// full entry path (e.g. `photos/**/*.jpg`); otherwise it matches the
+    /// entry's basename only (e.g. `*.jpg`).
+    Get {
         /// Path to a local file or an HTTP(S) URL.
         source: String,
-        /// Name of the entry to extract (as shown by `list`).
-        entry: String,
-        /// Output file path.
-        #[arg(short, long, default_value = ".")]
-        output: PathBuf,
-    },
-    /// Extract all files from an archive to a directory.
-    ExtractAll {
-        /// Path to a local file or an HTTP(S) URL.
-        source: String,
+        /// Optional glob pattern. Omit to extract all entries.
+        glob: Option<String>,
         /// Output directory (default: archive name without extension).
         #[arg(short, long)]
         output: Option<PathBuf>,
@@ -80,6 +77,14 @@ enum Command {
     Auth {
         #[command(subcommand)]
         action: auth_cmd::AuthAction,
+    },
+    /// Print a shell completion script to stdout.
+    ///
+    /// Install by redirecting to your shell's completion directory, e.g.
+    /// `snipe completions bash > ~/.local/share/bash-completion/completions/snipe`.
+    Completions {
+        /// Target shell.
+        shell: Shell,
     },
 }
 
@@ -225,64 +230,22 @@ async fn run_subcommand(
                 println!("\n  {file_count} files total");
             }
         }
-        Command::Extract {
-            source,
-            entry,
-            output,
-        } => {
-            let archive = open_with_progress(&source, &cancel, token_store).await?;
-
-            let found = archive
-                .entries()
-                .iter()
-                .find(|e| e.name == entry)
-                .ok_or_else(|| format!("entry '{}' not found in archive", entry))?;
-
-            let out_path = if output.is_dir() {
-                let file_name = std::path::Path::new(&entry).file_name().unwrap_or_default();
-                output.join(file_name)
-            } else {
-                output
-            };
-
-            // Ensure parent directory exists.
-            if let Some(parent) = out_path.parent()
-                && !parent.as_os_str().is_empty()
-            {
-                tokio::fs::create_dir_all(parent).await?;
-            }
-
-            let reporter = cli_progress::CliProgressReporter::new(cancel.clone());
-            let progress: Arc<Mutex<dyn archive::ProgressReporter>> =
-                Arc::new(Mutex::new(reporter));
-
-            {
-                let mut p = progress.lock().unwrap();
-                p.on_entry_start(&found.name, found.uncompressed_size);
-            }
-
-            let mut file = tokio::fs::File::create(&out_path).await?;
-            let bytes_written = archive
-                .extract(found, &mut file, progress.clone(), None)
-                .await?;
-
-            {
-                let mut p = progress.lock().unwrap();
-                p.on_entry_complete(&found.name, true);
-            }
-
-            println!(
-                "  Extracted '{}' → {} ({})",
-                entry,
-                out_path.display(),
-                format_size(bytes_written)
-            );
+        Command::Completions { shell } => {
+            let mut cmd = Cli::command();
+            clap_complete::generate(shell, &mut cmd, "snipe", &mut std::io::stdout());
         }
-        Command::ExtractAll {
+        Command::Get {
             source,
+            glob,
             output,
             all,
         } => {
+            let pattern = glob
+                .as_deref()
+                .map(glob::Pattern::new)
+                .transpose()
+                .map_err(|e| format!("invalid glob pattern: {e}"))?;
+
             let config = source_config(token_store.clone());
             let reader = resolve(&source, &config)?;
             let archive = open_with_progress(&source, &cancel, token_store).await?;
@@ -302,12 +265,16 @@ async fn run_subcommand(
 
             tokio::fs::create_dir_all(&output_dir).await?;
 
-            // Pre-filter: skip directories and unsafe paths before calling extract_selected.
+            // Pre-filter: drop directories, apply glob (if any), reject unsafe paths.
             // CLI-local path traversal guard (core-level sanitization is a future phase).
             let safe_entries: Vec<&ArchiveEntry> = entries
                 .iter()
                 .copied()
                 .filter(|e| !e.is_directory)
+                .filter(|e| match &pattern {
+                    Some(p) => glob_matches(p, &e.name),
+                    None => true,
+                })
                 .filter(|e| {
                     let safe = !e.name.split('/').any(|seg| seg == "..")
                         && !e.name.starts_with('/')
@@ -319,7 +286,25 @@ async fn run_subcommand(
                 })
                 .collect();
 
-            let skipped = entries.iter().filter(|e| !e.is_directory).count() - safe_entries.len();
+            if safe_entries.is_empty() {
+                if let Some(p) = &pattern {
+                    eprintln!("  No entries match glob '{}'", p.as_str());
+                    std::process::exit(1);
+                } else {
+                    eprintln!("  Archive contains no extractable entries");
+                    return Ok(());
+                }
+            }
+
+            let matched_count = entries
+                .iter()
+                .filter(|e| !e.is_directory)
+                .filter(|e| match &pattern {
+                    Some(p) => glob_matches(p, &e.name),
+                    None => true,
+                })
+                .count();
+            let skipped = matched_count - safe_entries.len();
 
             let mut reporter = cli_progress::CliProgressReporter::new(cancel.clone());
             reporter.set_total_entries(safe_entries.len() as u64);
@@ -459,6 +444,20 @@ pub fn default_output_folder(source: &str) -> Option<PathBuf> {
     archive_source::suggest_name_from_str(source).map(PathBuf::from)
 }
 
+/// Match an entry name against a glob pattern using gitignore-style semantics.
+///
+/// A pattern containing `/` matches against the full entry path
+/// (e.g. `photos/**/*.jpg`). A pattern with no `/` matches only against the
+/// entry's basename (e.g. `*.jpg` matches any jpg anywhere in the tree).
+fn glob_matches(pattern: &glob::Pattern, entry_name: &str) -> bool {
+    if pattern.as_str().contains('/') {
+        pattern.matches(entry_name)
+    } else {
+        let basename = entry_name.rsplit('/').next().unwrap_or(entry_name);
+        pattern.matches(basename)
+    }
+}
+
 pub(crate) fn format_size(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * KB;
@@ -539,13 +538,48 @@ mod tests {
         let res = Cli::try_parse_from(["snipe", "file.zip", "list", "file.zip"]);
         assert!(res.is_err());
 
-        // snipe extract file.zip foo.txt -o out/ -> Extract variant
-        let cli =
-            Cli::try_parse_from(["snipe", "extract", "file.zip", "foo.txt", "-o", "out/"]).unwrap();
-        assert_eq!(cli.source, None);
-        assert!(
-            matches!(cli.command, Some(Command::Extract { ref source, ref entry, ref output }) if source == "file.zip" && entry == "foo.txt" && output.as_os_str() == "out/")
-        );
+        // snipe get file.zip -> Get with no glob
+        let cli = Cli::try_parse_from(["snipe", "get", "file.zip"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Get { ref source, glob: None, output: None, all: false }) if source == "file.zip"
+        ));
+
+        // snipe get file.zip *.jpg -o out/ --all
+        let cli = Cli::try_parse_from([
+            "snipe", "get", "file.zip", "*.jpg", "-o", "out/", "--all",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Get { ref source, glob: Some(ref g), output: Some(ref o), all: true })
+                if source == "file.zip" && g == "*.jpg" && o.as_os_str() == "out/"
+        ));
+
+        // snipe completions bash -> Completions { shell: Bash }
+        let cli = Cli::try_parse_from(["snipe", "completions", "bash"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Completions { shell: Shell::Bash })
+        ));
+    }
+
+    #[test]
+    fn test_glob_matches_basename() {
+        let p = glob::Pattern::new("*.jpg").unwrap();
+        assert!(glob_matches(&p, "photo.jpg"));
+        assert!(glob_matches(&p, "photos/vacation/img.jpg"));
+        assert!(!glob_matches(&p, "photos/vacation/img.png"));
+    }
+
+    #[test]
+    fn test_glob_matches_fullpath() {
+        let p = glob::Pattern::new("photos/**/*.jpg").unwrap();
+        assert!(glob_matches(&p, "photos/vacation/img.jpg"));
+        assert!(glob_matches(&p, "photos/a/b/c.jpg"));
+        assert!(!glob_matches(&p, "docs/img.jpg"));
+        // basename-only pattern shouldn't match here
+        assert!(!glob_matches(&p, "photos.jpg"));
     }
 
     #[test]

@@ -69,3 +69,7 @@
 - [x] **`archive-source` wiring** — `SourceConfig.token_store: Option<Arc<TokenStore>>`. `resolve()` prefers OAuth when both token and client ID are present, falls back to API key / app credentials. Graceful warn-and-fallback when token exists but client ID is missing.
 - [x] **`snipe auth {add, remove, list}`** — CLI subcommand for managing stored OAuth tokens. `list` shows provider + status + refresh-token presence (no secrets printed).
 - [x] **TUI auth prompt** — `NotPublic` / `InvalidCredentials` on known providers surfaces an in-app prompt. Y runs the OAuth flow in a background task, N surfaces a hint to use `snipe auth add`. On success the failed archive open is retried transparently.
+
+### Phase 5: Security Hardening & Release (in progress)
+- [x] **CLI rename to match product spec** — Folded `extract` + `extract-all` into `snipe get [glob] [-o dir] [--all]`. Gitignore-style glob (pattern with `/` matches full path, else basename) via `glob` crate. Binary renamed to `snipe` via `[[bin]]` in `archive-cli/Cargo.toml`.
+- [x] **Shell completions** — `snipe completions {bash,zsh,fish,powershell,elvish}` emits script to stdout via `clap_complete`. Install pattern documented in subcommand help.

@@ -4,7 +4,7 @@
 
 * **Current Phase:** Phase 5 — Security Hardening & Release
 * **Current Active Task:** [HANDOVER]
-* **Baseline:** All Phase 4.5 OAuth integration and step 6 TUI auth loop fully implemented. Need user visual verification.
+* **Baseline:** Phase 5 CLI surface polish done — `extract`/`extract-all` folded into `snipe get [glob] [-o dir] [--all]` with gitignore-style glob, binary renamed to `snipe` via `[[bin]]`, `snipe completions <shell>` added via `clap_complete`. All 108 `archive-cli` tests green.
 
 
 ---
