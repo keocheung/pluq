@@ -1,5 +1,6 @@
 mod auth_cmd;
 mod cli_progress;
+mod glob_match;
 pub mod home;
 mod tui;
 
@@ -274,7 +275,7 @@ async fn run_subcommand(
                 .copied()
                 .filter(|e| !e.is_directory)
                 .filter(|e| match &pattern {
-                    Some(p) => glob_matches(p, &e.name),
+                    Some(p) => glob_match::glob_matches(p, &e.name),
                     None => true,
                 })
                 .collect();
@@ -423,20 +424,6 @@ pub fn default_output_folder(source: &str) -> Option<PathBuf> {
     archive_source::suggest_name_from_str(source).map(PathBuf::from)
 }
 
-/// Match an entry name against a glob pattern using gitignore-style semantics.
-///
-/// A pattern containing `/` matches against the full entry path
-/// (e.g. `photos/**/*.jpg`). A pattern with no `/` matches only against the
-/// entry's basename (e.g. `*.jpg` matches any jpg anywhere in the tree).
-fn glob_matches(pattern: &glob::Pattern, entry_name: &str) -> bool {
-    if pattern.as_str().contains('/') {
-        pattern.matches(entry_name)
-    } else {
-        let basename = entry_name.rsplit('/').next().unwrap_or(entry_name);
-        pattern.matches(basename)
-    }
-}
-
 pub(crate) fn format_size(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * KB;
@@ -539,24 +526,6 @@ mod tests {
             cli.command,
             Some(Command::Completions { shell: Shell::Bash })
         ));
-    }
-
-    #[test]
-    fn test_glob_matches_basename() {
-        let p = glob::Pattern::new("*.jpg").unwrap();
-        assert!(glob_matches(&p, "photo.jpg"));
-        assert!(glob_matches(&p, "photos/vacation/img.jpg"));
-        assert!(!glob_matches(&p, "photos/vacation/img.png"));
-    }
-
-    #[test]
-    fn test_glob_matches_fullpath() {
-        let p = glob::Pattern::new("photos/**/*.jpg").unwrap();
-        assert!(glob_matches(&p, "photos/vacation/img.jpg"));
-        assert!(glob_matches(&p, "photos/a/b/c.jpg"));
-        assert!(!glob_matches(&p, "docs/img.jpg"));
-        // basename-only pattern shouldn't match here
-        assert!(!glob_matches(&p, "photos.jpg"));
     }
 
     #[test]

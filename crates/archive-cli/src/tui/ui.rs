@@ -639,7 +639,18 @@ fn draw_browsing(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 
     let header_text = if app.is_filtering || !app.filter_query.is_empty() {
-        format!("{}  [Filter: \"{}\"]", breadcrumb, app.filter_query)
+        let count = app.visible_items.len();
+        let is_glob = crate::glob_match::is_glob_query(&app.filter_query);
+        let mode = if is_glob { "Glob" } else { "Filter" };
+        let hint = if app.is_filtering && is_glob {
+            " — Enter: select all"
+        } else {
+            ""
+        };
+        format!(
+            "{}  [{}: \"{}\" ({} matches){}]",
+            breadcrumb, mode, app.filter_query, count, hint
+        )
     } else {
         breadcrumb
     };

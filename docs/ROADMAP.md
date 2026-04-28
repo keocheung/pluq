@@ -7,7 +7,6 @@
 - [ ] **`snipe feedback`** — open GitHub issues URL in default browser. Trivial.
 - [ ] Symlink target verification to ensure links stay within the output directory.
 - [ ] Cross-platform release pipeline (GitHub Actions).
-- [ ] Glob extraction in TUI — type `*.jpg` in the search box and extract all matching entries; bridges TUI and `snipe get` use cases — *optional stretch goal*.
 
 ---
 

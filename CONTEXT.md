@@ -3,8 +3,8 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 5 — Security Hardening & Release
-* **Current Active Task:** Step 2 — archive-cache crate refactor
-* **Baseline:** Path traversal guard centralized in archive-core (PathPolicy: Sanitize default / Strict opt-in); CLI duplicate removed.
+* **Current Active Task:** [HANDOVER]
+* **Baseline:** Glob filter + bulk-toggle from TUI search; shared glob_match helper between CLI Get and TUI.
 
 
 ---

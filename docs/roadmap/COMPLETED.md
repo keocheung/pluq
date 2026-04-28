@@ -79,3 +79,4 @@
 - [x] **Path traversal guard** — Centralized path safety logic in `archive-core` via `PathPolicy` (Sanitize/Strict). Strips `..`, absolute roots, drive/UNC prefixes. Enforced in the state layer across all extraction methods. Ad-hoc CLI duplicate removed.
 - [x] **New `archive-cache` crate** — Migrated cache management logic to a dedicated crate; strictly enforced architectural boundaries and sealed `Archive` internal format accessors (Golden Rule #1); relocated `FormatCacheState` to `archive-core`.
 - [x] **HTTP fingerprint enrichment** — Added ETag and Last-Modified equivalent capture to HTTP, Google Drive, and Dropbox readers to enable robust server-side change detection without extra round-trips.
+- [x] **Glob extraction in TUI** — Extended search box to handle `*`, `?`, `[` patterns; bulk-toggle matching entries for extraction; shared `glob_match` helper between CLI and TUI.

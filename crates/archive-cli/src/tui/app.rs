@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use crate::glob_match;
 use crate::home::complete::{complete_path, looks_like_url};
 use archive::{
     Archive, ArchiveConfig, ArchiveEntry, ArchiveError, BatchResult, EntryTree, ProgressReporter,
@@ -470,20 +471,37 @@ impl App {
             let Some(tree) = &self.entry_tree else { return };
             let path_str = self.current_path.join("/");
             let children = tree.children_at(&path_str);
-            let query = self.filter_query.to_lowercase();
+            let query = self.filter_query.as_str();
+            let glob_pat = if glob_match::is_glob_query(query) {
+                glob_match::compile_glob(query)
+            } else {
+                None
+            };
+            let lower = query.to_lowercase();
 
             children
                 .iter()
                 .filter_map(|node| {
-                    if !query.is_empty() && !node.name.to_lowercase().contains(&query) {
-                        return None;
-                    }
-
                     let full_path = if path_str.is_empty() {
                         node.name.clone()
                     } else {
                         format!("{}/{}", path_str, node.name)
                     };
+
+                    let pass = if query.is_empty() {
+                        true
+                    } else if let Some(p) = &glob_pat {
+                        glob_match::glob_matches(p, &full_path)
+                    } else if glob_match::is_glob_query(query) {
+                        false // invalid glob — explicit no match
+                    } else {
+                        node.name.to_lowercase().contains(&lower)
+                    };
+
+                    if !pass {
+                        return None;
+                    }
+
                     let is_directory = !node.children.is_empty();
                     Some((node.name.clone(), full_path, is_directory, node.entry_index))
                 })
@@ -540,6 +558,24 @@ impl App {
         } else {
             Some(new_selected)
         });
+    }
+
+    /// Select all files matching the given glob pattern across the whole archive.
+    pub fn toggle_all_matching(&mut self, pattern: &glob::Pattern) {
+        let mut count = 0;
+        for entry in &self.entries {
+            if !entry.is_directory
+                && glob_match::glob_matches(pattern, &entry.name)
+                && self.toggled.insert(entry.name.clone())
+            {
+                count += 1;
+            }
+        }
+        if count > 0 {
+            self.status_message = Some(format!("Selected {} matching files", count));
+        } else {
+            self.status_message = Some("No new files matched".to_string());
+        }
     }
 
     pub fn handle_message(&mut self, msg: AppMessage, tx: &mpsc::UnboundedSender<AppMessage>) {
@@ -1441,7 +1477,16 @@ impl App {
                     self.filter_query.pop();
                     self.rebuild_visible_items(None);
                 }
-                KeyCode::Enter | KeyCode::Esc => {
+                KeyCode::Enter => {
+                    if !self.filter_query.is_empty()
+                        && glob_match::is_glob_query(&self.filter_query)
+                        && let Some(p) = glob_match::compile_glob(&self.filter_query)
+                    {
+                        self.toggle_all_matching(&p);
+                    }
+                    self.is_filtering = false;
+                }
+                KeyCode::Esc => {
                     self.is_filtering = false;
                 }
                 _ => {}
