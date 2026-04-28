@@ -11,6 +11,7 @@ Cargo.lock
 .vscode/
 .gemini/
 .claude/
+.agents/
 *.swp
 *.swo
 *.log
