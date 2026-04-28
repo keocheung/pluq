@@ -309,6 +309,29 @@ impl<R: ReadAt + LocalPath + 'static> Archive<R> {
     ) -> Result<u64, ArchiveError> {
         debug!(name = %entry.name, "Archive::extract delegating to format parser");
         let limits = &self.config.limits;
+
+        match archive_core::evaluate_path(&entry.name, self.config.path_policy) {
+            archive_core::PathDecision::Reject { path } => {
+                return Err(translate_core_error(CoreError::PathTraversal { path }));
+            }
+            archive_core::PathDecision::Rewrite {
+                sanitized: _,
+                original,
+            } => {
+                if self.config.path_policy == archive_core::PathPolicy::Strict {
+                    return Err(translate_core_error(CoreError::PathTraversal {
+                        path: original,
+                    }));
+                } else {
+                    progress
+                        .lock()
+                        .unwrap()
+                        .on_warning(&format!("Extracted potentially unsafe path: {}", original));
+                }
+            }
+            archive_core::PathDecision::Allow => {}
+        }
+
         match &self.inner {
             ArchiveInner::Zip(z) => z.extract(entry, sink, progress, password, limits).await,
             ArchiveInner::Rar(r) => r.extract(entry, sink, progress, password, limits).await,
@@ -325,7 +348,7 @@ impl<R: ReadAt + LocalPath + 'static> Archive<R> {
     pub async fn extract_selected<SinkFn>(
         &self,
         entries: &[&ArchiveEntry],
-        sink_factory: SinkFn,
+        mut sink_factory: SinkFn,
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
     ) -> Result<BatchResult, ArchiveError>
@@ -334,17 +357,58 @@ impl<R: ReadAt + LocalPath + 'static> Archive<R> {
             FnMut(&ArchiveEntry) -> Option<Box<dyn tokio::io::AsyncWrite + Send + Unpin>> + Send,
     {
         let limits = &self.config.limits;
+
+        if self.config.path_policy == archive_core::PathPolicy::Strict {
+            for entry in entries {
+                if let archive_core::PathDecision::Reject { path }
+                | archive_core::PathDecision::Rewrite { original: path, .. } =
+                    archive_core::evaluate_path(&entry.name, self.config.path_policy)
+                {
+                    return Err(translate_core_error(CoreError::PathTraversal { path }));
+                }
+            }
+        }
+
+        let wrapped_factory = {
+            let progress = progress.clone();
+            move |entry: &ArchiveEntry| match archive_core::evaluate_path(
+                &entry.name,
+                self.config.path_policy,
+            ) {
+                archive_core::PathDecision::Reject { path } => {
+                    progress
+                        .lock()
+                        .unwrap()
+                        .on_warning(&format!("Skipping unsafe path: {}", path));
+                    None
+                }
+                archive_core::PathDecision::Rewrite {
+                    sanitized,
+                    original,
+                } => {
+                    progress.lock().unwrap().on_warning(&format!(
+                        "Sanitized unsafe path: {} -> {}",
+                        original, sanitized
+                    ));
+                    let mut safe_entry = entry.clone();
+                    safe_entry.name = sanitized;
+                    sink_factory(&safe_entry)
+                }
+                archive_core::PathDecision::Allow => sink_factory(entry),
+            }
+        };
+
         match &self.inner {
             ArchiveInner::Zip(z) => {
-                z.extract_selected(entries, sink_factory, progress, password, limits)
+                z.extract_selected(entries, wrapped_factory, progress, password, limits)
                     .await
             }
             ArchiveInner::Rar(r) => {
-                r.extract_selected(entries, sink_factory, progress, password, limits)
+                r.extract_selected(entries, wrapped_factory, progress, password, limits)
                     .await
             }
             ArchiveInner::Rar4(r) => {
-                r.extract_selected(entries, sink_factory, progress, password, limits)
+                r.extract_selected(entries, wrapped_factory, progress, password, limits)
                     .await
             }
         }
@@ -412,7 +476,7 @@ impl<R: ReadAt + LocalPath + 'static> Archive<R> {
     pub async fn extract_all_streaming<Filter, SinkFn>(
         &mut self,
         filter: Filter,
-        sink_factory: SinkFn,
+        mut sink_factory: SinkFn,
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
     ) -> Result<u64, ArchiveError>
@@ -421,20 +485,72 @@ impl<R: ReadAt + LocalPath + 'static> Archive<R> {
         SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn std::io::Write + Send>> + Send + 'static,
     {
         let limits = &self.config.limits;
-        match &mut self.inner {
-            ArchiveInner::Zip(z) => z
-                .extract_all_streaming(filter, sink_factory, progress, password, limits)
-                .await
-                .map_err(translate_core_error),
-            ArchiveInner::Rar(r) => r
-                .extract_all_streaming(filter, sink_factory, progress, password, limits)
-                .await
-                .map_err(translate_core_error),
-            ArchiveInner::Rar4(r) => r
-                .extract_all_streaming(filter, sink_factory, progress, password, limits)
-                .await
-                .map_err(translate_core_error),
+        let strict_error = Arc::new(Mutex::new(None));
+
+        let wrapped_factory = {
+            let strict_error = strict_error.clone();
+            let config_policy = self.config.path_policy;
+            let progress = progress.clone();
+            move |entry: &ArchiveEntry| {
+                if strict_error.lock().unwrap().is_some() {
+                    return None;
+                }
+                match archive_core::evaluate_path(&entry.name, config_policy) {
+                    archive_core::PathDecision::Reject { path } => {
+                        if config_policy == archive_core::PathPolicy::Strict {
+                            *strict_error.lock().unwrap() = Some(path);
+                            None
+                        } else {
+                            progress
+                                .lock()
+                                .unwrap()
+                                .on_warning(&format!("Skipping unsafe path: {}", path));
+                            None
+                        }
+                    }
+                    archive_core::PathDecision::Rewrite {
+                        sanitized,
+                        original,
+                    } => {
+                        if config_policy == archive_core::PathPolicy::Strict {
+                            *strict_error.lock().unwrap() = Some(original);
+                            None
+                        } else {
+                            progress.lock().unwrap().on_warning(&format!(
+                                "Sanitized unsafe path: {} -> {}",
+                                original, sanitized
+                            ));
+                            let mut safe_entry = entry.clone();
+                            safe_entry.name = sanitized;
+                            sink_factory(&safe_entry)
+                        }
+                    }
+                    archive_core::PathDecision::Allow => sink_factory(entry),
+                }
+            }
+        };
+
+        let res = match &mut self.inner {
+            ArchiveInner::Zip(z) => {
+                z.extract_all_streaming(filter, wrapped_factory, progress, password, limits)
+                    .await
+            }
+            ArchiveInner::Rar(r) => {
+                r.extract_all_streaming(filter, wrapped_factory, progress, password, limits)
+                    .await
+            }
+            ArchiveInner::Rar4(r) => {
+                r.extract_all_streaming(filter, wrapped_factory, progress, password, limits)
+                    .await
+            }
+        };
+
+        let strict_err_opt = strict_error.lock().unwrap().take();
+        if let Some(path) = strict_err_opt {
+            return Err(translate_core_error(CoreError::PathTraversal { path }));
         }
+
+        res.map_err(translate_core_error)
     }
 }
 
@@ -483,12 +599,13 @@ mod tests {
     #[tokio::test]
     async fn open_rar5_detects_rar_format() {
         let path = rar_fixture("rar5_store.rar");
-        let archive = Archive::open_reader(&path, LocalReadAt::new(&path), &ArchiveConfig::default())
-            .await
-            .unwrap()
-            .ready()
-            .await
-            .unwrap();
+        let archive =
+            Archive::open_reader(&path, LocalReadAt::new(&path), &ArchiveConfig::default())
+                .await
+                .unwrap()
+                .ready()
+                .await
+                .unwrap();
         assert!(!archive.entries().is_empty());
         assert_eq!(archive.entries()[0].name, "file1.txt");
     }
@@ -496,12 +613,13 @@ mod tests {
     #[tokio::test]
     async fn open_rar4_detects_rar4_format() {
         let path = rar_fixture("rar4_sample.rar");
-        let archive = Archive::open_reader(&path, LocalReadAt::new(&path), &ArchiveConfig::default())
-            .await
-            .unwrap()
-            .ready()
-            .await
-            .unwrap();
+        let archive =
+            Archive::open_reader(&path, LocalReadAt::new(&path), &ArchiveConfig::default())
+                .await
+                .unwrap()
+                .ready()
+                .await
+                .unwrap();
         assert!(!archive.entries().is_empty());
     }
 
@@ -509,12 +627,13 @@ mod tests {
     async fn open_zip_still_works_after_rar_added() {
         let buf = build_zip(&[("hello.txt", b"hello")]);
         let (_f, path) = write_temp(&buf);
-        let archive = Archive::open_reader(&path, LocalReadAt::new(&path), &ArchiveConfig::default())
-            .await
-            .unwrap()
-            .ready()
-            .await
-            .unwrap();
+        let archive =
+            Archive::open_reader(&path, LocalReadAt::new(&path), &ArchiveConfig::default())
+                .await
+                .unwrap()
+                .ready()
+                .await
+                .unwrap();
         assert!(!archive.entries().is_empty());
         assert_eq!(archive.entries()[0].name, "hello.txt");
     }
@@ -524,7 +643,8 @@ mod tests {
         // Zero bytes are not a valid archive — must fail without panicking.
         let bytes = vec![0u8; 64];
         let (_f, path) = write_temp(&bytes);
-        let result = Archive::open_reader(&path, LocalReadAt::new(&path), &ArchiveConfig::default()).await;
+        let result =
+            Archive::open_reader(&path, LocalReadAt::new(&path), &ArchiveConfig::default()).await;
         assert!(result.is_err(), "unknown bytes should produce an error");
     }
 
@@ -534,9 +654,10 @@ mod tests {
     async fn open_zip_returns_ready() {
         let buf = build_zip(&[("hello.txt", b"hello")]);
         let (_f, path) = write_temp(&buf);
-        let opened = Archive::open_reader(&path, LocalReadAt::new(&path), &ArchiveConfig::default())
-            .await
-            .unwrap();
+        let opened =
+            Archive::open_reader(&path, LocalReadAt::new(&path), &ArchiveConfig::default())
+                .await
+                .unwrap();
         assert!(matches!(opened, Opened::Ready(_)));
     }
 
@@ -544,21 +665,23 @@ mod tests {
     async fn open_rar5_local_returns_ready() {
         // Local RAR5: sequential scan runs during open → always Ready.
         let path = rar_fixture("rar5_store.rar");
-        let opened = Archive::open_reader(&path, LocalReadAt::new(&path), &ArchiveConfig::default())
-            .await
-            .unwrap();
+        let opened =
+            Archive::open_reader(&path, LocalReadAt::new(&path), &ArchiveConfig::default())
+                .await
+                .unwrap();
         assert!(matches!(opened, Opened::Ready(_)));
     }
 
     #[tokio::test]
     async fn opened_ready_convenience_works() {
         let path = rar_fixture("rar5_store.rar");
-        let archive = Archive::open_reader(&path, LocalReadAt::new(&path), &ArchiveConfig::default())
-            .await
-            .unwrap()
-            .ready()
-            .await
-            .unwrap();
+        let archive =
+            Archive::open_reader(&path, LocalReadAt::new(&path), &ArchiveConfig::default())
+                .await
+                .unwrap()
+                .ready()
+                .await
+                .unwrap();
         assert!(!archive.entries().is_empty());
     }
 
@@ -568,9 +691,10 @@ mod tests {
     async fn open_rar4_returns_ready() {
         // RAR4 always scans during open — never NeedsScan.
         let path = rar_fixture("rar4_sample.rar");
-        let opened = Archive::open_reader(&path, LocalReadAt::new(&path), &ArchiveConfig::default())
-            .await
-            .unwrap();
+        let opened =
+            Archive::open_reader(&path, LocalReadAt::new(&path), &ArchiveConfig::default())
+                .await
+                .unwrap();
         assert!(matches!(opened, Opened::Ready(_)));
     }
 
@@ -586,12 +710,13 @@ mod tests {
         let cache_file = tempfile::NamedTempFile::new().unwrap();
 
         // Open and get the archive.
-        let archive = Archive::open_reader(&path, LocalReadAt::new(&path), &ArchiveConfig::default())
-            .await
-            .unwrap()
-            .ready()
-            .await
-            .unwrap();
+        let archive =
+            Archive::open_reader(&path, LocalReadAt::new(&path), &ArchiveConfig::default())
+                .await
+                .unwrap()
+                .ready()
+                .await
+                .unwrap();
         let entry_count = archive.entries().len();
         assert!(entry_count > 0);
 
@@ -620,12 +745,16 @@ mod tests {
         let fixture_path = rar_fixture("rar5_store.rar");
 
         // First open: scans and saves cache.
-        let archive = Archive::open_reader(&fixture_path, LocalReadAt::new(&fixture_path), &ArchiveConfig::default())
-            .await
-            .unwrap()
-            .ready()
-            .await
-            .unwrap();
+        let archive = Archive::open_reader(
+            &fixture_path,
+            LocalReadAt::new(&fixture_path),
+            &ArchiveConfig::default(),
+        )
+        .await
+        .unwrap()
+        .ready()
+        .await
+        .unwrap();
         let expected_entries: Vec<String> =
             archive.entries().iter().map(|e| e.name.clone()).collect();
         assert!(!expected_entries.is_empty());
@@ -649,7 +778,11 @@ mod tests {
         let cached = crate::cache::ArchiveCache::load(&cache_path).unwrap();
         assert!(cached.is_valid(&fingerprint));
 
-        let restored = Archive::from_cache(cached, LocalReadAt::new(&fixture_path), ArchiveConfig::default());
+        let restored = Archive::from_cache(
+            cached,
+            LocalReadAt::new(&fixture_path),
+            ArchiveConfig::default(),
+        );
 
         let restored_entries: Vec<String> =
             restored.entries().iter().map(|e| e.name.clone()).collect();
@@ -660,12 +793,16 @@ mod tests {
     async fn rar4_implicit_cache_open_reopen() {
         let fixture_path = rar_fixture("rar4_sample.rar");
 
-        let archive = Archive::open_reader(&fixture_path, LocalReadAt::new(&fixture_path), &ArchiveConfig::default())
-            .await
-            .unwrap()
-            .ready()
-            .await
-            .unwrap();
+        let archive = Archive::open_reader(
+            &fixture_path,
+            LocalReadAt::new(&fixture_path),
+            &ArchiveConfig::default(),
+        )
+        .await
+        .unwrap()
+        .ready()
+        .await
+        .unwrap();
         let expected_entries: Vec<String> =
             archive.entries().iter().map(|e| e.name.clone()).collect();
         assert!(!expected_entries.is_empty());
@@ -687,7 +824,11 @@ mod tests {
         let cached = crate::cache::ArchiveCache::load(cache_file.path()).unwrap();
         assert!(cached.is_valid(&fingerprint));
 
-        let restored = Archive::from_cache(cached, LocalReadAt::new(&fixture_path), ArchiveConfig::default());
+        let restored = Archive::from_cache(
+            cached,
+            LocalReadAt::new(&fixture_path),
+            ArchiveConfig::default(),
+        );
 
         let restored_entries: Vec<String> =
             restored.entries().iter().map(|e| e.name.clone()).collect();
@@ -702,12 +843,13 @@ mod tests {
             ("c.txt", b"skip me please"),
         ]);
         let (_f, path) = write_temp(&buf);
-        let archive = Archive::open_reader(&path, LocalReadAt::new(&path), &ArchiveConfig::default())
-            .await
-            .unwrap()
-            .ready()
-            .await
-            .unwrap();
+        let archive =
+            Archive::open_reader(&path, LocalReadAt::new(&path), &ArchiveConfig::default())
+                .await
+                .unwrap()
+                .ready()
+                .await
+                .unwrap();
 
         let all_entries = archive.entries_clean();
         assert_eq!(all_entries.len(), 3);
@@ -738,12 +880,13 @@ mod tests {
     async fn extract_selected_skips_when_sink_factory_returns_none() {
         let buf = build_zip(&[("x.txt", b"data"), ("y.txt", b"more data")]);
         let (_f, path) = write_temp(&buf);
-        let archive = Archive::open_reader(&path, LocalReadAt::new(&path), &ArchiveConfig::default())
-            .await
-            .unwrap()
-            .ready()
-            .await
-            .unwrap();
+        let archive =
+            Archive::open_reader(&path, LocalReadAt::new(&path), &ArchiveConfig::default())
+                .await
+                .unwrap()
+                .ready()
+                .await
+                .unwrap();
 
         let all_entries = archive.entries_clean();
         #[allow(clippy::iter_cloned_collect)]
@@ -797,5 +940,75 @@ mod tests {
             mtime: None,
         };
         assert!(!cache.is_valid(&different_fp));
+    }
+
+    #[tokio::test]
+    async fn path_policy_strict_aborts_extraction() {
+        let buf = build_zip(&[("safe.txt", b"safe"), ("../escape.txt", b"danger")]);
+        let (_f, path) = write_temp(&buf);
+        let mut config = ArchiveConfig::default();
+        config.path_policy = archive_core::PathPolicy::Strict;
+        let archive = Archive::open_reader(&path, LocalReadAt::new(&path), &config)
+            .await
+            .unwrap()
+            .ready()
+            .await
+            .unwrap();
+
+        let entries = archive.entries_clean();
+        let progress = Arc::new(Mutex::new(()));
+        let result = archive
+            .extract_selected(
+                &entries,
+                |_| Some(Box::new(tokio::io::sink()) as Box<dyn AsyncWrite + Send + Unpin>),
+                progress,
+                None,
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ArchiveError::SecurityRisk { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn path_policy_sanitize_rewrites_and_extracts() {
+        let buf = build_zip(&[("safe.txt", b"safe"), ("../escape.txt", b"danger")]);
+        let (_f, path) = write_temp(&buf);
+        let mut config = ArchiveConfig::default();
+        config.path_policy = archive_core::PathPolicy::Sanitize;
+        let archive = Archive::open_reader(&path, LocalReadAt::new(&path), &config)
+            .await
+            .unwrap()
+            .ready()
+            .await
+            .unwrap();
+
+        let entries = archive.entries_clean();
+        let progress = Arc::new(Mutex::new(()));
+
+        let extracted_paths = Arc::new(Mutex::new(Vec::new()));
+        let extracted_paths_clone = extracted_paths.clone();
+
+        let sink_factory = move |entry: &ArchiveEntry| {
+            extracted_paths_clone
+                .lock()
+                .unwrap()
+                .push(entry.name.clone());
+            Some(Box::new(tokio::io::sink()) as Box<dyn AsyncWrite + Send + Unpin>)
+        };
+
+        let result = archive
+            .extract_selected(&entries, sink_factory, progress, None)
+            .await
+            .unwrap();
+
+        assert_eq!(result.succeeded, 2);
+
+        let paths = extracted_paths.lock().unwrap();
+        assert!(paths.contains(&"safe.txt".to_string()));
+        assert!(paths.contains(&"escape.txt".to_string()));
     }
 }

@@ -470,7 +470,6 @@ impl<R: ReadAt> Rar4Archive<R> {
                                     blake2_hash: None,
                                 })
                                 .await
-
                                 .is_err()
                             {
                                 let _ = std::fs::remove_file(&snippet_path);
@@ -775,9 +774,11 @@ impl<R: ReadAt> Rar4Archive<R> {
         limits: &crate::ResourceLimits,
     ) -> Result<u64, CoreError> {
         if let Some(path) = &self.local_path {
-            return self
-                .extract_via_unrar_local(entry, loc, path, sink, progress, password, limits)
-                .await;
+            tracing::debug!(name = %entry.name, path = %path.display(), "unrar local path");
+            return Self::extract_via_unrar_local(
+                entry, loc, path, sink, progress, password, limits,
+            )
+            .await;
         }
         self.extract_via_unrar_cloud(entry, loc, sink, progress, password, limits)
             .await
@@ -785,7 +786,6 @@ impl<R: ReadAt> Rar4Archive<R> {
 
     /// Extract a compressed (or encrypted) entry from a **local** archive via `unrar`.
     async fn extract_via_unrar_local<W: AsyncWrite + Send + Unpin>(
-        &self,
         entry: &ArchiveEntry,
         loc: &Rar4EntryLocation,
         archive_path: &std::path::Path,
@@ -852,10 +852,12 @@ impl<R: ReadAt> Rar4Archive<R> {
 
         verify_and_stream_from_file(
             out_tmp.into_file(),
-            &entry_name,
-            Some(expected_crc),
-            None,
-            loc.data_size,
+            crate::rar::VerifyData {
+                name: &entry_name,
+                expected_crc: Some(expected_crc),
+                expected_blake2: None,
+                compressed_size: loc.data_size,
+            },
             sink,
             &progress,
             limits,
@@ -985,10 +987,12 @@ impl<R: ReadAt> Rar4Archive<R> {
 
         verify_and_stream_from_file(
             out_tmp.into_file(),
-            &entry_name,
-            Some(expected_crc),
-            None,
-            loc.data_size,
+            crate::rar::VerifyData {
+                name: &entry_name,
+                expected_crc: Some(expected_crc),
+                expected_blake2: None,
+                compressed_size: loc.data_size,
+            },
             sink,
             &progress,
             limits,
@@ -1024,7 +1028,15 @@ impl<R: ReadAt> Rar4Archive<R> {
 
         // Local path: delegate to default loop (unrar opens the real file directly).
         if self.local_path.is_some() {
-            return extract_selected_default(self, entries, sink_factory, progress, password, limits).await;
+            return extract_selected_default(
+                self,
+                entries,
+                sink_factory,
+                progress,
+                password,
+                limits,
+            )
+            .await;
         }
 
         // Cloud path: build clusters.
@@ -1147,10 +1159,12 @@ impl<R: ReadAt> Rar4Archive<R> {
                         if let Some(mut sink) = sink_factory(entry) {
                             let verify_res = verify_and_stream_from_file(
                                 out_tmp.into_file(),
-                                &entry.name,
-                                Some(loc.crc32),
-                                None,
-                                loc.data_size,
+                                crate::rar::VerifyData {
+                                    name: &entry.name,
+                                    expected_crc: Some(loc.crc32),
+                                    expected_blake2: None,
+                                    compressed_size: loc.data_size,
+                                },
                                 &mut sink,
                                 &progress,
                                 limits,
@@ -1287,9 +1301,15 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for Rar4Archive<R> {
                     continue;
                 };
                 let mut buf = Vec::new();
-                let bytes =
-                    Rar4Archive::extract(self, &entry, &mut buf, progress.clone(), password, limits)
-                        .await?;
+                let bytes = Rar4Archive::extract(
+                    self,
+                    &entry,
+                    &mut buf,
+                    progress.clone(),
+                    password,
+                    limits,
+                )
+                .await?;
                 use std::io::Write;
                 sync_sink
                     .write_all(&buf)

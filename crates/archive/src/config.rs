@@ -1,6 +1,6 @@
 //! User-facing configuration for opening archives.
 
-use archive_core::{CodecConfig, ResourceLimits};
+use archive_core::{CodecConfig, PathPolicy, ResourceLimits};
 
 /// Product-facing configuration — what a consumer can tune without
 /// touching parser or codec internals.
@@ -8,4 +8,5 @@ use archive_core::{CodecConfig, ResourceLimits};
 pub struct ArchiveConfig {
     pub limits: ResourceLimits,
     pub codec: CodecConfig,
+    pub path_policy: PathPolicy,
 }

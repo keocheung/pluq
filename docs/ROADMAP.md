@@ -5,7 +5,6 @@
 
 ## Phase 5: Security Hardening & Release
 - [ ] **`snipe feedback`** — open GitHub issues URL in default browser. Trivial.
-- [ ] Path traversal guard — currently only in `archive-cli/src/main.rs` (Get handler). Move into `archive-core` so all extraction paths are protected, not just the CLI.
 - [ ] Symlink target verification to ensure links stay within the output directory.
 - [ ] Cross-platform release pipeline (GitHub Actions).
 - [ ] HTTP fingerprint enrichment (ETag + Last-Modified from HEAD response) — *optional stretch goal*.

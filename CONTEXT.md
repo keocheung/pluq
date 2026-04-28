@@ -3,8 +3,8 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 5 — Security Hardening & Release
-* **Current Active Task:** [HANDOVER]
-* **Baseline:** B1 complete — ResourceLimits + CodecConfig enforced end-to-end; ArchiveConfig public on Archive::open_reader; CLI wires defaults.
+* **Current Active Task:** Step 2 — archive-cache crate refactor
+* **Baseline:** Path traversal guard centralized in archive-core (PathPolicy: Sanitize default / Strict opt-in); CLI duplicate removed.
 
 
 ---

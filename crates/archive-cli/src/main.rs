@@ -134,7 +134,9 @@ async fn main() {
     });
 
     let token_store = archive_auth::TokenStore::load_default()
-        .inspect_err(|e| warn!(error = %e, "failed to load OAuth token store; continuing without OAuth"))
+        .inspect_err(
+            |e| warn!(error = %e, "failed to load OAuth token store; continuing without OAuth"),
+        )
         .ok()
         .map(std::sync::Arc::new);
 
@@ -170,7 +172,10 @@ fn source_config(token_store: Option<Arc<archive_auth::TokenStore>>) -> SourceCo
     cfg
 }
 
-async fn run_home(_cancel: Arc<AtomicBool>, token_store: Option<Arc<archive_auth::TokenStore>>) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_home(
+    _cancel: Arc<AtomicBool>,
+    token_store: Option<Arc<archive_auth::TokenStore>>,
+) -> Result<(), Box<dyn std::error::Error>> {
     tui::run_home(token_store).await
 }
 
@@ -265,8 +270,7 @@ async fn run_subcommand(
 
             tokio::fs::create_dir_all(&output_dir).await?;
 
-            // Pre-filter: drop directories, apply glob (if any), reject unsafe paths.
-            // CLI-local path traversal guard (core-level sanitization is a future phase).
+            // Pre-filter: drop directories, apply glob (if any).
             let safe_entries: Vec<&ArchiveEntry> = entries
                 .iter()
                 .copied()
@@ -274,15 +278,6 @@ async fn run_subcommand(
                 .filter(|e| match &pattern {
                     Some(p) => glob_matches(p, &e.name),
                     None => true,
-                })
-                .filter(|e| {
-                    let safe = !e.name.split('/').any(|seg| seg == "..")
-                        && !e.name.starts_with('/')
-                        && !e.name.starts_with('\\');
-                    if !safe {
-                        eprintln!("  SKIP {} (unsafe path)", e.name);
-                    }
-                    safe
                 })
                 .collect();
 
@@ -295,16 +290,6 @@ async fn run_subcommand(
                     return Ok(());
                 }
             }
-
-            let matched_count = entries
-                .iter()
-                .filter(|e| !e.is_directory)
-                .filter(|e| match &pattern {
-                    Some(p) => glob_matches(p, &e.name),
-                    None => true,
-                })
-                .count();
-            let skipped = matched_count - safe_entries.len();
 
             let mut reporter = cli_progress::CliProgressReporter::new(cancel.clone());
             reporter.set_total_entries(safe_entries.len() as u64);
@@ -326,9 +311,6 @@ async fn run_subcommand(
                 .extract_selected(&safe_entries, sink_factory, progress, None)
                 .await?;
 
-            if skipped > 0 {
-                eprintln!("\n  {skipped} file(s) skipped (unsafe paths)");
-            }
             if !batch.failed.is_empty() {
                 eprintln!("  {} file(s) failed:", batch.failed.len());
                 for (name, err) in &batch.failed {
@@ -546,10 +528,8 @@ mod tests {
         ));
 
         // snipe get file.zip *.jpg -o out/ --all
-        let cli = Cli::try_parse_from([
-            "snipe", "get", "file.zip", "*.jpg", "-o", "out/", "--all",
-        ])
-        .unwrap();
+        let cli = Cli::try_parse_from(["snipe", "get", "file.zip", "*.jpg", "-o", "out/", "--all"])
+            .unwrap();
         assert!(matches!(
             cli.command,
             Some(Command::Get { ref source, glob: Some(ref g), output: Some(ref o), all: true })
@@ -635,7 +615,9 @@ mod tests {
         let cli = Cli::try_parse_from(["snipe", "auth", "list"]).unwrap();
         assert!(matches!(
             cli.command,
-            Some(Command::Auth { action: auth_cmd::AuthAction::List })
+            Some(Command::Auth {
+                action: auth_cmd::AuthAction::List
+            })
         ));
     }
 
@@ -658,8 +640,12 @@ mod tests {
 
     #[test]
     fn test_cli_parsing_auth_with_timeout() {
-        let cli = Cli::try_parse_from(["snipe", "auth", "add", "gdrive", "--timeout", "60"]).unwrap();
-        if let Some(Command::Auth { action: auth_cmd::AuthAction::Add { timeout, .. } }) = cli.command {
+        let cli =
+            Cli::try_parse_from(["snipe", "auth", "add", "gdrive", "--timeout", "60"]).unwrap();
+        if let Some(Command::Auth {
+            action: auth_cmd::AuthAction::Add { timeout, .. },
+        }) = cli.command
+        {
             assert_eq!(timeout, 60);
         } else {
             panic!("expected Auth::Add with timeout=60");

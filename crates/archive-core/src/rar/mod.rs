@@ -25,6 +25,13 @@ use tracing::debug;
 use crate::core_error::CoreError;
 use crate::progress::ProgressReporter;
 
+pub(crate) struct VerifyData<'a> {
+    pub name: &'a str,
+    pub expected_crc: Option<u32>,
+    pub expected_blake2: Option<[u8; 32]>,
+    pub compressed_size: u64,
+}
+
 /// Stream a file on disk through CRC32 + BLAKE2sp verification into `sink`,
 /// 256 KiB at a time. Hashes are computed incrementally so RAM use is bounded
 /// by the buffer size regardless of file length.
@@ -34,10 +41,7 @@ use crate::progress::ProgressReporter;
 /// need atomic writes must wrap `sink` accordingly.
 pub(crate) async fn verify_and_stream_from_file<W: AsyncWrite + Send + Unpin>(
     mut file: std::fs::File,
-    entry_name: &str,
-    expected_crc: Option<u32>,
-    expected_blake2: Option<[u8; 32]>,
-    compressed_size: u64,
+    verify: VerifyData<'_>,
     sink: &mut W,
     progress: &Arc<Mutex<dyn ProgressReporter>>,
     limits: &crate::ResourceLimits,
@@ -68,10 +72,10 @@ pub(crate) async fn verify_and_stream_from_file<W: AsyncWrite + Send + Unpin>(
         }
 
         let chunk = &buf[..n];
-        if expected_crc.is_some() {
+        if verify.expected_crc.is_some() {
             crc_hasher.update(chunk);
         }
-        if expected_blake2.is_some() {
+        if verify.expected_blake2.is_some() {
             blake_state.update(chunk);
         }
 
@@ -85,8 +89,8 @@ pub(crate) async fn verify_and_stream_from_file<W: AsyncWrite + Send + Unpin>(
 
         if !ratio_warned {
             ratio_warned = limits.check_extraction_limits(
-                entry_name,
-                compressed_size,
+                verify.name,
+                verify.compressed_size,
                 total_bytes,
                 progress,
                 true,
@@ -94,8 +98,8 @@ pub(crate) async fn verify_and_stream_from_file<W: AsyncWrite + Send + Unpin>(
             )?;
         } else {
             limits.check_extraction_limits(
-                entry_name,
-                compressed_size,
+                verify.name,
+                verify.compressed_size,
                 total_bytes,
                 progress,
                 true,
@@ -105,45 +109,45 @@ pub(crate) async fn verify_and_stream_from_file<W: AsyncWrite + Send + Unpin>(
     }
 
     // Finalize hashes and compare.
-    if let Some(expected) = expected_crc {
+    if let Some(expected) = verify.expected_crc {
         let actual = crc_hasher.finalize();
         if actual != expected {
             progress
                 .lock()
                 .unwrap()
-                .on_entry_complete(entry_name, false);
+                .on_entry_complete(verify.name, false);
             return Err(CoreError::CrcMismatch {
-                entry: entry_name.to_owned(),
+                entry: verify.name.to_owned(),
                 expected,
                 actual,
             });
         }
     }
 
-    if let Some(expected) = expected_blake2 {
+    if let Some(expected) = verify.expected_blake2 {
         let actual = blake_state.finalize();
         if actual.as_bytes() != expected {
             progress
                 .lock()
                 .unwrap()
-                .on_entry_complete(entry_name, false);
+                .on_entry_complete(verify.name, false);
             return Err(CoreError::BitstreamError {
-                detail: format!("BLAKE2sp hash mismatch for '{entry_name}'"),
+                detail: format!("BLAKE2sp hash mismatch for '{}'", verify.name),
             });
         }
     }
 
-    progress.lock().unwrap().on_entry_complete(entry_name, true);
+    progress
+        .lock()
+        .unwrap()
+        .on_entry_complete(verify.name, true);
     Ok(total_bytes)
 }
 
 /// Blocking version of [`verify_and_stream_from_file`] for use inside `spawn_blocking`.
 pub(crate) fn verify_and_stream_from_file_sync<W: Write>(
     mut file: std::fs::File,
-    entry_name: &str,
-    expected_crc: Option<u32>,
-    expected_blake2: Option<[u8; 32]>,
-    compressed_size: u64,
+    verify: VerifyData<'_>,
     sink: &mut W,
     progress: &Arc<Mutex<dyn ProgressReporter>>,
     limits: &crate::ResourceLimits,
@@ -170,10 +174,10 @@ pub(crate) fn verify_and_stream_from_file_sync<W: Write>(
         }
 
         let chunk = &buf[..n];
-        if expected_crc.is_some() {
+        if verify.expected_crc.is_some() {
             crc_hasher.update(chunk);
         }
-        if expected_blake2.is_some() {
+        if verify.expected_blake2.is_some() {
             blake_state.update(chunk);
         }
 
@@ -186,8 +190,8 @@ pub(crate) fn verify_and_stream_from_file_sync<W: Write>(
 
         if !ratio_warned {
             ratio_warned = limits.check_extraction_limits(
-                entry_name,
-                compressed_size,
+                verify.name,
+                verify.compressed_size,
                 total_bytes,
                 progress,
                 true,
@@ -195,8 +199,8 @@ pub(crate) fn verify_and_stream_from_file_sync<W: Write>(
             )?;
         } else {
             limits.check_extraction_limits(
-                entry_name,
-                compressed_size,
+                verify.name,
+                verify.compressed_size,
                 total_bytes,
                 progress,
                 true,
@@ -206,35 +210,38 @@ pub(crate) fn verify_and_stream_from_file_sync<W: Write>(
     }
 
     // Finalize hashes and compare.
-    if let Some(expected) = expected_crc {
+    if let Some(expected) = verify.expected_crc {
         let actual = crc_hasher.finalize();
         if actual != expected {
             progress
                 .lock()
                 .unwrap()
-                .on_entry_complete(entry_name, false);
+                .on_entry_complete(verify.name, false);
             return Err(CoreError::CrcMismatch {
-                entry: entry_name.to_owned(),
+                entry: verify.name.to_owned(),
                 expected,
                 actual,
             });
         }
     }
 
-    if let Some(expected) = expected_blake2 {
+    if let Some(expected) = verify.expected_blake2 {
         let actual = blake_state.finalize();
         if actual.as_bytes() != expected {
             progress
                 .lock()
                 .unwrap()
-                .on_entry_complete(entry_name, false);
+                .on_entry_complete(verify.name, false);
             return Err(CoreError::BitstreamError {
-                detail: format!("BLAKE2sp hash mismatch for '{entry_name}'"),
+                detail: format!("BLAKE2sp hash mismatch for '{}'", verify.name),
             });
         }
     }
 
-    progress.lock().unwrap().on_entry_complete(entry_name, true);
+    progress
+        .lock()
+        .unwrap()
+        .on_entry_complete(verify.name, true);
     Ok(total_bytes)
 }
 
@@ -882,8 +889,15 @@ impl<R: ReadAt> RarArchive<R> {
             }
 
             info!(entries = work.len(), "RAR extract_all: local path");
-            return extract_all_via_unrar(path.clone(), work, sink_factory, progress, password, limits)
-                .await;
+            return extract_all_via_unrar(
+                path.clone(),
+                work,
+                sink_factory,
+                progress,
+                password,
+                limits,
+            )
+            .await;
         }
 
         // Cloud path: use streaming splitter pipeline.
@@ -1085,10 +1099,12 @@ impl<R: ReadAt> RarArchive<R> {
                         if let Some(mut sink) = sink_factory(entry) {
                             let verify_res = verify_and_stream_from_file(
                                 out_tmp.into_file(),
-                                &entry.name,
-                                loc.crc32,
-                                loc.blake2_hash,
-                                loc.data_size,
+                                VerifyData {
+                                    name: &entry.name,
+                                    expected_crc: loc.crc32,
+                                    expected_blake2: loc.blake2_hash,
+                                    compressed_size: loc.data_size,
+                                },
                                 &mut sink,
                                 &progress,
                                 limits,
@@ -1414,9 +1430,10 @@ impl<R: ReadAt> RarArchive<R> {
     ) -> Result<u64, CoreError> {
         if let Some(path) = &self.local_path {
             debug!(name = %entry.name, path = %path.display(), "unrar local path");
-            return self
-                .extract_via_unrar_local(entry, loc, path, sink, progress, password, limits)
-                .await;
+            return Self::extract_via_unrar_local(
+                entry, loc, path, sink, progress, password, limits,
+            )
+            .await;
         }
         debug!(name = %entry.name, "unrar cloud path (synthetic archive)");
         self.extract_via_unrar_cloud(entry, loc, sink, progress, password, limits)
@@ -1429,7 +1446,6 @@ impl<R: ReadAt> RarArchive<R> {
     /// until the target entry is found, then reads all decompressed bytes into
     /// memory via `unrar`.  CRC32 and BLAKE2sp are verified after decompression.
     async fn extract_via_unrar_local<W: AsyncWrite + Send + Unpin>(
-        &self,
         entry: &ArchiveEntry,
         loc: &RarEntryLocation,
         archive_path: &std::path::Path,
@@ -1497,10 +1513,12 @@ impl<R: ReadAt> RarArchive<R> {
 
         verify_and_stream_from_file(
             out_tmp.into_file(),
-            &entry_name,
-            expected_crc,
-            expected_blake2,
-            loc.data_size,
+            VerifyData {
+                name: &entry_name,
+                expected_crc,
+                expected_blake2,
+                compressed_size: loc.data_size,
+            },
             sink,
             &progress,
             limits,
@@ -1573,10 +1591,12 @@ impl<R: ReadAt> RarArchive<R> {
 
         verify_and_stream_from_file(
             out_tmp.into_file(),
-            &entry_name,
-            expected_crc,
-            expected_blake2,
-            loc.data_size,
+            VerifyData {
+                name: &entry_name,
+                expected_crc,
+                expected_blake2,
+                compressed_size: loc.data_size,
+            },
             sink,
             &progress,
             limits,
@@ -1847,8 +1867,15 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for RarArchive<R> {
                 )?;
             }
 
-            return extract_all_via_unrar(path.clone(), work, sink_factory, progress, password, limits)
-                .await;
+            return extract_all_via_unrar(
+                path.clone(),
+                work,
+                sink_factory,
+                progress,
+                password,
+                limits,
+            )
+            .await;
         }
 
         // Cloud path: pipelined streaming splitter.
@@ -2195,10 +2222,12 @@ where
                     // Passes the opened file handle to avoid Permission Denied on reopen.
                     let bytes = verify_and_stream_from_file_sync(
                         out_tmp.into_file(),
-                        &name,
-                        loc.crc32,
-                        loc.blake2_hash,
-                        loc.data_size,
+                        VerifyData {
+                            name: &name,
+                            expected_crc: loc.crc32,
+                            expected_blake2: loc.blake2_hash,
+                            compressed_size: loc.data_size,
+                        },
                         &mut sink,
                         &progress,
                         &limits_clone,
@@ -2242,8 +2271,14 @@ where
     let mut total_bytes: u64 = 0;
 
     while let Some(msg) = rx.recv().await {
-        let result =
-            extract_single_snippet(&msg, &mut sink_factory, &progress, password.as_deref(), &limits).await;
+        let result = extract_single_snippet(
+            &msg,
+            &mut sink_factory,
+            &progress,
+            password.as_deref(),
+            &limits,
+        )
+        .await;
 
         // Always clean up snippet, even on error.
         let _ = tokio::fs::remove_file(&msg.path).await;
@@ -2289,7 +2324,7 @@ where
     let progress_sync = progress.clone();
     let data_size = msg.data_size;
     let snippet_path_clone = snippet_path.clone();
-    
+
     tokio::task::spawn_blocking(move || -> Result<u64, CoreError> {
         let out_tmp = tempfile::NamedTempFile::new().map_err(|e| CoreError::BitstreamError {
             detail: format!("failed to create extraction temp file: {e}"),
@@ -2317,10 +2352,12 @@ where
         // Passes the opened file handle to avoid Permission Denied on reopen.
         verify_and_stream_from_file_sync(
             out_tmp.into_file(),
-            &entry_name,
-            expected_crc,
-            expected_blake2,
-            data_size,
+            VerifyData {
+                name: &entry_name,
+                expected_crc,
+                expected_blake2,
+                compressed_size: data_size,
+            },
             &mut sink,
             &progress_sync,
             &limits_clone,
@@ -2808,7 +2845,16 @@ mod tests {
         let entry = &rar.entries()[0];
         let mut out = Vec::new();
         let progress = Arc::new(Mutex::new(()));
-        let n = rar.extract(entry, &mut out, progress, None, &crate::ResourceLimits::default()).await.unwrap();
+        let n = rar
+            .extract(
+                entry,
+                &mut out,
+                progress,
+                None,
+                &crate::ResourceLimits::default(),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(n, data.len() as u64);
         assert_eq!(out.as_slice(), data.as_ref());
@@ -2822,7 +2868,16 @@ mod tests {
         let entry = &rar.entries()[0];
         let mut out = Vec::new();
         let progress = Arc::new(Mutex::new(()));
-        let n = rar.extract(entry, &mut out, progress, None, &crate::ResourceLimits::default()).await.unwrap();
+        let n = rar
+            .extract(
+                entry,
+                &mut out,
+                progress,
+                None,
+                &crate::ResourceLimits::default(),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(n, 0);
         assert!(out.is_empty());
@@ -2844,7 +2899,15 @@ mod tests {
         let entry = &rar.entries()[0];
         let mut out = Vec::new();
         let progress = Arc::new(Mutex::new(()));
-        let result = rar.extract(entry, &mut out, progress, None, &crate::ResourceLimits::default()).await;
+        let result = rar
+            .extract(
+                entry,
+                &mut out,
+                progress,
+                None,
+                &crate::ResourceLimits::default(),
+            )
+            .await;
 
         assert!(
             matches!(result, Err(CoreError::CrcMismatch { .. })),
@@ -2881,7 +2944,15 @@ mod tests {
         assert!(!entry.is_encrypted);
         let mut out = Vec::new();
         let progress = Arc::new(Mutex::new(()));
-        rar.extract(entry, &mut out, progress, None, &crate::ResourceLimits::default()).await.unwrap();
+        rar.extract(
+            entry,
+            &mut out,
+            progress,
+            None,
+            &crate::ResourceLimits::default(),
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -2895,7 +2966,13 @@ mod tests {
         let mut out = Vec::new();
         let progress = Arc::new(Mutex::new(()));
         let err = rar
-            .extract(&entry, &mut out, progress, None, &crate::ResourceLimits::default())
+            .extract(
+                &entry,
+                &mut out,
+                progress,
+                None,
+                &crate::ResourceLimits::default(),
+            )
             .await
             .unwrap_err();
         assert!(
@@ -2920,7 +2997,13 @@ mod tests {
         let mut out = Vec::new();
         let progress = Arc::new(Mutex::new(()));
         let n = rar
-            .extract(&dir_entry, &mut out, progress, None, &crate::ResourceLimits::default())
+            .extract(
+                &dir_entry,
+                &mut out,
+                progress,
+                None,
+                &crate::ResourceLimits::default(),
+            )
             .await
             .unwrap();
         assert_eq!(n, 0);
@@ -2963,9 +3046,15 @@ mod tests {
         let entry = &rar.entries()[0];
         let reporter = Arc::new(Mutex::new(RecordingReporter::new()));
         let mut out = Vec::new();
-        rar.extract(entry, &mut out, reporter.clone(), None, &crate::ResourceLimits::default())
-            .await
-            .unwrap();
+        rar.extract(
+            entry,
+            &mut out,
+            reporter.clone(),
+            None,
+            &crate::ResourceLimits::default(),
+        )
+        .await
+        .unwrap();
 
         let r = reporter.lock().unwrap();
         assert_eq!(r.started.len(), 1);
@@ -3001,7 +3090,15 @@ mod tests {
         let entry = &rar.entries()[0];
         let progress = Arc::new(Mutex::new(CancelAfterFirstUpdate));
         let mut out = Vec::new();
-        let result = rar.extract(entry, &mut out, progress, None, &crate::ResourceLimits::default()).await;
+        let result = rar
+            .extract(
+                entry,
+                &mut out,
+                progress,
+                None,
+                &crate::ResourceLimits::default(),
+            )
+            .await;
 
         assert!(
             matches!(result, Err(CoreError::Cancelled)),

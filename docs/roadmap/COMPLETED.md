@@ -76,3 +76,4 @@
 - [x] **Anti-bomb safeguards** — Implementation of `ResourceLimits` (max entries, header size, total unpacked, per-entry unpacked, and compression ratio guards). Enforced at the boundary of `ArchiveReader` in ZIP, RAR5, and RAR4 parsers.
 - [x] **LZMA dictionary cap** — Memory-safe decoding safeguard that rejects or caps LZMA dictionary sizes to prevent OOM attacks (e.g., a 10KB archive requesting 4GB decompression buffer). Threaded through the `CodecConfig` layer.
 - [x] **Consistent guard enforcement** — Limits are threaded through all extraction paths (`extract`, `test`, `extract_selected`, `extract_all_streaming`) across both `archive-core` readers and the high-level `Archive` facade.
+- [x] **Path traversal guard** — Centralized path safety logic in `archive-core` via `PathPolicy` (Sanitize/Strict). Strips `..`, absolute roots, drive/UNC prefixes. Enforced in the state layer across all extraction methods. Ad-hoc CLI duplicate removed.

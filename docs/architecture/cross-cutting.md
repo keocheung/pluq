@@ -119,6 +119,8 @@ built.
 
 ## Path Traversal Protection
 
+**Status:** implemented
+
 Two modes (no third "Relaxed" mode — there is no legitimate use case for
 writing outside the output directory):
 

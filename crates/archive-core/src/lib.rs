@@ -19,9 +19,11 @@ pub use codec::CompressionMethod;
 
 // Data types.
 pub mod limits;
+pub mod path_safety;
 pub use core_error::{CoreError, PasswordDetectionMethod};
 pub use entry::ArchiveEntry;
 pub use limits::{CodecConfig, LimitMode, RatioLimit, ResourceLimits};
+pub use path_safety::{PathDecision, PathPolicy, evaluate_path};
 
 // Progress reporting + cancellation.
 pub use progress::ProgressReporter;
