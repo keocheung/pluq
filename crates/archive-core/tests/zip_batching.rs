@@ -117,7 +117,10 @@ async fn zip_extract_selected_max_total_unpacked_rejected() {
         .await;
 
     assert!(
-        matches!(result, Err(archive_core::CoreError::ResourceLimitExceeded { .. })),
+        matches!(
+            result,
+            Err(archive_core::CoreError::ResourceLimitExceeded { .. })
+        ),
         "expected ResourceLimitExceeded for max_total_unpacked, got: {:?}",
         result
     );

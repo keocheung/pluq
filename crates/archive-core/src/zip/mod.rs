@@ -1210,9 +1210,13 @@ mod tests {
         let zip = ZipArchive::open(reader, &crate::ResourceLimits::default())
             .await
             .unwrap();
-        zip.test(&zip.entries()[0], Arc::new(Mutex::new(())), &crate::ResourceLimits::default())
-            .await
-            .unwrap();
+        zip.test(
+            &zip.entries()[0],
+            Arc::new(Mutex::new(())),
+            &crate::ResourceLimits::default(),
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1878,7 +1882,7 @@ mod tests {
         let zip = ZipArchive::open(reader, &crate::ResourceLimits::default())
             .await
             .unwrap();
-        
+
         let limits = crate::ResourceLimits {
             ratio_limit: Some(crate::limits::RatioLimit {
                 max_ratio: 1000,
@@ -1899,9 +1903,18 @@ mod tests {
             )
             .await;
 
-        assert!(result.is_ok(), "warn mode must not block extraction, got err: {:?}", result.err());
         assert!(
-            reporter.lock().unwrap().warnings.iter().any(|w| w.contains("suspicious compression ratio")),
+            result.is_ok(),
+            "warn mode must not block extraction, got err: {:?}",
+            result.err()
+        );
+        assert!(
+            reporter
+                .lock()
+                .unwrap()
+                .warnings
+                .iter()
+                .any(|w| w.contains("suspicious compression ratio")),
             "warning was not recorded by reporter"
         );
     }

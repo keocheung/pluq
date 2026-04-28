@@ -1,4 +1,4 @@
-use archive_auth::{AuthError, StoredToken, DROPBOX_CONFIG};
+use archive_auth::{AuthError, DROPBOX_CONFIG, StoredToken};
 
 /// Run the PKCE loopback OAuth flow for Dropbox and return a fresh token.
 pub async fn authenticate(timeout_secs: u64) -> Result<StoredToken, AuthError> {

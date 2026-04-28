@@ -1,9 +1,9 @@
-use std::time::Duration;
 use oauth2::basic::BasicClient;
 use oauth2::{
-    AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge,
-    RedirectUrl, RefreshToken, Scope, TokenResponse, TokenUrl,
+    AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge, RedirectUrl,
+    RefreshToken, Scope, TokenResponse, TokenUrl,
 };
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::time::timeout;
@@ -29,9 +29,17 @@ pub async fn authenticate(
 
     // 2. Build oauth2::BasicClient
     let mut client = BasicClient::new(ClientId::new(client_id.to_string()))
-        .set_auth_uri(AuthUrl::new(config.auth_url.to_string()).map_err(|e| AuthError::OAuth(e.to_string()))?)
-        .set_token_uri(TokenUrl::new(config.token_url.to_string()).map_err(|e| AuthError::OAuth(e.to_string()))?)
-        .set_redirect_uri(RedirectUrl::new(redirect_url).map_err(|e| AuthError::OAuth(e.to_string()))?);
+        .set_auth_uri(
+            AuthUrl::new(config.auth_url.to_string())
+                .map_err(|e| AuthError::OAuth(e.to_string()))?,
+        )
+        .set_token_uri(
+            TokenUrl::new(config.token_url.to_string())
+                .map_err(|e| AuthError::OAuth(e.to_string()))?,
+        )
+        .set_redirect_uri(
+            RedirectUrl::new(redirect_url).map_err(|e| AuthError::OAuth(e.to_string()))?,
+        );
 
     if let Some(secret) = client_secret {
         client = client.set_client_secret(ClientSecret::new(secret.to_string()));
@@ -57,39 +65,59 @@ pub async fn authenticate(
 
     // 4. Open browser
     if let Err(e) = webbrowser::open(auth_url.as_str()) {
-        eprintln!("Failed to open browser: {}. Please open this URL manually:", e);
+        eprintln!(
+            "Failed to open browser: {}. Please open this URL manually:",
+            e
+        );
         eprintln!("{}", auth_url);
     }
 
     // 5. Receive callback
     let callback_result = timeout(Duration::from_secs(timeout_secs), async {
-        let (mut stream, _) = listener.accept().await.map_err(|e| AuthError::Callback(e.to_string()))?;
-        
+        let (mut stream, _) = listener
+            .accept()
+            .await
+            .map_err(|e| AuthError::Callback(e.to_string()))?;
+
         let mut buffer = [0; 4096];
-        let n = stream.read(&mut buffer).await.map_err(|e| AuthError::Callback(e.to_string()))?;
+        let n = stream
+            .read(&mut buffer)
+            .await
+            .map_err(|e| AuthError::Callback(e.to_string()))?;
         let request = String::from_utf8_lossy(&buffer[..n]);
-        
+
         // Very basic HTTP parsing
-        let first_line = request.lines().next().ok_or_else(|| AuthError::Callback("Empty request".to_string()))?;
+        let first_line = request
+            .lines()
+            .next()
+            .ok_or_else(|| AuthError::Callback("Empty request".to_string()))?;
         let parts: Vec<&str> = first_line.split_whitespace().collect();
         if parts.len() < 2 {
             return Err(AuthError::Callback("Invalid request line".to_string()));
         }
-        
+
         let path = parts[1];
         let (code, state) = parse_callback_query(path)?;
-        
+
         if state != *csrf_token.secret() {
             return Err(AuthError::OAuth("CSRF token mismatch".to_string()));
         }
 
         let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n\
             <html><body><h1>Authenticated</h1><p>You can close this tab now.</p></body></html>";
-        stream.write_all(response.as_bytes()).await.map_err(|e| AuthError::Callback(e.to_string()))?;
-        stream.flush().await.map_err(|e| AuthError::Callback(e.to_string()))?;
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .map_err(|e| AuthError::Callback(e.to_string()))?;
+        stream
+            .flush()
+            .await
+            .map_err(|e| AuthError::Callback(e.to_string()))?;
 
         Ok(code)
-    }).await.map_err(|_| AuthError::Timeout { secs: timeout_secs })??;
+    })
+    .await
+    .map_err(|_| AuthError::Timeout { secs: timeout_secs })??;
 
     // 6. Exchange code for tokens
     let http_client = reqwest::ClientBuilder::new()
@@ -188,12 +216,13 @@ pub async fn refresh(
 }
 
 fn parse_callback_query(path: &str) -> Result<(String, String), AuthError> {
-    let url = Url::parse(&format!("http://localhost{}", path)).map_err(|_| AuthError::Callback("Invalid path".to_string()))?;
+    let url = Url::parse(&format!("http://localhost{}", path))
+        .map_err(|_| AuthError::Callback("Invalid path".to_string()))?;
     let pairs = url.query_pairs();
-    
+
     let mut code = None;
     let mut state = None;
-    
+
     for (k, v) in pairs {
         if k == "code" {
             code = Some(v.into_owned());
@@ -201,10 +230,12 @@ fn parse_callback_query(path: &str) -> Result<(String, String), AuthError> {
             state = Some(v.into_owned());
         }
     }
-    
+
     match (code, state) {
         (Some(c), Some(s)) => Ok((c, s)),
-        _ => Err(AuthError::Callback("Missing code or state in callback".to_string())),
+        _ => Err(AuthError::Callback(
+            "Missing code or state in callback".to_string(),
+        )),
     }
 }
 
@@ -247,8 +278,7 @@ mod tests {
 
         // ProviderOAuthConfig fields are &'static str; leak the dynamic URL for
         // the test (acceptable in test-only code).
-        let token_url: &'static str =
-            Box::leak(format!("{}/token", server.uri()).into_boxed_str());
+        let token_url: &'static str = Box::leak(format!("{}/token", server.uri()).into_boxed_str());
 
         let config = ProviderOAuthConfig {
             name: "test",

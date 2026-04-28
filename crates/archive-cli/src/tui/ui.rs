@@ -532,17 +532,20 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             } else {
                 None
             };
-            
-            let mut paras = vec![
-                ratatui::text::Line::from(ratatui::text::Span::styled(msg, Style::default().fg(Color::Red)))
-            ];
+
+            let mut paras = vec![ratatui::text::Line::from(ratatui::text::Span::styled(
+                msg,
+                Style::default().fg(Color::Red),
+            ))];
             if let Some(h) = hint {
                 paras.push(ratatui::text::Line::from(""));
-                paras.push(ratatui::text::Line::from(ratatui::text::Span::styled(h, Style::default().fg(Color::DarkGray))));
+                paras.push(ratatui::text::Line::from(ratatui::text::Span::styled(
+                    h,
+                    Style::default().fg(Color::DarkGray),
+                )));
             }
 
-            let para = Paragraph::new(paras)
-                .alignment(Alignment::Center);
+            let para = Paragraph::new(paras).alignment(Alignment::Center);
             frame.render_widget(para, chunks[2]);
 
             // Footer
@@ -564,8 +567,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             ])
             .split(area);
 
-            let header = Paragraph::new(format!(" Authenticating with {provider_name}"))
-                .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+            let header = Paragraph::new(format!(" Authenticating with {provider_name}")).style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            );
             frame.render_widget(header, chunks[0]);
 
             let sep = "─".repeat(area.width as usize);
@@ -573,7 +579,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             frame.render_widget(Paragraph::new(sep.clone()).style(sep_style), chunks[1]);
             frame.render_widget(Paragraph::new(sep).style(sep_style), chunks[3]);
 
-            let content = "  Browser opened. Waiting for approval...\n  Token will be saved on success.";
+            let content =
+                "  Browser opened. Waiting for approval...\n  Token will be saved on success.";
             let para = Paragraph::new(content)
                 .style(Style::default().fg(Color::White))
                 .alignment(Alignment::Left);
@@ -1321,11 +1328,7 @@ fn draw_bookmark_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {
     }
 }
 
-fn draw_auth_prompt(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    provider: &crate::auth_cmd::AuthProvider,
-) {
+fn draw_auth_prompt(frame: &mut Frame<'_>, area: Rect, provider: &crate::auth_cmd::AuthProvider) {
     let provider_name = match provider {
         crate::auth_cmd::AuthProvider::Gdrive => "Google Drive",
         crate::auth_cmd::AuthProvider::Dropbox => "Dropbox",
@@ -1367,10 +1370,14 @@ fn draw_auth_prompt(
         Constraint::Length(1), // line 2 (provider is private)
         Constraint::Length(1), // line 3 (blank)
         Constraint::Length(1), // line 4 (question + y/n)
-    ]).split(inner);
+    ])
+    .split(inner);
 
     let line2 = ratatui::text::Line::from(vec![
-        ratatui::text::Span::styled(format!(" {}", provider_name), Style::default().fg(Color::Cyan)),
+        ratatui::text::Span::styled(
+            format!(" {}", provider_name),
+            Style::default().fg(Color::Cyan),
+        ),
         ratatui::text::Span::raw(" file is private."),
     ]);
     frame.render_widget(Paragraph::new(line2), inner_chunks[1]);

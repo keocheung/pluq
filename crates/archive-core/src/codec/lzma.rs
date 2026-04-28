@@ -38,14 +38,14 @@ impl<R: Read + Send> LzmaDecoder<R> {
         let dict_size =
             u32::from_le_bytes([properties[1], properties[2], properties[3], properties[4]]) as u64;
 
-        if let Some(cap) = codec_config.max_lzma_dict_size {
-            if dict_size > cap {
-                return Err(CoreError::ResourceLimitExceeded {
-                    message: format!(
-                        "LZMA dictionary size {dict_size} bytes exceeds configured cap {cap} bytes"
-                    ),
-                });
-            }
+        if let Some(cap) = codec_config.max_lzma_dict_size
+            && dict_size > cap
+        {
+            return Err(CoreError::ResourceLimitExceeded {
+                message: format!(
+                    "LZMA dictionary size {dict_size} bytes exceeds configured cap {cap} bytes"
+                ),
+            });
         }
 
         // Reconstruct the "LZMA alone" format header:

@@ -123,32 +123,32 @@ impl ResourceLimits {
             });
         }
 
-        if let Some(ratio) = &self.ratio_limit {
-            if ratio.is_violation(compressed_size, uncompressed_size) {
-                let message = if is_dynamic {
-                    format!(
-                        "suspicious compression ratio for '{}': {} bytes from {} compressed",
-                        entry_name, uncompressed_size, compressed_size
-                    )
-                } else {
-                    format!(
-                        "entry '{}' compression ratio exceeds {}:1 (compressed={}, uncompressed={})",
-                        entry_name, ratio.max_ratio, compressed_size, uncompressed_size
-                    )
-                };
+        if let Some(ratio) = &self.ratio_limit
+            && ratio.is_violation(compressed_size, uncompressed_size)
+        {
+            let message = if is_dynamic {
+                format!(
+                    "suspicious compression ratio for '{}': {} bytes from {} compressed",
+                    entry_name, uncompressed_size, compressed_size
+                )
+            } else {
+                format!(
+                    "entry '{}' compression ratio exceeds {}:1 (compressed={}, uncompressed={})",
+                    entry_name, ratio.max_ratio, compressed_size, uncompressed_size
+                )
+            };
 
-                match ratio.mode {
-                    LimitMode::HardError => {
-                        return Err(crate::CoreError::ResourceLimitExceeded { message });
-                    }
-                    LimitMode::Warn => {
-                        if !skip_warn {
-                            progress.lock().unwrap().on_warning(&message);
-                        }
-                        return Ok(true);
-                    }
-                    LimitMode::Ignore => {}
+            match ratio.mode {
+                LimitMode::HardError => {
+                    return Err(crate::CoreError::ResourceLimitExceeded { message });
                 }
+                LimitMode::Warn => {
+                    if !skip_warn {
+                        progress.lock().unwrap().on_warning(&message);
+                    }
+                    return Ok(true);
+                }
+                LimitMode::Ignore => {}
             }
         }
         Ok(false)

@@ -1,7 +1,7 @@
-use std::sync::Arc;
 use archive_core::{CachingReadAt, HttpReadAt, LocalReadAt};
 use archive_dropbox::{self, DropboxAuth, DropboxReadAt};
 use archive_gdrive::{self, GDriveAuth, GoogleDriveReadAt};
+use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::config::SourceConfig;
@@ -59,10 +59,16 @@ pub fn resolve(input: &str, config: &SourceConfig) -> Result<ResolvedSource, Sou
 }
 
 pub(crate) fn resolve_gdrive_auth(config: &SourceConfig) -> Result<GDriveAuth, SourceError> {
-    if config.token_store.as_ref().and_then(|s| s.get("gdrive")).is_some()
+    if config
+        .token_store
+        .as_ref()
+        .and_then(|s| s.get("gdrive"))
+        .is_some()
         && archive_gdrive::oauth_client_id().is_none()
     {
-        warn!("Google Drive: OAuth token found but no client ID configured — falling back to API key. Refresh will not work.");
+        warn!(
+            "Google Drive: OAuth token found but no client ID configured — falling back to API key. Refresh will not work."
+        );
     }
 
     // Prefer OAuth when both a stored token and a client ID exist.
@@ -72,7 +78,12 @@ pub(crate) fn resolve_gdrive_auth(config: &SourceConfig) -> Result<GDriveAuth, S
     {
         let client_secret = archive_gdrive::oauth_client_secret();
         info!("Google Drive: using OAuth credentials");
-        return Ok(GDriveAuth::oauth(token, Arc::clone(store), client_id, client_secret));
+        return Ok(GDriveAuth::oauth(
+            token,
+            Arc::clone(store),
+            client_id,
+            client_secret,
+        ));
     }
 
     // Fallback to API key.
@@ -89,10 +100,16 @@ pub(crate) fn resolve_gdrive_auth(config: &SourceConfig) -> Result<GDriveAuth, S
 }
 
 pub(crate) fn resolve_dropbox_auth(config: &SourceConfig) -> Result<DropboxAuth, SourceError> {
-    if config.token_store.as_ref().and_then(|s| s.get("dropbox")).is_some()
+    if config
+        .token_store
+        .as_ref()
+        .and_then(|s| s.get("dropbox"))
+        .is_some()
         && archive_dropbox::oauth_client_id().is_none()
     {
-        warn!("Dropbox: OAuth token found but no client ID configured — falling back to app credentials. Refresh will not work.");
+        warn!(
+            "Dropbox: OAuth token found but no client ID configured — falling back to app credentials. Refresh will not work."
+        );
     }
 
     if let Some(store) = &config.token_store
@@ -101,7 +118,12 @@ pub(crate) fn resolve_dropbox_auth(config: &SourceConfig) -> Result<DropboxAuth,
     {
         let client_secret = archive_dropbox::oauth_client_secret();
         info!("Dropbox: using OAuth credentials");
-        return Ok(DropboxAuth::oauth(token, Arc::clone(store), client_id, client_secret));
+        return Ok(DropboxAuth::oauth(
+            token,
+            Arc::clone(store),
+            client_id,
+            client_secret,
+        ));
     }
 
     if let Some((key, secret)) = archive_dropbox::app_credentials() {
@@ -197,24 +219,29 @@ mod tests {
     fn gdrive_url_with_oauth_token_uses_oauth_variant() {
         let dir = tempdir().unwrap();
         let store = archive_auth::TokenStore::load_from(dir.path().join("tokens.json")).unwrap();
-        store.save("gdrive", archive_auth::StoredToken {
-            access_token: "test_access".into(),
-            refresh_token: Some("test_refresh".into()),
-            expires_at: Some(1234567890),
-            scopes: vec![],
-        }).unwrap();
-        
+        store
+            .save(
+                "gdrive",
+                archive_auth::StoredToken {
+                    access_token: "test_access".into(),
+                    refresh_token: Some("test_refresh".into()),
+                    expires_at: Some(1234567890),
+                    scopes: vec![],
+                },
+            )
+            .unwrap();
+
         let config = SourceConfig::new().with_token_store(Arc::new(store));
-        
+
         let _guard = ENV_MUTEX.lock().unwrap();
         unsafe {
             std::env::set_var("ARCHIVE_SNIPER_GDRIVE_CLIENT_ID", "test-client-id");
             std::env::remove_var("ARCHIVE_SNIPER_GDRIVE_KEY");
         }
-        
+
         let auth = resolve_gdrive_auth(&config).unwrap();
         assert!(matches!(auth, GDriveAuth::OAuth { .. }));
-        
+
         unsafe {
             std::env::remove_var("ARCHIVE_SNIPER_GDRIVE_CLIENT_ID");
         }
@@ -239,23 +266,28 @@ mod tests {
     fn gdrive_url_oauth_token_present_but_no_client_id_falls_back() {
         let dir = tempdir().unwrap();
         let store = archive_auth::TokenStore::load_from(dir.path().join("tokens.json")).unwrap();
-        store.save("gdrive", archive_auth::StoredToken {
-            access_token: "test_access".into(),
-            refresh_token: Some("test_refresh".into()),
-            expires_at: Some(1234567890),
-            scopes: vec![],
-        }).unwrap();
-        
+        store
+            .save(
+                "gdrive",
+                archive_auth::StoredToken {
+                    access_token: "test_access".into(),
+                    refresh_token: Some("test_refresh".into()),
+                    expires_at: Some(1234567890),
+                    scopes: vec![],
+                },
+            )
+            .unwrap();
+
         let config = SourceConfig::new().with_token_store(Arc::new(store));
         let _guard = ENV_MUTEX.lock().unwrap();
         unsafe {
             std::env::set_var("ARCHIVE_SNIPER_GDRIVE_KEY", "test-key");
             std::env::remove_var("ARCHIVE_SNIPER_GDRIVE_CLIENT_ID");
         }
-        
+
         let auth = resolve_gdrive_auth(&config).unwrap();
         assert!(matches!(auth, GDriveAuth::ApiKey(k) if k == "test-key"));
-        
+
         unsafe {
             std::env::remove_var("ARCHIVE_SNIPER_GDRIVE_KEY");
         }
@@ -265,25 +297,30 @@ mod tests {
     fn dropbox_url_with_oauth_token_uses_oauth_variant() {
         let dir = tempdir().unwrap();
         let store = archive_auth::TokenStore::load_from(dir.path().join("tokens.json")).unwrap();
-        store.save("dropbox", archive_auth::StoredToken {
-            access_token: "test_access".into(),
-            refresh_token: Some("test_refresh".into()),
-            expires_at: Some(1234567890),
-            scopes: vec![],
-        }).unwrap();
-        
+        store
+            .save(
+                "dropbox",
+                archive_auth::StoredToken {
+                    access_token: "test_access".into(),
+                    refresh_token: Some("test_refresh".into()),
+                    expires_at: Some(1234567890),
+                    scopes: vec![],
+                },
+            )
+            .unwrap();
+
         let config = SourceConfig::new().with_token_store(Arc::new(store));
-        
+
         let _guard = ENV_MUTEX.lock().unwrap();
         unsafe {
             std::env::set_var("ARCHIVE_SNIPER_DROPBOX_CLIENT_ID", "test-client-id");
             std::env::remove_var("ARCHIVE_SNIPER_DROPBOX_APP_KEY");
             std::env::remove_var("ARCHIVE_SNIPER_DROPBOX_APP_SECRET");
         }
-        
+
         let auth = resolve_dropbox_auth(&config).unwrap();
         assert!(matches!(auth, DropboxAuth::OAuth { .. }));
-        
+
         unsafe {
             std::env::remove_var("ARCHIVE_SNIPER_DROPBOX_CLIENT_ID");
         }
@@ -310,13 +347,18 @@ mod tests {
     fn dropbox_url_oauth_token_but_no_client_id_falls_back() {
         let dir = tempdir().unwrap();
         let store = archive_auth::TokenStore::load_from(dir.path().join("tokens.json")).unwrap();
-        store.save("dropbox", archive_auth::StoredToken {
-            access_token: "test_access".into(),
-            refresh_token: Some("test_refresh".into()),
-            expires_at: Some(1234567890),
-            scopes: vec![],
-        }).unwrap();
-        
+        store
+            .save(
+                "dropbox",
+                archive_auth::StoredToken {
+                    access_token: "test_access".into(),
+                    refresh_token: Some("test_refresh".into()),
+                    expires_at: Some(1234567890),
+                    scopes: vec![],
+                },
+            )
+            .unwrap();
+
         let config = SourceConfig::new().with_token_store(Arc::new(store));
         let _guard = ENV_MUTEX.lock().unwrap();
         unsafe {
@@ -324,10 +366,10 @@ mod tests {
             std::env::set_var("ARCHIVE_SNIPER_DROPBOX_APP_SECRET", "test-secret");
             std::env::remove_var("ARCHIVE_SNIPER_DROPBOX_CLIENT_ID");
         }
-        
+
         let auth = resolve_dropbox_auth(&config).unwrap();
         assert!(matches!(auth, DropboxAuth::AppCredentials { .. }));
-        
+
         unsafe {
             std::env::remove_var("ARCHIVE_SNIPER_DROPBOX_APP_KEY");
             std::env::remove_var("ARCHIVE_SNIPER_DROPBOX_APP_SECRET");
@@ -342,11 +384,14 @@ mod tests {
             std::env::remove_var("ARCHIVE_SNIPER_GDRIVE_KEY");
             std::env::remove_var("ARCHIVE_SNIPER_GDRIVE_CLIENT_ID");
         }
-        
+
         let auth = resolve_gdrive_auth(&config);
         assert!(matches!(
             auth,
-            Err(SourceError::NoCredentials { provider: "Google Drive", .. })
+            Err(SourceError::NoCredentials {
+                provider: "Google Drive",
+                ..
+            })
         ));
     }
 }

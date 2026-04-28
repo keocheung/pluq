@@ -56,7 +56,11 @@ impl GoogleDriveReadAt {
     fn authed_url(&self, path_and_query: &str) -> String {
         match &self.auth {
             GDriveAuth::ApiKey(k) => {
-                let sep = if path_and_query.contains('?') { '&' } else { '?' };
+                let sep = if path_and_query.contains('?') {
+                    '&'
+                } else {
+                    '?'
+                };
                 format!("{}{}{sep}key={}", self.api_base_url, path_and_query, k)
             }
             GDriveAuth::OAuth { .. } => {
@@ -106,26 +110,19 @@ impl GoogleDriveReadAt {
             })
         })?;
 
-        let new = archive_auth::refresh(
-            config,
-            client_id,
-            client_secret.as_deref(),
-            &refresh_tok,
-        )
-        .await
-        .map_err(|e| {
-            transport_error(GDriveError::TokenRefreshFailed {
-                reason: e.to_string(),
-            })
-        })?;
-
-        store
-            .save("gdrive", new.clone())
+        let new = archive_auth::refresh(config, client_id, client_secret.as_deref(), &refresh_tok)
+            .await
             .map_err(|e| {
                 transport_error(GDriveError::TokenRefreshFailed {
-                    reason: format!("failed to persist token: {e}"),
+                    reason: e.to_string(),
                 })
             })?;
+
+        store.save("gdrive", new.clone()).map_err(|e| {
+            transport_error(GDriveError::TokenRefreshFailed {
+                reason: format!("failed to persist token: {e}"),
+            })
+        })?;
 
         *w = new;
         Ok(w.access_token.clone())
@@ -424,7 +421,12 @@ mod tests {
         refresh_token: Option<&str>,
         store: Arc<TokenStore>,
     ) -> GDriveAuth {
-        make_oauth_auth_with_config(access_token, refresh_token, store, &archive_auth::GDRIVE_CONFIG)
+        make_oauth_auth_with_config(
+            access_token,
+            refresh_token,
+            store,
+            &archive_auth::GDRIVE_CONFIG,
+        )
     }
 
     /// Build an OAuth auth with a custom config — used to inject a mock token endpoint.
@@ -675,11 +677,19 @@ mod tests {
             .await;
 
         let (_dir, store) = temp_store();
-        let config = mock_config(&token_ep, &["https://www.googleapis.com/auth/drive.readonly"]);
+        let config = mock_config(
+            &token_ep,
+            &["https://www.googleapis.com/auth/drive.readonly"],
+        );
 
         let reader = GoogleDriveReadAt::new_with_base_url(
             "file123".to_string(),
-            make_oauth_auth_with_config("initial_token", Some("refresh_tok"), store.clone(), config),
+            make_oauth_auth_with_config(
+                "initial_token",
+                Some("refresh_tok"),
+                store.clone(),
+                config,
+            ),
             &drive.uri(),
         );
 
@@ -688,7 +698,10 @@ mod tests {
         assert_eq!(size, 999);
 
         // Store must have been updated with the new access token.
-        assert_eq!(store.get("gdrive").unwrap().access_token, "new_access_token");
+        assert_eq!(
+            store.get("gdrive").unwrap().access_token,
+            "new_access_token"
+        );
         // wiremock verifies expect(1) on each mock at drop.
     }
 
@@ -745,10 +758,9 @@ mod tests {
         let r2 = reader.clone();
 
         // Fire two concurrent reads — exactly one token refresh must occur.
-        let (res1, res2) = tokio::join!(
-            async move { r1.read_range(0, 5).await },
-            async move { r2.read_range(5, 5).await },
-        );
+        let (res1, res2) = tokio::join!(async move { r1.read_range(0, 5).await }, async move {
+            r2.read_range(5, 5).await
+        },);
 
         assert_eq!(res1.unwrap().as_ref(), b"hello");
         assert_eq!(res2.unwrap().as_ref(), b"world");

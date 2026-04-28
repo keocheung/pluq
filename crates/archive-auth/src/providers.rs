@@ -15,8 +15,8 @@ pub const GDRIVE_CONFIG: ProviderOAuthConfig = ProviderOAuthConfig {
     token_url: "https://oauth2.googleapis.com/token",
     scopes: &["https://www.googleapis.com/auth/drive.readonly"],
     extra_auth_params: &[
-        ("access_type", "offline"),    // request refresh_token
-        ("prompt", "consent"),          // force consent to guarantee refresh_token on re-auth
+        ("access_type", "offline"), // request refresh_token
+        ("prompt", "consent"),      // force consent to guarantee refresh_token on re-auth
     ],
 };
 
@@ -26,7 +26,7 @@ pub const DROPBOX_CONFIG: ProviderOAuthConfig = ProviderOAuthConfig {
     token_url: "https://api.dropboxapi.com/oauth2/token",
     scopes: &["sharing.read", "files.content.read"],
     extra_auth_params: &[
-        ("token_access_type", "offline"),  // required for refresh_token
+        ("token_access_type", "offline"), // required for refresh_token
     ],
 };
 

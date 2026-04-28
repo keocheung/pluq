@@ -29,7 +29,15 @@ async fn extract_bytes(
 ) -> Result<bytes::Bytes, CoreError> {
     let mut buf = Vec::new();
     let progress = std::sync::Arc::new(std::sync::Mutex::new(()));
-    archive.extract(entry, &mut buf, progress, password, &archive_core::ResourceLimits::default()).await?;
+    archive
+        .extract(
+            entry,
+            &mut buf,
+            progress,
+            password,
+            &archive_core::ResourceLimits::default(),
+        )
+        .await?;
     Ok(bytes::Bytes::from(buf))
 }
 use zip::CompressionMethod as ZipMethod;
@@ -316,7 +324,11 @@ async fn test_integrity_unencrypted_ok_encrypted_requires_password() {
         .find(|e| e.name == "plain_large.txt")
         .unwrap();
     archive
-        .test(plain_large, Arc::new(Mutex::new(())), &archive_core::ResourceLimits::default())
+        .test(
+            plain_large,
+            Arc::new(Mutex::new(())),
+            &archive_core::ResourceLimits::default(),
+        )
         .await
         .unwrap();
 
@@ -326,7 +338,11 @@ async fn test_integrity_unencrypted_ok_encrypted_requires_password() {
         .find(|e| e.name == "plain_small.bin")
         .unwrap();
     archive
-        .test(plain_small, Arc::new(Mutex::new(())), &archive_core::ResourceLimits::default())
+        .test(
+            plain_small,
+            Arc::new(Mutex::new(())),
+            &archive_core::ResourceLimits::default(),
+        )
         .await
         .unwrap();
 
@@ -336,7 +352,13 @@ async fn test_integrity_unencrypted_ok_encrypted_requires_password() {
         .iter()
         .find(|e| e.name == "zipcrypto_deflated.txt")
         .unwrap();
-    let result = archive.test(zipcrypto, Arc::new(Mutex::new(())), &archive_core::ResourceLimits::default()).await;
+    let result = archive
+        .test(
+            zipcrypto,
+            Arc::new(Mutex::new(())),
+            &archive_core::ResourceLimits::default(),
+        )
+        .await;
     assert!(
         matches!(result, Err(CoreError::PasswordRequired)),
         "expected PasswordRequired for ZipCrypto test(), got: {result:?}"
@@ -347,7 +369,13 @@ async fn test_integrity_unencrypted_ok_encrypted_requires_password() {
         .iter()
         .find(|e| e.name == "aes256_stored.bin")
         .unwrap();
-    let result = archive.test(aes, Arc::new(Mutex::new(())), &archive_core::ResourceLimits::default()).await;
+    let result = archive
+        .test(
+            aes,
+            Arc::new(Mutex::new(())),
+            &archive_core::ResourceLimits::default(),
+        )
+        .await;
     assert!(
         matches!(result, Err(CoreError::PasswordRequired)),
         "expected PasswordRequired for AES test(), got: {result:?}"
@@ -405,7 +433,13 @@ async fn progress_callbacks_recorded_correctly() {
 
     let mut buf = Vec::new();
     archive
-        .extract(entry, &mut buf, progress, None, &archive_core::ResourceLimits::default())
+        .extract(
+            entry,
+            &mut buf,
+            progress,
+            None,
+            &archive_core::ResourceLimits::default(),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -637,7 +671,15 @@ async fn cancel_after_50_percent_returns_cancelled() {
     }));
 
     let mut buf = Vec::new();
-    let result = archive.extract(entry, &mut buf, progress, None, &archive_core::ResourceLimits::default()).await;
+    let result = archive
+        .extract(
+            entry,
+            &mut buf,
+            progress,
+            None,
+            &archive_core::ResourceLimits::default(),
+        )
+        .await;
 
     assert!(
         matches!(result, Err(CoreError::Cancelled)),

@@ -34,12 +34,7 @@ impl DropboxReadAt {
         )
     }
 
-    fn build(
-        shared_url: String,
-        auth: DropboxAuth,
-        api_base: &str,
-        content_base: &str,
-    ) -> Self {
+    fn build(shared_url: String, auth: DropboxAuth, api_base: &str, content_base: &str) -> Self {
         let client = Client::builder()
             .user_agent("archive-sniper")
             .build()
@@ -70,9 +65,10 @@ impl DropboxReadAt {
     /// `AppCredentials` → Basic; `OAuth` → Bearer.
     async fn apply_auth(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.auth {
-            DropboxAuth::AppCredentials { app_key, app_secret } => {
-                builder.basic_auth(app_key, Some(app_secret))
-            }
+            DropboxAuth::AppCredentials {
+                app_key,
+                app_secret,
+            } => builder.basic_auth(app_key, Some(app_secret)),
             DropboxAuth::OAuth { token, .. } => {
                 let access = token.read().await.access_token.clone();
                 builder.bearer_auth(access)
@@ -112,26 +108,19 @@ impl DropboxReadAt {
             })
         })?;
 
-        let new = archive_auth::refresh(
-            config,
-            client_id,
-            client_secret.as_deref(),
-            &refresh_tok,
-        )
-        .await
-        .map_err(|e| {
-            transport_error(DropboxError::TokenRefreshFailed {
-                reason: e.to_string(),
-            })
-        })?;
-
-        store
-            .save("dropbox", new.clone())
+        let new = archive_auth::refresh(config, client_id, client_secret.as_deref(), &refresh_tok)
+            .await
             .map_err(|e| {
                 transport_error(DropboxError::TokenRefreshFailed {
-                    reason: format!("failed to persist token: {e}"),
+                    reason: e.to_string(),
                 })
             })?;
+
+        store.save("dropbox", new.clone()).map_err(|e| {
+            transport_error(DropboxError::TokenRefreshFailed {
+                reason: format!("failed to persist token: {e}"),
+            })
+        })?;
 
         *w = new;
         Ok(w.access_token.clone())
@@ -922,7 +911,12 @@ mod tests {
 
         let reader = DropboxReadAt::new_with_base_urls(
             "https://www.dropbox.com/s/abc/x.zip".to_string(),
-            make_oauth_auth_with_config("initial_token", Some("refresh_tok"), store.clone(), config),
+            make_oauth_auth_with_config(
+                "initial_token",
+                Some("refresh_tok"),
+                store.clone(),
+                config,
+            ),
             &api.uri(),
             &content.uri(),
         );
@@ -931,7 +925,10 @@ mod tests {
         assert_eq!(size, 999);
 
         // Store must have been updated with the new access token.
-        assert_eq!(store.get("dropbox").unwrap().access_token, "new_access_token");
+        assert_eq!(
+            store.get("dropbox").unwrap().access_token,
+            "new_access_token"
+        );
         // wiremock verifies expect(1) on each mock at drop.
     }
 
@@ -1004,10 +1001,9 @@ mod tests {
         let r2 = reader.clone();
 
         // Fire two concurrent reads — exactly one token refresh must occur.
-        let (res1, res2) = tokio::join!(
-            async move { r1.read_range(0, 5).await },
-            async move { r2.read_range(5, 5).await },
-        );
+        let (res1, res2) = tokio::join!(async move { r1.read_range(0, 5).await }, async move {
+            r2.read_range(5, 5).await
+        },);
 
         assert_eq!(res1.unwrap().as_ref(), b"hello");
         assert_eq!(res2.unwrap().as_ref(), b"world");

@@ -28,7 +28,15 @@ async fn extract_bytes(
 ) -> Result<Bytes, CoreError> {
     let mut buf = Vec::new();
     let progress = Arc::new(Mutex::new(()));
-    archive.extract(entry, &mut buf, progress, password, &archive_core::ResourceLimits::default()).await?;
+    archive
+        .extract(
+            entry,
+            &mut buf,
+            progress,
+            password,
+            &archive_core::ResourceLimits::default(),
+        )
+        .await?;
     Ok(Bytes::from(buf))
 }
 
@@ -140,7 +148,13 @@ async fn rar5_progress_reporting_on_extraction() {
 
     let mut buf = Vec::new();
     archive
-        .extract(entry, &mut buf, reporter.clone(), None, &archive_core::ResourceLimits::default())
+        .extract(
+            entry,
+            &mut buf,
+            reporter.clone(),
+            None,
+            &archive_core::ResourceLimits::default(),
+        )
         .await
         .expect("extract");
 
@@ -159,7 +173,11 @@ async fn rar5_test_integrity_passes() {
     let archive = open_rar(&fixture("rar5_unicode_entry.rar")).await;
     let entry = &archive.entries()[0];
     archive
-        .test(entry, Arc::new(Mutex::new(())), &archive_core::ResourceLimits::default())
+        .test(
+            entry,
+            Arc::new(Mutex::new(())),
+            &archive_core::ResourceLimits::default(),
+        )
         .await
         .expect("test integrity check should pass");
 }

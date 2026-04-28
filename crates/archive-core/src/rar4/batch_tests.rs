@@ -217,7 +217,13 @@ mod tests {
             .unwrap();
 
         let batch: BatchResult = rar4
-            .extract_selected(&[], |_| None, progress, None, &crate::ResourceLimits::default())
+            .extract_selected(
+                &[],
+                |_| None,
+                progress,
+                None,
+                &crate::ResourceLimits::default(),
+            )
             .await
             .unwrap();
 

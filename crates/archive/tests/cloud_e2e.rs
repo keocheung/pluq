@@ -119,12 +119,16 @@ fn dev_link(key: &str) -> Option<String> {
 #[ignore = "requires network; run: cargo test -p archive --test cloud_e2e cloud_rar5_github_plain -- --ignored --nocapture"]
 async fn cloud_rar5_github_plain_listing_and_extraction() {
     let url = gh("testfile.rar5.rar");
-    let archive = Archive::open_reader(&url, open_url(&url).unwrap(), &archive::ArchiveConfig::default())
-        .await
-        .unwrap()
-        .ready()
-        .await
-        .unwrap();
+    let archive = Archive::open_reader(
+        &url,
+        open_url(&url).unwrap(),
+        &archive::ArchiveConfig::default(),
+    )
+    .await
+    .unwrap()
+    .ready()
+    .await
+    .unwrap();
 
     let entries = archive.entries();
     assert_eq!(entries.len(), 1, "should have exactly 1 entry");
@@ -153,12 +157,16 @@ async fn cloud_rar5_github_plain_listing_and_extraction() {
 #[ignore = "requires network; run: cargo test -p archive --test cloud_e2e cloud_rar5_github_cbr -- --ignored --nocapture"]
 async fn cloud_rar5_github_cbr_listing_and_extraction() {
     let url = gh("testfile.rar5.cbr");
-    let archive = Archive::open_reader(&url, open_url(&url).unwrap(), &archive::ArchiveConfig::default())
-        .await
-        .unwrap()
-        .ready()
-        .await
-        .unwrap();
+    let archive = Archive::open_reader(
+        &url,
+        open_url(&url).unwrap(),
+        &archive::ArchiveConfig::default(),
+    )
+    .await
+    .unwrap()
+    .ready()
+    .await
+    .unwrap();
 
     let entries = archive.entries();
     assert_eq!(entries.len(), 2, "CBR should have 2 image entries");
@@ -199,12 +207,16 @@ async fn cloud_rar5_github_cbr_listing_and_extraction() {
 #[ignore = "requires network; run: cargo test -p archive --test cloud_e2e cloud_rar5_github_rr -- --ignored --nocapture"]
 async fn cloud_rar5_github_recovery_record_listing_and_extraction() {
     let url = gh("testfile.rar5.rr.rar");
-    let archive = Archive::open_reader(&url, open_url(&url).unwrap(), &archive::ArchiveConfig::default())
-        .await
-        .unwrap()
-        .ready()
-        .await
-        .unwrap();
+    let archive = Archive::open_reader(
+        &url,
+        open_url(&url).unwrap(),
+        &archive::ArchiveConfig::default(),
+    )
+    .await
+    .unwrap()
+    .ready()
+    .await
+    .unwrap();
 
     let entries = archive.entries();
     assert_eq!(
@@ -237,12 +249,16 @@ async fn cloud_rar5_github_recovery_record_listing_and_extraction() {
 #[ignore = "requires network; run: cargo test -p archive --test cloud_e2e cloud_rar5_github_solid -- --ignored --nocapture"]
 async fn cloud_rar5_github_solid_first_entry_accessible() {
     let url = gh("testfile.rar5.solid.rar");
-    let archive = Archive::open_reader(&url, open_url(&url).unwrap(), &archive::ArchiveConfig::default())
-        .await
-        .unwrap()
-        .ready()
-        .await
-        .unwrap();
+    let archive = Archive::open_reader(
+        &url,
+        open_url(&url).unwrap(),
+        &archive::ArchiveConfig::default(),
+    )
+    .await
+    .unwrap()
+    .ready()
+    .await
+    .unwrap();
 
     let entries = archive.entries();
     assert_eq!(
@@ -270,7 +286,12 @@ async fn cloud_rar5_github_solid_first_entry_accessible() {
 #[ignore = "requires network; run: cargo test -p archive --test cloud_e2e cloud_rar3_github -- --ignored --nocapture"]
 async fn cloud_rar3_github_unsupported_format() {
     let url = gh("testfile.rar3.rar");
-    let result = Archive::open_reader(&url, open_url(&url).unwrap(), &archive::ArchiveConfig::default()).await;
+    let result = Archive::open_reader(
+        &url,
+        open_url(&url).unwrap(),
+        &archive::ArchiveConfig::default(),
+    )
+    .await;
 
     assert!(
         matches!(result, Err(ArchiveError::UnsupportedFormat { .. })),
@@ -291,12 +312,16 @@ async fn cloud_rar3_github_unsupported_format() {
 #[ignore = "requires network; run: cargo test -p archive --test cloud_e2e cloud_rar5_unrar_comment -- --ignored --nocapture"]
 async fn cloud_rar5_unrar_comment_listing_and_extraction() {
     let url = unrar("comment.rar");
-    let archive = Archive::open_reader(&url, open_url(&url).unwrap(), &archive::ArchiveConfig::default())
-        .await
-        .unwrap()
-        .ready()
-        .await
-        .unwrap();
+    let archive = Archive::open_reader(
+        &url,
+        open_url(&url).unwrap(),
+        &archive::ArchiveConfig::default(),
+    )
+    .await
+    .unwrap()
+    .ready()
+    .await
+    .unwrap();
 
     let entries = archive.entries();
     assert_eq!(
@@ -327,12 +352,16 @@ async fn cloud_rar5_unrar_comment_listing_and_extraction() {
 #[ignore = "requires network; run: cargo test -p archive --test cloud_e2e cloud_rar5_unrar_locked -- --ignored --nocapture"]
 async fn cloud_rar5_unrar_locked_listing_and_extraction() {
     let url = unrar("locked.rar");
-    let archive = Archive::open_reader(&url, open_url(&url).unwrap(), &archive::ArchiveConfig::default())
-        .await
-        .unwrap()
-        .ready()
-        .await
-        .unwrap();
+    let archive = Archive::open_reader(
+        &url,
+        open_url(&url).unwrap(),
+        &archive::ArchiveConfig::default(),
+    )
+    .await
+    .unwrap()
+    .ready()
+    .await
+    .unwrap();
 
     let entries = archive.entries();
     assert_eq!(entries.len(), 1, "locked archive should list normally");
@@ -359,12 +388,16 @@ async fn cloud_rar5_unrar_locked_listing_and_extraction() {
 #[ignore = "requires network; run: cargo test -p archive --test cloud_e2e cloud_rar5_unrar_unicode -- --ignored --nocapture"]
 async fn cloud_rar5_unrar_unicode_filename() {
     let url = unrar("unicode.rar");
-    let archive = Archive::open_reader(&url, open_url(&url).unwrap(), &archive::ArchiveConfig::default())
-        .await
-        .unwrap()
-        .ready()
-        .await
-        .unwrap();
+    let archive = Archive::open_reader(
+        &url,
+        open_url(&url).unwrap(),
+        &archive::ArchiveConfig::default(),
+    )
+    .await
+    .unwrap()
+    .ready()
+    .await
+    .unwrap();
 
     let entries = archive.entries();
     assert_eq!(entries.len(), 1);
@@ -396,7 +429,12 @@ async fn cloud_rar5_unrar_unicode_filename() {
 #[ignore = "requires network; run: cargo test -p archive --test cloud_e2e cloud_rar5_unrar_enc_headers -- --ignored --nocapture"]
 async fn cloud_rar5_unrar_encrypted_headers_graceful() {
     let url = unrar("comment-hpw-password.rar");
-    let result = Archive::open_reader(&url, open_url(&url).unwrap(), &archive::ArchiveConfig::default()).await;
+    let result = Archive::open_reader(
+        &url,
+        open_url(&url).unwrap(),
+        &archive::ArchiveConfig::default(),
+    )
+    .await;
 
     match &result {
         Err(e) => println!("✅  returned error (expected): {e:?}"),
@@ -447,12 +485,16 @@ async fn cloud_zip_dropbox_listing() {
             return;
         }
     };
-    let archive = Archive::open_reader(&url, open_url(&url).unwrap(), &archive::ArchiveConfig::default())
-        .await
-        .expect("should open Dropbox ZIP via HTTP range requests")
-        .ready()
-        .await
-        .expect("Dropbox ZIP should be immediately ready");
+    let archive = Archive::open_reader(
+        &url,
+        open_url(&url).unwrap(),
+        &archive::ArchiveConfig::default(),
+    )
+    .await
+    .expect("should open Dropbox ZIP via HTTP range requests")
+    .ready()
+    .await
+    .expect("Dropbox ZIP should be immediately ready");
 
     let entries = archive.entries();
     assert!(!entries.is_empty(), "Dropbox ZIP must have entries");

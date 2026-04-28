@@ -1,10 +1,10 @@
+use crate::error::AuthError;
+use directories::ProjectDirs;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
-use crate::error::AuthError;
-use directories::ProjectDirs;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StoredToken {
@@ -108,22 +108,23 @@ impl TokenStore {
 
     fn persist(&self, inner: &HashMap<String, StoredToken>) -> Result<(), AuthError> {
         let json = serde_json::to_string_pretty(inner)?;
-        let parent = self.path.parent().ok_or_else(|| {
-            std::io::Error::other("no parent directory for token store")
-        })?;
-        
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| std::io::Error::other("no parent directory for token store"))?;
+
         if !parent.exists() {
             fs::create_dir_all(parent)?;
         }
 
         let pid = std::process::id();
         let tmp_path = self.path.with_extension(format!("tmp.{}", pid));
-        
+
         let write_result = (|| -> Result<(), AuthError> {
             let mut tmp_file = fs::File::create(&tmp_path)?;
             tmp_file.write_all(json.as_bytes())?;
             tmp_file.sync_all()?;
-            
+
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -138,7 +139,7 @@ impl TokenStore {
         }
 
         fs::rename(&tmp_path, &self.path)?;
-        
+
         #[cfg(unix)]
         {
             // Belt-and-suspenders: fsync parent directory for POSIX durability
@@ -176,7 +177,7 @@ mod tests {
             scopes: vec!["scope1".to_string()],
         };
         store.save("test", token.clone()).unwrap();
-        
+
         let retrieved = store.get("test").unwrap();
         assert_eq!(retrieved.access_token, token.access_token);
         assert_eq!(retrieved.refresh_token, token.refresh_token);
@@ -203,7 +204,7 @@ mod tests {
         };
         store.save("test", token1).unwrap();
         store.save("test", token2).unwrap();
-        
+
         assert_eq!(store.get("test").unwrap().access_token, "token2");
     }
 
@@ -220,7 +221,7 @@ mod tests {
         };
         store.save("test", token).unwrap();
         assert!(store.get("test").is_some());
-        
+
         store.remove("test").unwrap();
         assert!(store.get("test").is_none());
     }
@@ -238,7 +239,7 @@ mod tests {
         };
         store.save("gdrive", token.clone()).unwrap();
         store.save("dropbox", token).unwrap();
-        
+
         let mut list = store.list();
         list.sort();
         assert_eq!(list, vec!["dropbox", "gdrive"]);
@@ -254,12 +255,12 @@ mod tests {
             expires_at: None,
             scopes: vec![],
         };
-        
+
         {
             let store = TokenStore::load_from(path.clone()).unwrap();
             store.save("test", token).unwrap();
         }
-        
+
         let store = TokenStore::load_from(path).unwrap();
         assert_eq!(store.get("test").unwrap().access_token, "persistent");
     }
@@ -270,18 +271,18 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        
+
         let token = StoredToken {
             access_token: "test".to_string(),
             refresh_token: None,
             expires_at: Some(now + 100),
             scopes: vec![],
         };
-        
+
         assert!(!token.is_expired(0));
         assert!(!token.is_expired(50));
         assert!(token.is_expired(110));
-        
+
         let permanent = StoredToken {
             access_token: "test".to_string(),
             refresh_token: None,
@@ -305,7 +306,7 @@ mod tests {
             scopes: vec![],
         };
         store.save("test", token).unwrap();
-        
+
         let metadata = fs::metadata(path).unwrap();
         let mode = metadata.permissions().mode();
         assert_eq!(mode & 0o777, 0o600);

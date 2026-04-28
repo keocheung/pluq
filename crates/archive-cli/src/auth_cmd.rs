@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use clap::{Subcommand, ValueEnum};
 use archive_auth::TokenStore;
+use clap::{Subcommand, ValueEnum};
 
 /// Subcommands for `snipe auth`.
 #[derive(Subcommand)]
@@ -64,7 +64,10 @@ async fn run_add(
     timeout: u64,
     store: Arc<TokenStore>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!("  Opening browser to authenticate with {}...", provider.display_name());
+    eprintln!(
+        "  Opening browser to authenticate with {}...",
+        provider.display_name()
+    );
     eprintln!("  (If no browser opens, copy the URL printed below into your browser.)");
     let token = match provider {
         AuthProvider::Gdrive => archive_gdrive::oauth::authenticate(timeout).await?,
@@ -72,14 +75,21 @@ async fn run_add(
     };
     store.save(provider.store_key(), token)?;
     if let Ok(path) = TokenStore::default_path() {
-        eprintln!("  {} token saved to {}", provider.display_name(), path.display());
+        eprintln!(
+            "  {} token saved to {}",
+            provider.display_name(),
+            path.display()
+        );
     } else {
         eprintln!("  {} token saved.", provider.display_name());
     }
     Ok(())
 }
 
-fn run_remove(provider: AuthProvider, store: Arc<TokenStore>) -> Result<(), Box<dyn std::error::Error>> {
+fn run_remove(
+    provider: AuthProvider,
+    store: Arc<TokenStore>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let had = store.get(provider.store_key()).is_some();
     store.remove(provider.store_key())?;
     if had {
@@ -101,8 +111,14 @@ fn run_list(store: Arc<TokenStore>) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     println!();
-    println!("  {:<10} {:<12} {:<15}", "PROVIDER", "STATUS", "REFRESH TOKEN");
-    println!("  {:<10} {:<12} {:<15}", "--------", "------", "-------------");
+    println!(
+        "  {:<10} {:<12} {:<15}",
+        "PROVIDER", "STATUS", "REFRESH TOKEN"
+    );
+    println!(
+        "  {:<10} {:<12} {:<15}",
+        "--------", "------", "-------------"
+    );
     for name in providers {
         if let Some(token) = store.get(&name) {
             let status = if token.is_expired(0) {
@@ -156,7 +172,12 @@ mod tests {
     #[test]
     fn remove_present_provider_clears_entry() {
         let (_dir, store) = fresh_store();
-        store.save("gdrive", dummy_token("access_xyz", Some("refresh_abc"), None)).unwrap();
+        store
+            .save(
+                "gdrive",
+                dummy_token("access_xyz", Some("refresh_abc"), None),
+            )
+            .unwrap();
         run_remove(AuthProvider::Gdrive, store.clone()).unwrap();
         assert!(store.get("gdrive").is_none());
     }
@@ -170,8 +191,15 @@ mod tests {
     #[test]
     fn list_with_entries_succeeds() {
         let (_dir, store) = fresh_store();
-        store.save("gdrive", dummy_token("access_xyz", Some("refresh_abc"), None)).unwrap();
-        store.save("dropbox", dummy_token("access_qqq", None, Some(1))).unwrap();
+        store
+            .save(
+                "gdrive",
+                dummy_token("access_xyz", Some("refresh_abc"), None),
+            )
+            .unwrap();
+        store
+            .save("dropbox", dummy_token("access_qqq", None, Some(1)))
+            .unwrap();
         run_list(store).unwrap();
     }
 

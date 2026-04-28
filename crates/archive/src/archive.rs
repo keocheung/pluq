@@ -946,8 +946,10 @@ mod tests {
     async fn path_policy_strict_aborts_extraction() {
         let buf = build_zip(&[("safe.txt", b"safe"), ("../escape.txt", b"danger")]);
         let (_f, path) = write_temp(&buf);
-        let mut config = ArchiveConfig::default();
-        config.path_policy = archive_core::PathPolicy::Strict;
+        let config = ArchiveConfig {
+            path_policy: archive_core::PathPolicy::Strict,
+            ..ArchiveConfig::default()
+        };
         let archive = Archive::open_reader(&path, LocalReadAt::new(&path), &config)
             .await
             .unwrap()
@@ -977,8 +979,10 @@ mod tests {
     async fn path_policy_sanitize_rewrites_and_extracts() {
         let buf = build_zip(&[("safe.txt", b"safe"), ("../escape.txt", b"danger")]);
         let (_f, path) = write_temp(&buf);
-        let mut config = ArchiveConfig::default();
-        config.path_policy = archive_core::PathPolicy::Sanitize;
+        let config = ArchiveConfig {
+            path_policy: archive_core::PathPolicy::Sanitize,
+            ..ArchiveConfig::default()
+        };
         let archive = Archive::open_reader(&path, LocalReadAt::new(&path), &config)
             .await
             .unwrap()

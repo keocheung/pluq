@@ -42,7 +42,12 @@ pub async fn run_with_source(
             move |tx: tokio::sync::mpsc::UnboundedSender<app::AppMessage>| {
                 debug!("spawning Archive::open task");
                 tokio::spawn(async move {
-                    let result = archive::Archive::open_reader(&source, reader, &archive::ArchiveConfig::default()).await;
+                    let result = archive::Archive::open_reader(
+                        &source,
+                        reader,
+                        &archive::ArchiveConfig::default(),
+                    )
+                    .await;
                     let _ = tx.send(app::AppMessage::ArchiveOpened(result));
                 });
             },
@@ -51,7 +56,9 @@ pub async fn run_with_source(
     .await
 }
 
-pub async fn run_home(token_store: Option<std::sync::Arc<archive_auth::TokenStore>>) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run_home(
+    token_store: Option<std::sync::Arc<archive_auth::TokenStore>>,
+) -> Result<(), Box<dyn std::error::Error>> {
     info!("TUI starting in Home mode");
     let app = app::App::new_home(token_store);
     run_app(

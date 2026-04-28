@@ -45,7 +45,15 @@ async fn extract_bytes(
 ) -> Result<Bytes, CoreError> {
     let mut buf = Vec::new();
     let progress = Arc::new(Mutex::new(()));
-    archive.extract(entry, &mut buf, progress, password, &archive_core::ResourceLimits::default()).await?;
+    archive
+        .extract(
+            entry,
+            &mut buf,
+            progress,
+            password,
+            &archive_core::ResourceLimits::default(),
+        )
+        .await?;
     Ok(Bytes::from(buf))
 }
 
@@ -244,7 +252,11 @@ async fn rar4_test_integrity_passes() {
     let (_g, path) = write_tempfile(&bytes);
     let archive = open_rar4(&path).await;
     archive
-        .test(&archive.entries()[0], Arc::new(Mutex::new(())), &archive_core::ResourceLimits::default())
+        .test(
+            &archive.entries()[0],
+            Arc::new(Mutex::new(())),
+            &archive_core::ResourceLimits::default(),
+        )
         .await
         .expect("integrity check should pass");
 }

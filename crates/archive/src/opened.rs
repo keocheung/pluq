@@ -128,11 +128,23 @@ impl<R: ReadAt + LocalPath + 'static> PendingArchive<R> {
                 }));
             }
             ArchiveInner::Rar(r) => r
-                .extract_all_streaming(filter, sink_factory, progress.clone(), password, &self.config.limits)
+                .extract_all_streaming(
+                    filter,
+                    sink_factory,
+                    progress.clone(),
+                    password,
+                    &self.config.limits,
+                )
                 .await
                 .map_err(translate_core_error)?,
             ArchiveInner::Rar4(r) => r
-                .extract_all_streaming(filter, sink_factory, progress.clone(), password, &self.config.limits)
+                .extract_all_streaming(
+                    filter,
+                    sink_factory,
+                    progress.clone(),
+                    password,
+                    &self.config.limits,
+                )
                 .await
                 .map_err(translate_core_error)?,
         };
