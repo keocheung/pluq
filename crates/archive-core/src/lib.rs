@@ -1,4 +1,5 @@
 pub mod archive_reader;
+pub mod cache_state;
 pub mod codec;
 mod core_error;
 mod entry;
@@ -18,10 +19,13 @@ pub use archive_reader::{ArchiveReader, BatchResult, extract_selected_default};
 pub use codec::CompressionMethod;
 
 // Data types.
+pub mod fingerprint;
 pub mod limits;
 pub mod path_safety;
+pub use cache_state::FormatCacheState;
 pub use core_error::{CoreError, PasswordDetectionMethod};
 pub use entry::ArchiveEntry;
+pub use fingerprint::{ArchiveFingerprint, HttpResponseMetadata};
 pub use limits::{CodecConfig, LimitMode, RatioLimit, ResourceLimits};
 pub use path_safety::{PathDecision, PathPolicy, evaluate_path};
 

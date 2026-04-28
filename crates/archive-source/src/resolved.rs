@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use archive_core::fingerprint::ArchiveFingerprint;
+
 use archive_core::{CachingReadAt, HttpReadAt, LocalPath, LocalReadAt, ReadAt, ReadError};
 use archive_dropbox::DropboxReadAt;
 use archive_gdrive::GoogleDriveReadAt;
@@ -31,6 +33,52 @@ impl ResolvedSource {
             Self::Http(_, url) => crate::suggest_name_from_str(url),
             Self::GDrive(_, url, _) => crate::suggest_name_from_str(url),
             Self::Dropbox(_, url) => crate::suggest_name_from_str(url),
+        }
+    }
+
+    pub fn fingerprint(&self) -> ArchiveFingerprint {
+        match self {
+            Self::Local(_, path) => ArchiveFingerprint {
+                source: path.clone(),
+                source_size: 0, // filled in by caller after .size().await
+                etag: None,
+                last_modified: None,
+                mtime: std::fs::metadata(path)
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs()),
+            },
+            Self::Http(r, url) => {
+                let meta = r.inner().captured_metadata().unwrap_or_default();
+                ArchiveFingerprint {
+                    source: url.clone(),
+                    source_size: meta.size.unwrap_or(0),
+                    etag: meta.etag,
+                    last_modified: meta.last_modified,
+                    mtime: None,
+                }
+            }
+            Self::GDrive(r, url, _) => {
+                let meta = r.inner().captured_metadata().unwrap_or_default();
+                ArchiveFingerprint {
+                    source: url.clone(),
+                    source_size: meta.size.unwrap_or(0),
+                    etag: meta.etag,
+                    last_modified: meta.last_modified,
+                    mtime: None,
+                }
+            }
+            Self::Dropbox(r, url) => {
+                let meta = r.inner().captured_metadata().unwrap_or_default();
+                ArchiveFingerprint {
+                    source: url.clone(),
+                    source_size: meta.size.unwrap_or(0),
+                    etag: meta.etag,
+                    last_modified: meta.last_modified,
+                    mtime: None,
+                }
+            }
         }
     }
 }

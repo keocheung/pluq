@@ -30,11 +30,12 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io
 
 pub async fn run_with_source(
     source: String,
-    reader: archive_source::ResolvedSource,
     token_store: Option<std::sync::Arc<archive_auth::TokenStore>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!(source = %source, "TUI starting in Browse mode");
-    let app = app::App::new_with_source(source.clone(), token_store);
+    let app = app::App::new_with_source(source.clone(), token_store.clone());
+
+    let config = crate::source_config(token_store);
 
     run_app(
         app,
@@ -42,12 +43,9 @@ pub async fn run_with_source(
             move |tx: tokio::sync::mpsc::UnboundedSender<app::AppMessage>| {
                 debug!("spawning Archive::open task");
                 tokio::spawn(async move {
-                    let result = archive::Archive::open_reader(
-                        &source,
-                        reader,
-                        &archive::ArchiveConfig::default(),
-                    )
-                    .await;
+                    let result =
+                        archive_cache::open(&source, &config, archive::ArchiveConfig::default())
+                            .await;
                     let _ = tx.send(app::AppMessage::ArchiveOpened(result));
                 });
             },

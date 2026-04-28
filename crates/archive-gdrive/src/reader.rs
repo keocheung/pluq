@@ -1,3 +1,4 @@
+use archive_core::fingerprint::HttpResponseMetadata;
 use archive_core::io::{ReadAt, ReadError};
 use bytes::Bytes;
 use futures_util::TryStreamExt;
@@ -23,6 +24,8 @@ struct GDriveMetadata {
     #[allow(dead_code)] // stored for future display/error context
     name: String,
     size: u64,
+    modified_time: Option<String>,
+    head_revision_id: Option<String>,
 }
 
 impl GoogleDriveReadAt {
@@ -67,6 +70,14 @@ impl GoogleDriveReadAt {
                 format!("{}{}", self.api_base_url, path_and_query)
             }
         }
+    }
+
+    pub fn captured_metadata(&self) -> Option<HttpResponseMetadata> {
+        self.metadata.get().map(|m| HttpResponseMetadata {
+            size: Some(m.size),
+            etag: m.head_revision_id.clone(),
+            last_modified: m.modified_time.clone(),
+        })
     }
 
     /// Apply the Authorization header for OAuth, no-op for ApiKey.
@@ -138,7 +149,10 @@ impl GoogleDriveReadAt {
 
     async fn fetch_metadata(&self) -> Result<GDriveMetadata, ReadError> {
         debug!(file_id = %self.file_id, "fetching Google Drive metadata");
-        let path = format!("/drive/v3/files/{}?fields=name,size,mimeType", self.file_id);
+        let path = format!(
+            "/drive/v3/files/{}?fields=name,size,mimeType,modifiedTime,headRevisionId",
+            self.file_id
+        );
         let url = self.authed_url(&path);
 
         // Capture the current access token before the request so that if another
@@ -218,9 +232,16 @@ impl GoogleDriveReadAt {
             .as_str()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
+        let modified_time = json["modifiedTime"].as_str().map(|s| s.to_string());
+        let head_revision_id = json["headRevisionId"].as_str().map(|s| s.to_string());
 
         info!(file_id = %self.file_id, name = %name, size, "Google Drive metadata OK");
-        Ok(GDriveMetadata { name, size })
+        Ok(GDriveMetadata {
+            name,
+            size,
+            modified_time,
+            head_revision_id,
+        })
     }
 
     // ── Content requests ────────────────────────────────────────────────────

@@ -7,9 +7,10 @@ use std::time::Instant;
 
 use crate::home::complete::{complete_path, looks_like_url};
 use archive::{
-    Archive, ArchiveConfig, ArchiveEntry, ArchiveError, BatchResult, EntryTree, Opened,
-    ProgressReporter, ScanInfo,
+    Archive, ArchiveConfig, ArchiveEntry, ArchiveError, BatchResult, EntryTree, ProgressReporter,
+    ScanInfo,
 };
+use archive_cache::Opened;
 use archive_source::{ResolvedSource, SourceConfig, resolve};
 use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent};
@@ -23,7 +24,7 @@ use tracing::{debug, error, info, warn};
 /// updates are read from shared atomics on each tick instead (see `SharedProgress`).
 pub enum AppMessage {
     /// Archive::open() completed.
-    ArchiveOpened(Result<Opened<ResolvedSource>, ArchiveError>),
+    ArchiveOpened(Result<Opened, ArchiveError>),
     /// PendingArchive::scan() completed.
     ScanComplete(Result<Archive<ResolvedSource>, ArchiveError>),
     /// Archive::extract() completed.
@@ -822,7 +823,7 @@ impl App {
     }
 
     /// Update the Recent list if we launched from Home.
-    fn record_recent_on_open(&mut self, _opened: &Opened<ResolvedSource>) {
+    fn record_recent_on_open(&mut self, _opened: &Opened) {
         if !self.launched_from_home {
             return;
         }
@@ -869,9 +870,11 @@ impl App {
 
                 let tx_open = tx.clone();
                 let source_for_task = source.clone();
-                let config = self.archive_config.clone();
+                let archive_config = self.archive_config.clone();
+                let source_config = crate::source_config(self.token_store.clone());
                 tokio::spawn(async move {
-                    let result = Archive::open_reader(&source_for_task, reader, &config).await;
+                    let result =
+                        archive_cache::open(&source_for_task, &source_config, archive_config).await;
                     let _ = tx_open.send(AppMessage::ArchiveOpened(result));
                 });
             }

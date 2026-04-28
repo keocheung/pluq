@@ -4,12 +4,14 @@ use reqwest::{
     Client, StatusCode,
     header::{CONTENT_LENGTH, HeaderMap, HeaderValue, RANGE},
 };
+use std::sync::OnceLock;
 use tokio::io::AsyncRead;
 use tokio_util::io::StreamReader;
 use tracing::{debug, trace, warn};
 
 use super::ReadAt;
 use super::read_error::{NetworkPhase, ReadErrorKind, ReadFailure, ReadOperation, SourceInfo};
+use crate::fingerprint::HttpResponseMetadata;
 use crate::io::ReadError;
 
 /// A [`ReadAt`] backed by HTTP range requests.
@@ -30,6 +32,7 @@ pub struct HttpReadAt {
     url: String,
     client: Client,
     extra_headers: HeaderMap,
+    captured_metadata: OnceLock<HttpResponseMetadata>,
 }
 
 impl HttpReadAt {
@@ -42,6 +45,7 @@ impl HttpReadAt {
             url: url.into(),
             client,
             extra_headers: HeaderMap::new(),
+            captured_metadata: OnceLock::new(),
         }
     }
 
@@ -54,6 +58,11 @@ impl HttpReadAt {
     pub fn with_headers(mut self, headers: HeaderMap) -> Self {
         self.extra_headers = headers;
         self
+    }
+
+    /// Retrieve metadata captured during the `size()` (HEAD) check, if any.
+    pub fn captured_metadata(&self) -> Option<HttpResponseMetadata> {
+        self.captured_metadata.get().cloned()
     }
 }
 
@@ -291,6 +300,24 @@ impl ReadAt for HttpReadAt {
                     diagnostic: format!("Content-Length not a number: {e}"),
                 }))
             })?;
+
+        let etag = response
+            .headers()
+            .get("etag")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        let last_modified = response
+            .headers()
+            .get("last-modified")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        let meta = HttpResponseMetadata {
+            size: Some(content_length),
+            etag,
+            last_modified,
+        };
+        let _ = self.captured_metadata.set(meta);
 
         debug!(size = content_length, "http size check complete");
         Ok(content_length)

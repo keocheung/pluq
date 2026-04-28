@@ -6,7 +6,6 @@ use archive_core::{
 use tracing::{debug, info};
 
 use crate::archive::{Archive, ArchiveInner};
-use crate::cache::{ArchiveFingerprint, cache_path_for};
 use crate::error::{ArchiveError, translate_core_error};
 
 /// Result of opening an archive. Either ready to use or requires a metadata scan.
@@ -25,8 +24,6 @@ pub enum Opened<R: ReadAt + LocalPath + 'static> {
 pub struct PendingArchive<R: ReadAt + LocalPath + 'static> {
     pub(crate) inner: ArchiveInner<R>,
     info: ScanInfo,
-    pub(crate) fingerprint: ArchiveFingerprint,
-    pub(crate) source: String,
     pub(crate) config: crate::config::ArchiveConfig,
 }
 
@@ -47,15 +44,11 @@ impl<R: ReadAt + LocalPath + 'static> PendingArchive<R> {
     pub(crate) fn new(
         inner: ArchiveInner<R>,
         info: ScanInfo,
-        fingerprint: ArchiveFingerprint,
-        source: String,
         config: crate::config::ArchiveConfig,
     ) -> Self {
         Self {
             inner,
             info,
-            fingerprint,
-            source,
             config,
         }
     }
@@ -96,12 +89,6 @@ impl<R: ReadAt + LocalPath + 'static> PendingArchive<R> {
             entries = archive.entries().len(),
             "PendingArchive::scan complete"
         );
-
-        // ── Implicit cache save (failure silently ignored) ────────────────
-        if let Some(cache_path) = cache_path_for(&self.source) {
-            debug!(cache_path = %cache_path.display(), "saving scan result to cache");
-            let _ = archive.save_cache(&self.fingerprint, &cache_path);
-        }
 
         Ok(archive)
     }
@@ -153,12 +140,6 @@ impl<R: ReadAt + LocalPath + 'static> PendingArchive<R> {
             inner: self.inner,
             config: self.config,
         };
-
-        // Save cache (same pattern as PendingArchive::scan).
-        if let Some(cache_path) = cache_path_for(&self.source) {
-            debug!(cache_path = %cache_path.display(), "saving scan+extract result to cache");
-            let _ = archive.save_cache(&self.fingerprint, &cache_path);
-        }
 
         Ok((archive, total))
     }

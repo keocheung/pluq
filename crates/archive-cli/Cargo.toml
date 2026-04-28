@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 archive = { path = "../archive" }
+archive-cache = { path = "../archive-cache" }
 archive-gdrive = { path = "../archive-gdrive" }
 archive-dropbox = { path = "../archive-dropbox" }
 archive-source = { path = "../archive-source" }

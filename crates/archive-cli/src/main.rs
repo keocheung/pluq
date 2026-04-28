@@ -103,7 +103,7 @@ async fn main() {
 
     // ── Cache cleaning ───────────────────────────────────────────────────
     if cli.clean_cache {
-        match archive::cache_dir() {
+        match archive_cache::cache_dir() {
             Some(dir) if dir.exists() => {
                 info!(path = %dir.display(), "clearing cache directory");
                 match std::fs::remove_dir_all(&dir) {
@@ -184,9 +184,7 @@ async fn run_browse(
     _cancel: Arc<AtomicBool>,
     token_store: Option<Arc<archive_auth::TokenStore>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config = source_config(token_store.clone());
-    let reader = resolve(&source, &config)?;
-    tui::run_with_source(source, reader, token_store).await?;
+    tui::run_with_source(source, token_store).await?;
     Ok(())
 }
 
@@ -390,11 +388,10 @@ async fn open_with_progress(
 ) -> Result<Archive<ResolvedSource>, Box<dyn std::error::Error>> {
     eprintln!("  Opening {source}...");
     let config = source_config(token_store);
-    let reader = resolve(source, &config)?;
-    let opened = Archive::open_reader(source, reader, &archive::ArchiveConfig::default()).await?;
+    let opened = archive_cache::open(source, &config, archive::ArchiveConfig::default()).await?;
     match opened {
-        archive::Opened::Ready(a) => Ok(a),
-        archive::Opened::NeedsScan(pending) => {
+        archive_cache::Opened::Ready(a) => Ok(a),
+        archive_cache::Opened::NeedsScan(pending) => {
             let info = pending.scan_info().clone();
             eprintln!(
                 "  Archive requires scanning{}",

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/archive-core", "crates/archive", "crates/archive-cli", "crates/archive-dev", "crates/archive-gdrive", "crates/archive-dropbox", "crates/archive-source", "crates/archive-auth"]
+members = ["crates/archive-core", "crates/archive", "crates/archive-cli", "crates/archive-dev", "crates/archive-gdrive", "crates/archive-dropbox", "crates/archive-source", "crates/archive-auth", "crates/archive-cache"]
 
 [patch.crates-io]
 unrar = { git = "https://github.com/stefandekanski/unrar.rs.git", branch = "master" }

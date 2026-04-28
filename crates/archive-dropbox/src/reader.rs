@@ -1,3 +1,4 @@
+use archive_core::fingerprint::HttpResponseMetadata;
 use archive_core::io::{ReadAt, ReadError};
 use bytes::Bytes;
 use futures_util::TryStreamExt;
@@ -22,6 +23,8 @@ struct DropboxMetadata {
     #[allow(dead_code)]
     name: String,
     size: u64,
+    rev: Option<String>,
+    server_modified: Option<String>,
 }
 
 impl DropboxReadAt {
@@ -57,6 +60,14 @@ impl DropboxReadAt {
         content_base: &str,
     ) -> Self {
         Self::build(shared_url, auth, api_base, content_base)
+    }
+
+    pub fn captured_metadata(&self) -> Option<HttpResponseMetadata> {
+        self.metadata.get().map(|m| HttpResponseMetadata {
+            size: Some(m.size),
+            etag: m.rev.clone(),
+            last_modified: m.server_modified.clone(),
+        })
     }
 
     // ── Auth helpers ────────────────────────────────────────────────────────
@@ -212,6 +223,8 @@ impl DropboxReadAt {
 
         let size = json["size"].as_u64().unwrap_or(0);
         let name = json["name"].as_str().unwrap_or("unknown").to_string();
+        let rev = json["rev"].as_str().map(|s| s.to_string());
+        let server_modified = json["server_modified"].as_str().map(|s| s.to_string());
 
         if json[".tag"].as_str() != Some("file") {
             error!(tag = ?json[".tag"], "Dropbox shared link is not a file");
@@ -221,7 +234,12 @@ impl DropboxReadAt {
         }
 
         info!(name = %name, size = size, "Dropbox metadata resolved");
-        Ok(DropboxMetadata { name, size })
+        Ok(DropboxMetadata {
+            name,
+            size,
+            rev,
+            server_modified,
+        })
     }
 
     // ── Content requests ────────────────────────────────────────────────────

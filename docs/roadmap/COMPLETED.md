@@ -77,3 +77,5 @@
 - [x] **LZMA dictionary cap** — Memory-safe decoding safeguard that rejects or caps LZMA dictionary sizes to prevent OOM attacks (e.g., a 10KB archive requesting 4GB decompression buffer). Threaded through the `CodecConfig` layer.
 - [x] **Consistent guard enforcement** — Limits are threaded through all extraction paths (`extract`, `test`, `extract_selected`, `extract_all_streaming`) across both `archive-core` readers and the high-level `Archive` facade.
 - [x] **Path traversal guard** — Centralized path safety logic in `archive-core` via `PathPolicy` (Sanitize/Strict). Strips `..`, absolute roots, drive/UNC prefixes. Enforced in the state layer across all extraction methods. Ad-hoc CLI duplicate removed.
+- [x] **New `archive-cache` crate** — Migrated cache management logic to a dedicated crate; strictly enforced architectural boundaries and sealed `Archive` internal format accessors (Golden Rule #1); relocated `FormatCacheState` to `archive-core`.
+- [x] **HTTP fingerprint enrichment** — Added ETag and Last-Modified equivalent capture to HTTP, Google Drive, and Dropbox readers to enable robust server-side change detection without extra round-trips.

@@ -1,53 +1,11 @@
 use std::path::PathBuf;
 
-use archive_core::{ArchiveEntry, Rar4EntryLocation, RarEntryLocation, ZipEntryLocation};
+use archive_core::fingerprint::ArchiveFingerprint;
+use archive_core::ArchiveEntry;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Fingerprint for detecting whether a cached entry list is still valid.
-///
-/// Staleness detection uses the first available signal in priority order:
-/// ETag (authoritative), Last-Modified, mtime, source_size (weakest).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ArchiveFingerprint {
-    /// The source identifier — local path or URL.
-    pub source: String,
-    /// Total byte size of the source at cache time.
-    pub source_size: u64,
-    /// HTTP ETag header value, if the server provided one.
-    pub etag: Option<String>,
-    /// HTTP Last-Modified header value, if present.
-    pub last_modified: Option<String>,
-    /// Local file mtime as Unix timestamp (seconds), if available.
-    pub mtime: Option<u64>,
-}
-
-/// Format-specific state needed to reconstruct a parser from cache without any I/O.
-///
-/// Each variant carries the minimum data that extraction requires beyond the
-/// generic entry list.  RAR formats need preamble + end-block bytes for
-/// synthetic-archive construction during cloud extraction.
-#[derive(Debug, Serialize, Deserialize)]
-pub enum FormatCacheState {
-    Zip {
-        locations: Vec<ZipEntryLocation>,
-    },
-    Rar {
-        locations: Vec<RarEntryLocation>,
-        /// RAR5 signature + main header bytes (stored as Vec<u8> because Bytes is not Serialize).
-        archive_preamble: Vec<u8>,
-        /// End-of-archive marker block.
-        end_block: Vec<u8>,
-        /// Total archive size needed to reconstruct RarArchive.
-        archive_size: u64,
-    },
-    Rar4 {
-        locations: Vec<Rar4EntryLocation>,
-        archive_preamble: Vec<u8>,
-        end_block: Vec<u8>,
-        archive_size: u64,
-    },
-}
+use archive_core::FormatCacheState;
 
 /// Cached metadata for an archive — entry list + format state + fingerprint.
 ///

@@ -43,6 +43,10 @@ impl<T: ReadAt> CachingReadAt<T> {
         }
     }
 
+    pub fn inner(&self) -> &T {
+        &self.inner
+    }
+
     /// Get (and cache) the file size from the inner reader.
     async fn ensure_size(&self) -> Result<u64, ReadError> {
         self.file_size
