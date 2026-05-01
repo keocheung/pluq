@@ -3,8 +3,8 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 5 — Security Hardening & Release
-* **Current Active Task:** [HANDOVER]
-* **Baseline:** Glob filter + bulk-toggle from TUI search; shared glob_match helper between CLI Get and TUI.
+* **Current Active Task:** Step 2 — File logging always-on
+* **Baseline:** Diagnostics & cache schema: lockfile policy fixed (commit root Cargo.lock, ignore crate-level).
 
 
 ---

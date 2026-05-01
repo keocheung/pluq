@@ -6,7 +6,6 @@
 
 > Engineering-only items. None depend on the final repo URL or public-flip — all can land while the repo is private. URL-bound items (`pluq feedback`, `pluq bug-report`) live in Phase 6 alongside the final naming pass to avoid placeholder strings and retro-fix churn.
 
-- [ ] **`.gitignore` Cargo.lock fix** — ignore only `crates/*/Cargo.lock`; commit root lockfile (binary crate convention).
 - [ ] **`human-panic` integration** — friendly panic message + log path on crash.
 - [ ] **File logging always-on** — `tracing-appender` rolling file → `directories::ProjectDirs` state path. Cap 5 MB. Redact URLs / tokens at log site.
 - [ ] **Symlink target verification** — ensure links stay within the output directory.
