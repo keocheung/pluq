@@ -3,8 +3,8 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 5 — Security Hardening & Release
-* **Current Active Task:** Step 2 — File logging always-on
-* **Baseline:** Diagnostics & cache schema: lockfile policy fixed (commit root Cargo.lock, ignore crate-level).
+* **Current Active Task:** Step 3 — `human-panic` integration
+* **Baseline:** Diagnostics & cache schema: lockfile policy fixed, file logging always-on implemented (5 MB cap, redacted log sites).
 
 
 ---

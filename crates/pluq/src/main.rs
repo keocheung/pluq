@@ -2,6 +2,7 @@ mod auth_cmd;
 mod cli_progress;
 mod glob_match;
 pub mod home;
+mod redact;
 mod tui;
 
 use std::path::PathBuf;
@@ -24,7 +25,7 @@ struct Cli {
     /// Open an archive directly in the TUI. Omit to launch the Home Screen.
     source: Option<String>,
 
-    /// Enable debug logging to pluq.log (or set PLUQ_LOG=debug).
+    /// Escalate log level to debug (default: info; PLUQ_LOG also accepted).
     #[arg(long, global = true)]
     debug: bool,
 
@@ -94,13 +95,14 @@ async fn main() {
     let cli = Cli::parse();
 
     // ── Logging setup ────────────────────────────────────────────────────
-    // Writes to pluq.log in the current directory. Activated by
-    // --debug flag or PLUQ_LOG env var (e.g. PLUQ_LOG=trace).
-    // When neither is set, no subscriber is installed and all tracing macros
-    // are zero-cost no-ops.
+    // Always-on rolling log file under the platform state directory.
+    // Level escalates via --debug flag or PLUQ_LOG env var.
     let _log_guard = init_logging(cli.debug);
 
-    info!(command = ?std::env::args().collect::<Vec<_>>(), "pluq starting");
+    info!(
+        command = ?std::env::args().map(|a| redact::scrub(&a).into_owned()).collect::<Vec<_>>(),
+        "pluq starting"
+    );
 
     // ── Cache cleaning ───────────────────────────────────────────────────
     if cli.clean_cache {
@@ -440,24 +442,71 @@ pub(crate) fn format_size(bytes: u64) -> String {
     }
 }
 
+pub(crate) fn log_path() -> Option<PathBuf> {
+    directories::ProjectDirs::from("com", "pluq", "pluq").map(|dirs| {
+        let mut p = dirs
+            .state_dir()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| dirs.cache_dir().to_path_buf());
+        p.push("logs");
+        p
+    })
+}
+
+fn prune_logs(dir: &std::path::Path, max_total_bytes: u64) {
+    if !dir.exists() {
+        return;
+    }
+    let mut files = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if let Ok(metadata) = entry.metadata() {
+                if metadata.is_file() {
+                    let name = entry.file_name();
+                    let name_str = name.to_string_lossy();
+                    if name_str.starts_with("pluq.log") {
+                        files.push((entry.path(), metadata));
+                    }
+                }
+            }
+        }
+    }
+    // Sort oldest first
+    files.sort_by_key(|(_, meta)| {
+        meta.modified()
+            .unwrap_or_else(|_| std::time::SystemTime::UNIX_EPOCH)
+    });
+
+    let mut total_size: u64 = files.iter().map(|(_, meta)| meta.len()).sum();
+    for (path, meta) in files {
+        if total_size <= max_total_bytes {
+            break;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            total_size = total_size.saturating_sub(meta.len());
+        }
+    }
+}
+
 /// Initialize file-based logging. Returns a guard that must be held alive for the
 /// duration of the program (dropping it flushes the writer).
 ///
 /// Activated by `--debug` flag (sets level to `debug`) or the `PLUQ_LOG`
 /// env var (accepts any tracing level: `trace`, `debug`, `info`, `warn`, `error`).
-/// When neither is set, returns `None` and all tracing macros are zero-cost no-ops.
-fn init_logging(debug_flag: bool) -> Option<tracing_appender::non_blocking::WorkerGuard> {
+fn init_logging(debug_flag: bool) -> tracing_appender::non_blocking::WorkerGuard {
     let env_level = std::env::var("PLUQ_LOG").ok();
 
     let level = if debug_flag {
-        Some("debug".to_string())
+        "debug".to_string()
     } else {
-        env_level
+        env_level.unwrap_or_else(|| "info".to_string())
     };
 
-    let level = level?;
+    let log_dir = log_path().unwrap_or_else(|| PathBuf::from("."));
+    std::fs::create_dir_all(&log_dir).ok();
+    prune_logs(&log_dir, 5 * 1024 * 1024);
 
-    let file_appender = tracing_appender::rolling::never(".", "pluq.log");
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "pluq.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
     tracing_subscriber::fmt()
@@ -473,7 +522,7 @@ fn init_logging(debug_flag: bool) -> Option<tracing_appender::non_blocking::Work
         .with_line_number(true)
         .init();
 
-    Some(guard)
+    guard
 }
 
 #[cfg(test)]
