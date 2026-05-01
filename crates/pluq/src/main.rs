@@ -92,6 +92,20 @@ enum Command {
 
 #[tokio::main]
 async fn main() {
+    // ── Panic handling ───────────────────────────────────────────────────
+    let log_msg = if let Some(path) = log_path() {
+        format!("- Logs: {}", path.display())
+    } else {
+        String::new()
+    };
+
+    human_panic::setup_panic!(
+        human_panic::Metadata::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
+            .authors("Stefan Dekanski")
+            .homepage("") // TODO(release): set repo URL once public
+            .support(log_msg.clone())
+    );
+
     let cli = Cli::parse();
 
     // ── Logging setup ────────────────────────────────────────────────────

@@ -82,3 +82,4 @@
 - [x] **Glob extraction in TUI** — Extended search box to handle `*`, `?`, `[` patterns; bulk-toggle matching entries for extraction; shared `glob_match` helper between CLI and TUI.
 - [x] **`.gitignore` Cargo.lock fix** — ignore only `crates/*/Cargo.lock`; commit root lockfile (binary crate convention).
 - [x] **File logging always-on** — `tracing-appender` rolling file → `directories::ProjectDirs` state path. Cap 5 MB. Redact URLs / tokens at log site.
+- [x] **`human-panic` integration** — friendly panic message + log path on crash.

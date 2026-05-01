@@ -6,7 +6,6 @@
 
 > Engineering-only items. None depend on the final repo URL or public-flip — all can land while the repo is private. URL-bound items (`pluq feedback`, `pluq bug-report`) live in Phase 6 alongside the final naming pass to avoid placeholder strings and retro-fix churn.
 
-- [ ] **`human-panic` integration** — friendly panic message + log path on crash.
 - [ ] **Symlink target verification** — ensure links stay within the output directory.
 - [ ] **Solid RAR UX fix** — drop silent pre-filter in `extract_all_streaming`; CLI display layer appends generic `"→ request support: <url>"` suffix on `ArchiveError::UnsupportedFormat`; result summary prints `BatchResult.failed` entries. Spec: `docs/sandbox/V1_LOCKED.md` Decision 15.
 - [ ] **Versioned cache schema** — add `schema_version: u32`; bump on format additions to invalidate stale caches.
