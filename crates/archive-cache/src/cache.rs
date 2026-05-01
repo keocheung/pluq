@@ -4,16 +4,33 @@ use archive_core::fingerprint::ArchiveFingerprint;
 use archive_core::ArchiveEntry;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracing::info;
 
 use archive_core::FormatCacheState;
+
+/// Bump this constant whenever the on-disk shape of [`ArchiveCache`] or any
+/// type it transitively contains changes (new field without a `default`,
+/// variant rename, etc.). A mismatch triggers a silent re-scan — no migration.
+///
+/// **Current value: 1.**
+pub const SCHEMA_VERSION: u32 = 1;
 
 /// Cached metadata for an archive — entry list + format state + fingerprint.
 ///
 /// Format-agnostic at the fingerprint level. Format-specific extraction data
 /// lives in [`FormatCacheState`]. Stored as pretty-printed JSON in the platform
 /// cache directory.
+///
+/// The `schema_version` field guards against stale on-disk caches surviving a
+/// format-shape change. Older files that lack this field deserialise it as `0`
+/// (via `#[serde(default)]`) and are treated as version-mismatched → re-scan.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ArchiveCache {
+    /// Schema version written by the code that created this cache file.
+    /// Compared against [`SCHEMA_VERSION`] in [`ArchiveCache::is_valid`].
+    /// Defaults to `0` when absent (old cache files) so they are uniformly rejected.
+    #[serde(default)]
+    pub schema_version: u32,
     pub fingerprint: ArchiveFingerprint,
     pub entries: Vec<ArchiveEntry>,
     pub format_state: FormatCacheState,
@@ -24,9 +41,17 @@ pub struct ArchiveCache {
 impl ArchiveCache {
     /// Return `true` if this cache is still valid for `current`.
     ///
-    /// Checks ETag first (most authoritative), then Last-Modified, then mtime,
-    /// then falls back to source size.
+    /// **Schema version is checked first** — cheapest and most decisive. If the
+    /// stored version differs from [`SCHEMA_VERSION`] the entire cache is stale
+    /// regardless of fingerprint equality.
+    ///
+    /// Then checks ETag (most authoritative), Last-Modified, mtime, and finally
+    /// source size.
     pub fn is_valid(&self, current: &ArchiveFingerprint) -> bool {
+        // Version check first: stale schema → immediate rejection.
+        if self.schema_version != SCHEMA_VERSION {
+            return false;
+        }
         if self.fingerprint.source != current.source {
             return false;
         }
@@ -53,9 +78,28 @@ impl ArchiveCache {
     }
 
     /// Deserialize from JSON at `path`.
+    ///
+    /// If the file deserializes successfully but carries an old `schema_version`,
+    /// this function emits a single `info!` log line and returns an
+    /// [`io::ErrorKind::InvalidData`] error so callers treat it identically to
+    /// a missing or corrupt cache file (→ re-scan, no crash).
     pub fn load(path: &std::path::Path) -> Result<Self, std::io::Error> {
         let json = std::fs::read_to_string(path)?;
-        serde_json::from_str(&json).map_err(std::io::Error::other)
+        let cache: Self = serde_json::from_str(&json).map_err(std::io::Error::other)?;
+        if cache.schema_version != SCHEMA_VERSION {
+            info!(
+                old = cache.schema_version,
+                expected = SCHEMA_VERSION,
+                "cache schema mismatch (got {}, expected {}); rescanning",
+                cache.schema_version,
+                SCHEMA_VERSION,
+            );
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "cache schema version mismatch",
+            ));
+        }
+        Ok(cache)
     }
 }
 
@@ -97,6 +141,7 @@ mod tests {
 
     fn make_cache(fp: ArchiveFingerprint) -> ArchiveCache {
         ArchiveCache {
+            schema_version: SCHEMA_VERSION,
             fingerprint: fp,
             entries: vec![],
             format_state: FormatCacheState::Zip { locations: vec![] },
@@ -166,6 +211,7 @@ mod tests {
     fn round_trip_rar_format_state() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let cache = ArchiveCache {
+            schema_version: SCHEMA_VERSION,
             fingerprint: fingerprint("test.rar", 2048),
             entries: vec![],
             format_state: FormatCacheState::Rar {
@@ -197,6 +243,7 @@ mod tests {
     fn round_trip_rar4_format_state() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let cache = ArchiveCache {
+            schema_version: SCHEMA_VERSION,
             fingerprint: fingerprint("test4.rar", 1024),
             entries: vec![],
             format_state: FormatCacheState::Rar4 {
@@ -220,6 +267,42 @@ mod tests {
         } else {
             panic!("expected Rar4 format state");
         }
+    }
+
+    #[test]
+    fn is_valid_fails_on_schema_mismatch() {
+        // Same source + size, but schema_version = 0 (old cache file).
+        let fp = fingerprint("schema_test.zip", 42);
+        let cache = ArchiveCache {
+            schema_version: 0, // deliberate mismatch
+            fingerprint: fp.clone(),
+            entries: vec![],
+            format_state: FormatCacheState::Zip { locations: vec![] },
+            created_at: 0,
+        };
+        assert!(
+            !cache.is_valid(&fp),
+            "is_valid must return false when schema_version != SCHEMA_VERSION"
+        );
+    }
+
+    #[test]
+    fn load_rejects_schema_mismatch_with_invalid_data() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        // Write a cache with schema_version = 0 directly.
+        let old_cache = ArchiveCache {
+            schema_version: 0,
+            fingerprint: fingerprint("old.zip", 100),
+            entries: vec![],
+            format_state: FormatCacheState::Zip { locations: vec![] },
+            created_at: 0,
+        };
+        // Bypass save() to write schema_version: 0 without triggering any guard.
+        let json = serde_json::to_string_pretty(&old_cache).unwrap();
+        std::fs::write(tmp.path(), json).unwrap();
+
+        let err = ArchiveCache::load(tmp.path()).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]

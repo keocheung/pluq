@@ -8,7 +8,6 @@
 
 - [ ] **Symlink target verification** — ensure links stay within the output directory.
 - [ ] **Solid RAR UX fix** — drop silent pre-filter in `extract_all_streaming`; CLI display layer appends generic `"→ request support: <url>"` suffix on `ArchiveError::UnsupportedFormat`; result summary prints `BatchResult.failed` entries. Spec: `docs/sandbox/V1_LOCKED.md` Decision 15.
-- [ ] **Versioned cache schema** — add `schema_version: u32`; bump on format additions to invalidate stale caches.
 
 ## Phase 6: Public Release
 

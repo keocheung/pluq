@@ -22,6 +22,7 @@ pub(crate) fn save_cache(
     }
 
     let cache = crate::ArchiveCache {
+        schema_version: crate::SCHEMA_VERSION,
         fingerprint: fingerprint.clone(),
         entries: archive.entries().to_vec(),
         format_state: archive.format_cache_state(),

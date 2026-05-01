@@ -3,8 +3,8 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 5 — Security Hardening & Release
-* **Current Active Task:** Step 4 — Versioned cache schema
-* **Baseline:** Diagnostics & cache schema: lockfile policy fixed, file logging always-on implemented (5 MB cap, redacted log sites), human-panic integration added.
+* **Current Active Task:** [HANDOVER]
+* **Baseline:** Diagnostics & cache schema cluster complete: lockfile policy fixed, file logging always-on (5 MB cap, redacted log sites), human-panic integration, versioned cache schema (`schema_version: u32`, `SCHEMA_VERSION = 1`, mismatch → re-scan + `info!` log).
 
 
 ---

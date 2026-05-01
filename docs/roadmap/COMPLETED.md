@@ -83,3 +83,4 @@
 - [x] **`.gitignore` Cargo.lock fix** — ignore only `crates/*/Cargo.lock`; commit root lockfile (binary crate convention).
 - [x] **File logging always-on** — `tracing-appender` rolling file → `directories::ProjectDirs` state path. Cap 5 MB. Redact URLs / tokens at log site.
 - [x] **`human-panic` integration** — friendly panic message + log path on crash.
+- [x] **Versioned cache schema** — `schema_version: u32` field (default `0` for old files); version check first in `is_valid`; `load` emits `info!` on mismatch and returns `InvalidData`; `SCHEMA_VERSION = 1` exported from `archive-cache`.
