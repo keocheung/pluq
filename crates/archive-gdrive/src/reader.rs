@@ -35,7 +35,7 @@ impl GoogleDriveReadAt {
 
     fn build(file_id: String, auth: GDriveAuth, base_url: &str) -> Self {
         let client = Client::builder()
-            .user_agent("archive-sniper")
+            .user_agent("pluq")
             .build()
             .expect("failed to create HTTP client");
         Self {

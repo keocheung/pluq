@@ -43,7 +43,7 @@ pub fn resolve(input: &str, config: &SourceConfig) -> Result<ResolvedSource, Sou
     if input.starts_with("http://") || input.starts_with("https://") {
         info!(url = %input, "generic HTTP URL detected");
         let client = reqwest::Client::builder()
-            .user_agent("archive-sniper")
+            .user_agent("pluq")
             .build()
             .expect("failed to create HTTP client");
         let reader = CachingReadAt::new(HttpReadAt::new(input, client));
@@ -94,8 +94,7 @@ pub(crate) fn resolve_gdrive_auth(config: &SourceConfig) -> Result<GDriveAuth, S
 
     Err(SourceError::NoCredentials {
         provider: "Google Drive",
-        guidance: "Set ARCHIVE_SNIPER_GDRIVE_KEY, or authenticate via `snipe auth add gdrive`."
-            .into(),
+        guidance: "Set PLUQ_GDRIVE_KEY, or authenticate via `pluq auth add gdrive`.".into(),
     })
 }
 
@@ -133,7 +132,7 @@ pub(crate) fn resolve_dropbox_auth(config: &SourceConfig) -> Result<DropboxAuth,
 
     Err(SourceError::NoCredentials {
         provider: "Dropbox",
-        guidance: "Set ARCHIVE_SNIPER_DROPBOX_APP_KEY + ARCHIVE_SNIPER_DROPBOX_APP_SECRET, or authenticate via `snipe auth add dropbox`."
+        guidance: "Set PLUQ_DROPBOX_APP_KEY + PLUQ_DROPBOX_APP_SECRET, or authenticate via `pluq auth add dropbox`."
             .into(),
     })
 }
@@ -152,8 +151,8 @@ mod tests {
         let _guard = ENV_MUTEX.lock().unwrap();
         // SAFETY: test mutates process env. Run single-threaded if flaky.
         unsafe {
-            std::env::remove_var("ARCHIVE_SNIPER_DROPBOX_APP_KEY");
-            std::env::remove_var("ARCHIVE_SNIPER_DROPBOX_APP_SECRET");
+            std::env::remove_var("PLUQ_DROPBOX_APP_KEY");
+            std::env::remove_var("PLUQ_DROPBOX_APP_SECRET");
         }
         let result = resolve(
             "https://www.dropbox.com/s/abc/x.zip?dl=0",
@@ -173,8 +172,8 @@ mod tests {
         let _guard = ENV_MUTEX.lock().unwrap();
         // SAFETY: test mutates process env. Run single-threaded if flaky.
         unsafe {
-            std::env::set_var("ARCHIVE_SNIPER_DROPBOX_APP_KEY", "test-key");
-            std::env::set_var("ARCHIVE_SNIPER_DROPBOX_APP_SECRET", "test-secret");
+            std::env::set_var("PLUQ_DROPBOX_APP_KEY", "test-key");
+            std::env::set_var("PLUQ_DROPBOX_APP_SECRET", "test-secret");
         }
         let url = "https://www.dropbox.com/s/abc/x.zip?dl=0";
         let result = resolve(url, &SourceConfig::default());
@@ -185,8 +184,8 @@ mod tests {
         }
 
         unsafe {
-            std::env::remove_var("ARCHIVE_SNIPER_DROPBOX_APP_KEY");
-            std::env::remove_var("ARCHIVE_SNIPER_DROPBOX_APP_SECRET");
+            std::env::remove_var("PLUQ_DROPBOX_APP_KEY");
+            std::env::remove_var("PLUQ_DROPBOX_APP_SECRET");
         }
     }
 
@@ -195,9 +194,9 @@ mod tests {
         let _guard = ENV_MUTEX.lock().unwrap();
         // SAFETY: test mutates process env. Run single-threaded if flaky.
         unsafe {
-            std::env::remove_var("ARCHIVE_SNIPER_DROPBOX_APP_KEY");
-            std::env::remove_var("ARCHIVE_SNIPER_DROPBOX_APP_SECRET");
-            std::env::set_var("ARCHIVE_SNIPER_DROPBOX_APP_KEY", "test-key");
+            std::env::remove_var("PLUQ_DROPBOX_APP_KEY");
+            std::env::remove_var("PLUQ_DROPBOX_APP_SECRET");
+            std::env::set_var("PLUQ_DROPBOX_APP_KEY", "test-key");
         }
         let result = resolve(
             "https://www.dropbox.com/s/abc/x.zip?dl=0",
@@ -211,7 +210,7 @@ mod tests {
             })
         ));
         unsafe {
-            std::env::remove_var("ARCHIVE_SNIPER_DROPBOX_APP_KEY");
+            std::env::remove_var("PLUQ_DROPBOX_APP_KEY");
         }
     }
 
@@ -235,15 +234,15 @@ mod tests {
 
         let _guard = ENV_MUTEX.lock().unwrap();
         unsafe {
-            std::env::set_var("ARCHIVE_SNIPER_GDRIVE_CLIENT_ID", "test-client-id");
-            std::env::remove_var("ARCHIVE_SNIPER_GDRIVE_KEY");
+            std::env::set_var("PLUQ_GDRIVE_CLIENT_ID", "test-client-id");
+            std::env::remove_var("PLUQ_GDRIVE_KEY");
         }
 
         let auth = resolve_gdrive_auth(&config).unwrap();
         assert!(matches!(auth, GDriveAuth::OAuth { .. }));
 
         unsafe {
-            std::env::remove_var("ARCHIVE_SNIPER_GDRIVE_CLIENT_ID");
+            std::env::remove_var("PLUQ_GDRIVE_CLIENT_ID");
         }
     }
 
@@ -252,13 +251,13 @@ mod tests {
         let config = SourceConfig::default();
         let _guard = ENV_MUTEX.lock().unwrap();
         unsafe {
-            std::env::set_var("ARCHIVE_SNIPER_GDRIVE_KEY", "test-key");
-            std::env::remove_var("ARCHIVE_SNIPER_GDRIVE_CLIENT_ID");
+            std::env::set_var("PLUQ_GDRIVE_KEY", "test-key");
+            std::env::remove_var("PLUQ_GDRIVE_CLIENT_ID");
         }
         let auth = resolve_gdrive_auth(&config).unwrap();
         assert!(matches!(auth, GDriveAuth::ApiKey(k) if k == "test-key"));
         unsafe {
-            std::env::remove_var("ARCHIVE_SNIPER_GDRIVE_KEY");
+            std::env::remove_var("PLUQ_GDRIVE_KEY");
         }
     }
 
@@ -281,15 +280,15 @@ mod tests {
         let config = SourceConfig::new().with_token_store(Arc::new(store));
         let _guard = ENV_MUTEX.lock().unwrap();
         unsafe {
-            std::env::set_var("ARCHIVE_SNIPER_GDRIVE_KEY", "test-key");
-            std::env::remove_var("ARCHIVE_SNIPER_GDRIVE_CLIENT_ID");
+            std::env::set_var("PLUQ_GDRIVE_KEY", "test-key");
+            std::env::remove_var("PLUQ_GDRIVE_CLIENT_ID");
         }
 
         let auth = resolve_gdrive_auth(&config).unwrap();
         assert!(matches!(auth, GDriveAuth::ApiKey(k) if k == "test-key"));
 
         unsafe {
-            std::env::remove_var("ARCHIVE_SNIPER_GDRIVE_KEY");
+            std::env::remove_var("PLUQ_GDRIVE_KEY");
         }
     }
 
@@ -313,16 +312,16 @@ mod tests {
 
         let _guard = ENV_MUTEX.lock().unwrap();
         unsafe {
-            std::env::set_var("ARCHIVE_SNIPER_DROPBOX_CLIENT_ID", "test-client-id");
-            std::env::remove_var("ARCHIVE_SNIPER_DROPBOX_APP_KEY");
-            std::env::remove_var("ARCHIVE_SNIPER_DROPBOX_APP_SECRET");
+            std::env::set_var("PLUQ_DROPBOX_CLIENT_ID", "test-client-id");
+            std::env::remove_var("PLUQ_DROPBOX_APP_KEY");
+            std::env::remove_var("PLUQ_DROPBOX_APP_SECRET");
         }
 
         let auth = resolve_dropbox_auth(&config).unwrap();
         assert!(matches!(auth, DropboxAuth::OAuth { .. }));
 
         unsafe {
-            std::env::remove_var("ARCHIVE_SNIPER_DROPBOX_CLIENT_ID");
+            std::env::remove_var("PLUQ_DROPBOX_CLIENT_ID");
         }
     }
 
@@ -331,15 +330,15 @@ mod tests {
         let config = SourceConfig::default();
         let _guard = ENV_MUTEX.lock().unwrap();
         unsafe {
-            std::env::set_var("ARCHIVE_SNIPER_DROPBOX_APP_KEY", "test-key");
-            std::env::set_var("ARCHIVE_SNIPER_DROPBOX_APP_SECRET", "test-secret");
-            std::env::remove_var("ARCHIVE_SNIPER_DROPBOX_CLIENT_ID");
+            std::env::set_var("PLUQ_DROPBOX_APP_KEY", "test-key");
+            std::env::set_var("PLUQ_DROPBOX_APP_SECRET", "test-secret");
+            std::env::remove_var("PLUQ_DROPBOX_CLIENT_ID");
         }
         let auth = resolve_dropbox_auth(&config).unwrap();
         assert!(matches!(auth, DropboxAuth::AppCredentials { .. }));
         unsafe {
-            std::env::remove_var("ARCHIVE_SNIPER_DROPBOX_APP_KEY");
-            std::env::remove_var("ARCHIVE_SNIPER_DROPBOX_APP_SECRET");
+            std::env::remove_var("PLUQ_DROPBOX_APP_KEY");
+            std::env::remove_var("PLUQ_DROPBOX_APP_SECRET");
         }
     }
 
@@ -362,17 +361,17 @@ mod tests {
         let config = SourceConfig::new().with_token_store(Arc::new(store));
         let _guard = ENV_MUTEX.lock().unwrap();
         unsafe {
-            std::env::set_var("ARCHIVE_SNIPER_DROPBOX_APP_KEY", "test-key");
-            std::env::set_var("ARCHIVE_SNIPER_DROPBOX_APP_SECRET", "test-secret");
-            std::env::remove_var("ARCHIVE_SNIPER_DROPBOX_CLIENT_ID");
+            std::env::set_var("PLUQ_DROPBOX_APP_KEY", "test-key");
+            std::env::set_var("PLUQ_DROPBOX_APP_SECRET", "test-secret");
+            std::env::remove_var("PLUQ_DROPBOX_CLIENT_ID");
         }
 
         let auth = resolve_dropbox_auth(&config).unwrap();
         assert!(matches!(auth, DropboxAuth::AppCredentials { .. }));
 
         unsafe {
-            std::env::remove_var("ARCHIVE_SNIPER_DROPBOX_APP_KEY");
-            std::env::remove_var("ARCHIVE_SNIPER_DROPBOX_APP_SECRET");
+            std::env::remove_var("PLUQ_DROPBOX_APP_KEY");
+            std::env::remove_var("PLUQ_DROPBOX_APP_SECRET");
         }
     }
 
@@ -381,8 +380,8 @@ mod tests {
         let config = SourceConfig::default();
         let _guard = ENV_MUTEX.lock().unwrap();
         unsafe {
-            std::env::remove_var("ARCHIVE_SNIPER_GDRIVE_KEY");
-            std::env::remove_var("ARCHIVE_SNIPER_GDRIVE_CLIENT_ID");
+            std::env::remove_var("PLUQ_GDRIVE_KEY");
+            std::env::remove_var("PLUQ_GDRIVE_CLIENT_ID");
         }
 
         let auth = resolve_gdrive_auth(&config);

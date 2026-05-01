@@ -39,7 +39,7 @@ pub struct TokenStore {
 }
 
 impl TokenStore {
-    /// Load tokens from the default location: `~/.config/archive-sniper/tokens.json`.
+    /// Load tokens from the default location: `~/.config/pluq/tokens.json`.
     /// Missing file is NOT an error — returns an empty store.
     pub fn load_default() -> Result<Self, AuthError> {
         Self::load_from(Self::default_path()?)
@@ -99,9 +99,9 @@ impl TokenStore {
         inner.keys().cloned().collect()
     }
 
-    /// Resolve the default path. Public for CLI `snipe auth list` diagnostics.
+    /// Resolve the default path. Public for CLI `pluq auth list` diagnostics.
     pub fn default_path() -> Result<PathBuf, AuthError> {
-        ProjectDirs::from("com", "archive-sniper", "archive-sniper")
+        ProjectDirs::from("com", "pluq", "pluq")
             .map(|dirs| dirs.config_dir().join("tokens.json"))
             .ok_or(AuthError::NoConfigDir)
     }

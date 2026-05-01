@@ -7,7 +7,7 @@ pub enum DropboxError {
     NotPublic { url: String },
 
     #[error(
-        "Dropbox: app credentials invalid — check ARCHIVE_SNIPER_DROPBOX_APP_KEY / ARCHIVE_SNIPER_DROPBOX_APP_SECRET"
+        "Dropbox: app credentials invalid — check PLUQ_DROPBOX_APP_KEY / PLUQ_DROPBOX_APP_SECRET"
     )]
     InvalidCredentials,
 
@@ -18,7 +18,7 @@ pub enum DropboxError {
     QuotaExceeded,
 
     #[error(
-        "Dropbox: app credentials required — set ARCHIVE_SNIPER_DROPBOX_APP_KEY and ARCHIVE_SNIPER_DROPBOX_APP_SECRET"
+        "Dropbox: app credentials required — set PLUQ_DROPBOX_APP_KEY and PLUQ_DROPBOX_APP_SECRET"
     )]
     AppCredentialsMissing,
 

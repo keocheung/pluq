@@ -1,7 +1,7 @@
 # TUI Style Guide
 
-> The canonical design system for Archive Sniper's terminal UI.
-> Feature specs (zen-sniper, home-screen, etc.) compose these building blocks.
+> The canonical design system for pluq's terminal UI.
+> Feature specs (zen-mode, home-screen, etc.) compose these building blocks.
 > If a rule here conflicts with a feature spec, **this document wins**.
 
 ---
@@ -109,7 +109,7 @@ Modal overlays are rendered on top of this layout with a dimmed backdrop, not in
 ### Global Quit Behavior
 
 1. **Standard Context:** `q` is the universal key to quit the application from any screen.
-2. **Text Input Focused:** When an input field (like `SnipeInput`) is active, `q` is captured for text entry. In this context, `Ctrl+q` is used to quit the application.
+2. **Text Input Focused:** When an input field (like `PluqInput`) is active, `q` is captured for text entry. In this context, `Ctrl+q` is used to quit the application.
 
 ### Esc Behavior (The "Back" Button)
 

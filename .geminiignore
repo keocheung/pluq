@@ -16,7 +16,7 @@ Cargo.lock
 *.swp
 *.swo
 # *.log
-!archive-sniper.log
+!pluq.log
 
 # Environment files (never commit secrets)
 .env

@@ -1,4 +1,4 @@
-# ArchiveSniper — Error Architecture
+# pluq — Error Architecture
 
 > **Switchboard.** Canonical philosophy + 4-tier model + flow summary below.
 > Variant definitions, decorator code, translation match arms live in

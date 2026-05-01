@@ -146,7 +146,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_full_contents() {
-        let data = b"hello archive sniper";
+        let data = b"hello pluq";
         let f = temp_file(data);
         let reader = LocalReadAt::new(f.path());
 
@@ -156,7 +156,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_with_offset() {
-        let data = b"hello archive sniper";
+        let data = b"hello archive world";
         let f = temp_file(data);
         let reader = LocalReadAt::new(f.path());
 
@@ -223,7 +223,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_read_with_offset() {
-        let data = b"hello archive sniper";
+        let data = b"hello archive world";
         let f = temp_file(data);
         let reader = LocalReadAt::new(f.path());
 

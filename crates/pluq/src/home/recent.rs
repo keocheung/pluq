@@ -25,7 +25,7 @@ pub struct RecentList {
 const MAX_RECENT: usize = 10;
 
 impl RecentList {
-    /// Read `~/.config/archive-sniper/recent.json`. Returns an empty list if the
+    /// Read `~/.config/pluq/recent.json`. Returns an empty list if the
     /// file does not exist, is empty, or fails to parse (log a warning on parse
     /// failure, never propagate).
     pub fn load() -> Self {
@@ -142,7 +142,7 @@ impl RecentList {
 }
 
 fn recent_path() -> Option<PathBuf> {
-    let dirs = ProjectDirs::from("", "", "archive-sniper")?;
+    let dirs = ProjectDirs::from("", "", "pluq")?;
     Some(dirs.config_dir().join("recent.json"))
 }
 

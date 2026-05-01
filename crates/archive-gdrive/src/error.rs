@@ -15,7 +15,7 @@ pub enum GDriveError {
     #[error("Google Drive: quota exceeded")]
     QuotaExceeded,
 
-    #[error("Google Drive: API key required — set ARCHIVE_SNIPER_GDRIVE_KEY")]
+    #[error("Google Drive: API key required — set PLUQ_GDRIVE_KEY")]
     ApiKeyMissing,
 
     #[error("Google Drive: could not extract file ID from URL")]

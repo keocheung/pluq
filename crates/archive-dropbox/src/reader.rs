@@ -39,7 +39,7 @@ impl DropboxReadAt {
 
     fn build(shared_url: String, auth: DropboxAuth, api_base: &str, content_base: &str) -> Self {
         let client = Client::builder()
-            .user_agent("archive-sniper")
+            .user_agent("pluq")
             .build()
             .expect("failed to create HTTP client");
         Self {

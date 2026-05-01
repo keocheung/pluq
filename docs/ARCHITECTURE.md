@@ -1,4 +1,4 @@
-# ArchiveSniper — System Architecture
+# pluq — System Architecture
 
 > **Switchboard.** Canonical mental model + boundaries below. Implementation
 > detail lives in `architecture/` spokes — pull on demand.
@@ -11,7 +11,7 @@
 ```text
 ┌──────────────────────────────────────────────────────────────────┐
 │  Layer 4: Products (binaries)                                     │
-│    CLI (snipe) │ Server/SaaS │ KMP Apps (Android/iOS/Desktop)     │
+│    CLI (pluq)  │ Server/SaaS │ KMP Apps (Android/iOS/Desktop)     │
 │    Each product assembles a ReadAt decorator stack and defines    │
 │    its own product-level error type.                              │
 └──────────────────────┬───────────────────────────────────────────┘
@@ -83,7 +83,7 @@ archive-core         ← ReadAt, codecs, format parsers (generic over R: ReadAt)
     │       ▲
     ├─ archive (state)      (Archive<R>, EntryTree, ArchiveCache, error xlation)
     │       ▲
-    └─ archive-cli          (TUI product, calls archive-source + archive)
+    └─ pluq                 (TUI product, calls archive-source + archive)
 
 archive-dev    — experimental scratchpad (no production code depends on it)
 ```

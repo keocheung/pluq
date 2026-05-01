@@ -528,7 +528,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             // Content
             let is_auth = msg.contains("private") || msg.contains("credentials invalid");
             let hint = if is_auth {
-                Some("Tip: run `snipe auth add gdrive|dropbox` to authenticate.")
+                Some("Tip: run `pluq auth add gdrive|dropbox` to authenticate.")
             } else {
                 None
             };
@@ -1016,7 +1016,7 @@ fn draw_home(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     .split(area);
 
     // Header: Solid cyan bar with black bold text
-    let header = Paragraph::new(" Archive Sniper — Home ").style(
+    let header = Paragraph::new(" pluq — Home ").style(
         Style::default()
             .bg(Color::Cyan)
             .fg(Color::Black)
@@ -1041,7 +1041,7 @@ fn draw_home(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let bookmarks_height: u16 = 1 /* header */ + bookmarks_body_rows;
 
     let content_chunks = Layout::vertical([
-        Constraint::Length(2),                // Snipe Input + optional inline error
+        Constraint::Length(2),                // Pluq Input + optional inline error
         Constraint::Length(1),                // blank spacer
         Constraint::Length(bookmarks_height), // Bookmarks (header + body)
         Constraint::Length(1),                // blank spacer
@@ -1059,31 +1059,31 @@ fn draw_home(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         }
     };
 
-    // 1. Snipe Input
-    let snipe_chunks =
+    // 1. Pluq Input
+    let pluq_chunks =
         Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(content_chunks[0]);
 
-    let snipe_focused = app.home_focus == HomeFocus::SnipeInput;
-    let label_style = if snipe_focused {
+    let pluq_focused = app.home_focus == HomeFocus::PluqInput;
+    let label_style = if pluq_focused {
         Style::default().fg(Color::Cyan)
     } else {
         Style::default().fg(Color::DarkGray)
     };
 
-    let mut snipe_text = vec![ratatui::text::Span::styled("[ Snipe: ] ", label_style)];
+    let mut pluq_text = vec![ratatui::text::Span::styled("[ Pluq: ] ", label_style)];
 
-    if app.snipe_input.is_empty() && !snipe_focused {
-        snipe_text.push(ratatui::text::Span::styled(
+    if app.pluq_input.is_empty() && !pluq_focused {
+        pluq_text.push(ratatui::text::Span::styled(
             " Paste cloud link or local path...",
             Style::default().fg(Color::DarkGray),
         ));
     } else {
-        snipe_text.push(ratatui::text::Span::styled(
-            &app.snipe_input,
+        pluq_text.push(ratatui::text::Span::styled(
+            &app.pluq_input,
             Style::default().fg(Color::White),
         ));
-        if snipe_focused {
-            snipe_text.push(ratatui::text::Span::styled(
+        if pluq_focused {
+            pluq_text.push(ratatui::text::Span::styled(
                 "_",
                 Style::default().fg(Color::White),
             ));
@@ -1091,14 +1091,14 @@ fn draw_home(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 
     frame.render_widget(
-        Paragraph::new(ratatui::text::Line::from(snipe_text)),
-        snipe_chunks[0],
+        Paragraph::new(ratatui::text::Line::from(pluq_text)),
+        pluq_chunks[0],
     );
 
     if let Some(ref err) = app.home_input_error {
         frame.render_widget(
             Paragraph::new(format!(" {}", err)).style(Style::default().fg(Color::Red)),
-            snipe_chunks[1],
+            pluq_chunks[1],
         );
     }
 
@@ -1230,13 +1230,13 @@ fn draw_home(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         format!("  {}", msg)
     } else {
         match app.home_focus {
-            HomeFocus::SnipeInput if app.snipe_input.is_empty() => {
+            HomeFocus::PluqInput if app.pluq_input.is_empty() => {
                 "  Paste a link or path. Tab cycle  Ctrl+q quit".into()
             }
-            HomeFocus::SnipeInput if looks_like_url(&app.snipe_input) => {
+            HomeFocus::PluqInput if looks_like_url(&app.pluq_input) => {
                 "  Enter open  Tab cycle  Ctrl+q quit".into()
             }
-            HomeFocus::SnipeInput => "  Enter open  Tab complete  Ctrl+q quit".into(),
+            HomeFocus::PluqInput => "  Enter open  Tab complete  Ctrl+q quit".into(),
             HomeFocus::Recent if !visible_recent.is_empty() => {
                 "  Enter open  b bookmark  d delete  Tab cycle  q quit".into()
             }

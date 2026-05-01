@@ -1138,7 +1138,7 @@ mod tests {
 
     #[tokio::test]
     async fn extract_deflated_file() {
-        let content = b"Archive Sniper is awesome! Compressing this text with Deflate.";
+        let content = b"pluq is awesome! Compressing this text with Deflate.";
         let (_tmp, reader) =
             create_test_zip(&[("compressed.txt", content, ZipCrateMethod::Deflated)]);
 
@@ -1636,7 +1636,7 @@ mod tests {
     #[tokio::test]
     async fn extract_aes256_encrypted_entry() {
         let password = "correct-horse-aes";
-        let content = b"Archive Sniper WinZip AES test content!";
+        let content = b"pluq WinZip AES test content!";
 
         let (_tmp, reader) = create_aes_encrypted_test_zip(
             password,
@@ -1664,7 +1664,7 @@ mod tests {
     #[tokio::test]
     async fn extract_aes256_deflated_encrypted_entry() {
         let password = "deflate-aes-pw";
-        let content: Vec<u8> = b"Archive Sniper AES + Deflate pipeline test. "
+        let content: Vec<u8> = b"pluq AES + Deflate pipeline test. "
             .iter()
             .cycle()
             .take(2048)
@@ -1763,7 +1763,7 @@ mod tests {
     #[tokio::test]
     async fn extract_traditional_encrypted_entry() {
         let password = b"correct-horse";
-        let content = b"Secret message for Archive Sniper!";
+        let content = b"Secret message for pluq!";
 
         let (_tmp, reader) =
             create_encrypted_test_zip(password, &[("secret.txt", content, ZipCrateMethod::Stored)]);
@@ -1793,7 +1793,7 @@ mod tests {
     #[tokio::test]
     async fn wrong_password_detected_early() {
         let password = b"correct-horse";
-        let content = b"Secret message for Archive Sniper!";
+        let content = b"Secret message for pluq!";
 
         let (_tmp, reader) =
             create_encrypted_test_zip(password, &[("secret.txt", content, ZipCrateMethod::Stored)]);
@@ -2028,7 +2028,7 @@ mod tests {
     async fn extract_encrypted_deflated_entry() {
         let password = b"deflate-test-pw";
         // Repeating data that compresses well with Deflate.
-        let content: Vec<u8> = b"Archive Sniper ZipCrypto test with Deflate compression. "
+        let content: Vec<u8> = b"pluq ZipCrypto test with Deflate compression. "
             .iter()
             .cycle()
             .take(1024)

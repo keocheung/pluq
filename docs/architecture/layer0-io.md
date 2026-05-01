@@ -123,7 +123,7 @@ Rust or the host language.
 
 ## Design Notes
 
-- `ReadAt` maps directly to HTTP Range headers — this is why ArchiveSniper
+- `ReadAt` maps directly to HTTP Range headers — this is why pluq
   uses offset-based I/O instead of cursor-based Read+Seek.
 - `LocalReadAt` should wrap with buffering for sequential access patterns
   (TAR parsing) — currently opens a fresh handle per call.
@@ -132,7 +132,7 @@ Rust or the host language.
 
 ## Cross-Platform I/O [important]
 
-ArchiveSniper must run on: Android, iOS, Windows, Linux, macOS (and
+pluq must run on: Android, iOS, Windows, Linux, macOS (and
 potentially WASM/browser). Platform-specific concerns are isolated to
 Layer 0 — everything above is portable Rust.
 

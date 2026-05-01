@@ -3,7 +3,7 @@ use archive_cache::{open, Opened};
 use archive_source::SourceConfig;
 
 fn dev_link(key: &str) -> Option<String> {
-    let env_key = format!("ARCHIVE_SNIPER_{}", key.to_uppercase());
+    let env_key = format!("PLUQ_{}", key.to_uppercase());
     if let Ok(val) = std::env::var(&env_key) {
         return Some(val);
     }

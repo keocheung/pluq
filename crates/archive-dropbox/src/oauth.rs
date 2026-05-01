@@ -5,7 +5,7 @@ pub async fn authenticate(timeout_secs: u64) -> Result<StoredToken, AuthError> {
     let client_id = crate::oauth_client_id().ok_or_else(|| {
         AuthError::OAuth(
             "Dropbox OAuth client ID not configured. \
-             Set ARCHIVE_SNIPER_DROPBOX_CLIENT_ID."
+             Set PLUQ_DROPBOX_CLIENT_ID."
                 .into(),
         )
     })?;

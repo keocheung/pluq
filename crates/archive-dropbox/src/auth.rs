@@ -67,43 +67,43 @@ impl DropboxAuth {
 
 /// Load the Dropbox app credentials (key + secret) for App Authentication.
 ///
-/// Priority: env vars `ARCHIVE_SNIPER_DROPBOX_APP_KEY` + `ARCHIVE_SNIPER_DROPBOX_APP_SECRET`,
+/// Priority: env vars `PLUQ_DROPBOX_APP_KEY` + `PLUQ_DROPBOX_APP_SECRET`,
 /// falling back to embedded defaults (`*_EMBED` compile-time vars).
 /// Returns `None` if either component is missing.
 pub fn app_credentials() -> Option<(String, String)> {
-    let key = std::env::var("ARCHIVE_SNIPER_DROPBOX_APP_KEY")
+    let key = std::env::var("PLUQ_DROPBOX_APP_KEY")
         .ok()
         .filter(|s| !s.is_empty())
-        .or_else(|| option_env!("ARCHIVE_SNIPER_DROPBOX_APP_KEY_EMBED").map(String::from))?;
-    let secret = std::env::var("ARCHIVE_SNIPER_DROPBOX_APP_SECRET")
+        .or_else(|| option_env!("PLUQ_DROPBOX_APP_KEY_EMBED").map(String::from))?;
+    let secret = std::env::var("PLUQ_DROPBOX_APP_SECRET")
         .ok()
         .filter(|s| !s.is_empty())
-        .or_else(|| option_env!("ARCHIVE_SNIPER_DROPBOX_APP_SECRET_EMBED").map(String::from))?;
+        .or_else(|| option_env!("PLUQ_DROPBOX_APP_SECRET_EMBED").map(String::from))?;
     Some((key, secret))
 }
 
 /// OAuth installed-app client ID.
 ///
-/// Priority: env var `ARCHIVE_SNIPER_DROPBOX_CLIENT_ID` > embedded default.
+/// Priority: env var `PLUQ_DROPBOX_CLIENT_ID` > embedded default.
 pub fn oauth_client_id() -> Option<String> {
-    if let Ok(v) = std::env::var("ARCHIVE_SNIPER_DROPBOX_CLIENT_ID")
+    if let Ok(v) = std::env::var("PLUQ_DROPBOX_CLIENT_ID")
         && !v.is_empty()
     {
         return Some(v);
     }
-    option_env!("ARCHIVE_SNIPER_DROPBOX_CLIENT_ID_EMBED").map(String::from)
+    option_env!("PLUQ_DROPBOX_CLIENT_ID_EMBED").map(String::from)
 }
 
 /// OAuth installed-app client secret.
 ///
 /// `None` = public client (PKCE only, no secret).
 /// Dropbox supports both confidential and public installed apps.
-/// Priority: env var `ARCHIVE_SNIPER_DROPBOX_CLIENT_SECRET` > embedded default.
+/// Priority: env var `PLUQ_DROPBOX_CLIENT_SECRET` > embedded default.
 pub fn oauth_client_secret() -> Option<String> {
-    if let Ok(v) = std::env::var("ARCHIVE_SNIPER_DROPBOX_CLIENT_SECRET")
+    if let Ok(v) = std::env::var("PLUQ_DROPBOX_CLIENT_SECRET")
         && !v.is_empty()
     {
         return Some(v);
     }
-    option_env!("ARCHIVE_SNIPER_DROPBOX_CLIENT_SECRET_EMBED").map(String::from)
+    option_env!("PLUQ_DROPBOX_CLIENT_SECRET_EMBED").map(String::from)
 }

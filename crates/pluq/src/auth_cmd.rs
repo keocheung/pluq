@@ -3,7 +3,7 @@ use std::sync::Arc;
 use archive_auth::TokenStore;
 use clap::{Subcommand, ValueEnum};
 
-/// Subcommands for `snipe auth`.
+/// Subcommands for `pluq auth`.
 #[derive(Subcommand)]
 pub enum AuthAction {
     /// Run the OAuth browser flow and store the resulting token.

@@ -57,38 +57,38 @@ impl GDriveAuth {
 
 /// Load the Google Drive API key.
 ///
-/// Priority: env var `ARCHIVE_SNIPER_GDRIVE_KEY` > embedded default.
+/// Priority: env var `PLUQ_GDRIVE_KEY` > embedded default.
 /// Returns `None` if no key is available.
 pub fn api_key() -> Option<String> {
-    if let Ok(key) = std::env::var("ARCHIVE_SNIPER_GDRIVE_KEY")
+    if let Ok(key) = std::env::var("PLUQ_GDRIVE_KEY")
         && !key.is_empty()
     {
         return Some(key);
     }
-    option_env!("ARCHIVE_SNIPER_GDRIVE_KEY_EMBED").map(|s| s.to_string())
+    option_env!("PLUQ_GDRIVE_KEY_EMBED").map(|s| s.to_string())
 }
 
 /// OAuth installed-app client ID.
 ///
-/// Priority: env var `ARCHIVE_SNIPER_GDRIVE_CLIENT_ID` > embedded default.
+/// Priority: env var `PLUQ_GDRIVE_CLIENT_ID` > embedded default.
 pub fn oauth_client_id() -> Option<String> {
-    if let Ok(v) = std::env::var("ARCHIVE_SNIPER_GDRIVE_CLIENT_ID")
+    if let Ok(v) = std::env::var("PLUQ_GDRIVE_CLIENT_ID")
         && !v.is_empty()
     {
         return Some(v);
     }
-    option_env!("ARCHIVE_SNIPER_GDRIVE_CLIENT_ID_EMBED").map(String::from)
+    option_env!("PLUQ_GDRIVE_CLIENT_ID_EMBED").map(String::from)
 }
 
 /// OAuth installed-app client secret.
 ///
 /// Google requires this even for loopback + PKCE flows.
-/// Priority: env var `ARCHIVE_SNIPER_GDRIVE_CLIENT_SECRET` > embedded default.
+/// Priority: env var `PLUQ_GDRIVE_CLIENT_SECRET` > embedded default.
 pub fn oauth_client_secret() -> Option<String> {
-    if let Ok(v) = std::env::var("ARCHIVE_SNIPER_GDRIVE_CLIENT_SECRET")
+    if let Ok(v) = std::env::var("PLUQ_GDRIVE_CLIENT_SECRET")
         && !v.is_empty()
     {
         return Some(v);
     }
-    option_env!("ARCHIVE_SNIPER_GDRIVE_CLIENT_SECRET_EMBED").map(String::from)
+    option_env!("PLUQ_GDRIVE_CLIENT_SECRET_EMBED").map(String::from)
 }

@@ -1225,7 +1225,7 @@ impl<R: ReadAt> RarArchive<R> {
 
     /// Decompress and verify CRC without retaining output.
     ///
-    /// Used for archive integrity checking (`snipe test` command).
+    /// Used for archive integrity checking (`pluq test` command).
     pub async fn test(
         &self,
         entry: &ArchiveEntry,

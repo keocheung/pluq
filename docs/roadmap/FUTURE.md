@@ -1,4 +1,4 @@
-# Archive Sniper — Post-v1 & Future Ideas
+# pluq — Post-v1 & Future Ideas
 
 > Parking lot. Items here are **not committed** and **not on the active roadmap**. Promote to `ROADMAP.md` only after a real demand signal (issue volume, repeat asks, concrete use case).
 
@@ -12,10 +12,10 @@
 - [ ] **Multi-volume RAR** — `part1.rar` / `part2.rar` discovery and stitched ReadAt.
 
 ### CLI / UX polish
-- [ ] **Stream-extract to stdout** — `snipe get path/in/archive.pdf -o -` → pipe into `pdftotext`, `less`, etc.
+- [ ] **Stream-extract to stdout** — `pluq get path/in/archive.pdf -o -` → pipe into `pdftotext`, `less`, etc.
 - [ ] **Source-aware default folder naming** — use real GDrive / cloud filename instead of URL-guessing.
 - [ ] **TUI `[solid]` marker** on entry list + scan-complete fully-solid hint.
-- [ ] **`snipe doctor`** health-check subcommand (token store status, cache dir writable, network reachable, FFI deps OK).
+- [ ] **`pluq doctor`** health-check subcommand (token store status, cache dir writable, network reachable, FFI deps OK).
 - [ ] **Anonymous `--help` survey link** — only if structured-feedback need emerges post-launch.
 
 ### Performance
@@ -41,7 +41,7 @@
 
 ## Future Ideas (long-term, possibly never)
 
-- **Write Support** — archive creation (`snipe pack`). ZIP first. TUI file browser for selecting files.
+- **Write Support** — archive creation (`pluq pack`). ZIP first. TUI file browser for selecting files.
 - **Format expansion (read-only, deeper future)** — ISO read; 7z **only on real demand signal**. Solid-default UX cost is real: most 7z archives in the wild use solid mode → surgical cloud extraction defeated → would download whole archive anyway. High implementation cost (codec graph, BCJ2, encoded headers, AES variant) for low cloud-extract value.
 - **SaaS Server** — HTTP API for web-based sniping. Metered / freemium. See `architecture/layer4-products.md`.
 - **KMP Apps** — Android / iOS / Desktop via Compose Multiplatform + UniFFI. See `architecture/layer4-products.md`.

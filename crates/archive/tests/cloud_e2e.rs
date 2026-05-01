@@ -84,7 +84,7 @@ fn unrar(filename: &str) -> String {
 
 fn dev_link(key: &str) -> Option<String> {
     // 1. Try env var
-    let env_key = format!("ARCHIVE_SNIPER_{}", key.to_uppercase());
+    let env_key = format!("PLUQ_{}", key.to_uppercase());
     if let Ok(val) = std::env::var(&env_key) {
         return Some(val);
     }

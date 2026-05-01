@@ -337,7 +337,7 @@ mod tests {
     #[tokio::test]
     async fn range_read_returns_correct_bytes() {
         let server = MockServer::start().await;
-        let full_data = b"hello archive sniper over http";
+        let full_data = b"hello archive world over http";
 
         Mock::given(method("GET"))
             .and(header("range", "bytes=6-12"))
@@ -416,7 +416,7 @@ mod tests {
     #[tokio::test]
     async fn stream_read_returns_correct_bytes() {
         let server = MockServer::start().await;
-        let full_data = b"hello archive sniper over http";
+        let full_data = b"hello archive world over http";
 
         Mock::given(method("GET"))
             .and(header("range", "bytes=6-12"))

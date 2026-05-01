@@ -77,7 +77,7 @@ fn test_suggested_name() {
 
     // GDrive "view" link (mocking key to test logic)
     unsafe {
-        std::env::set_var("ARCHIVE_SNIPER_GDRIVE_KEY", "dummy");
+        std::env::set_var("PLUQ_GDRIVE_KEY", "dummy");
     }
     let res = resolve("https://drive.google.com/file/d/ABC-123/view", &config).unwrap();
     assert_eq!(res.suggested_name().unwrap(), "ABC-123");

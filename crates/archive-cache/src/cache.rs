@@ -62,11 +62,11 @@ impl ArchiveCache {
 // ── Cache directory helpers ────────────────────────────────────────────────────
 
 /// Default cache directory (platform-aware):
-/// Linux: `~/.cache/archive-sniper/`
-/// macOS: `~/Library/Caches/archive-sniper/`
-/// Windows: `{LOCALAPPDATA}/archive-sniper/`
+/// Linux: `~/.cache/pluq/`
+/// macOS: `~/Library/Caches/pluq/`
+/// Windows: `{LOCALAPPDATA}/pluq/`
 pub fn cache_dir() -> Option<PathBuf> {
-    dirs::cache_dir().map(|d| d.join("archive-sniper"))
+    dirs::cache_dir().map(|d| d.join("pluq"))
 }
 
 /// Deterministic cache file path for a source URL or local path.

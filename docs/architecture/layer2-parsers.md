@@ -136,7 +136,7 @@ blob. SubStreamsInfo says how many files are in it and their sizes.
 3. Read `sizes[stream_index]` bytes (target file).
 
 **Sniping policy:** Solid archives are supported. When a user wants to
-snipe from a solid block, compute the cost (how many bytes must be
+pluck from a solid block, compute the cost (how many bytes must be
 decompressed and discarded to reach their file), inform them in
 user-friendly language, then proceed if they accept. Not anti-solid —
 just transparent about the cost.

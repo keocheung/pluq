@@ -205,7 +205,7 @@ mod tests {
         use std::io::Write;
 
         // Compress with flate2, then decompress via our decoder.
-        let input = b"Archive Sniper codec test - DEFLATE round-trip";
+        let input = b"pluq codec test - DEFLATE round-trip";
         let mut enc = DeflateEncoder::new(Vec::new(), Compression::default());
         enc.write_all(input).unwrap();
         let compressed = enc.finish().unwrap();
@@ -228,7 +228,7 @@ mod tests {
         use ::bzip2::write::BzEncoder;
         use std::io::Write;
 
-        let input = b"Archive Sniper codec test - BZip2 round-trip";
+        let input = b"pluq codec test - BZip2 round-trip";
         let mut enc = BzEncoder::new(Vec::new(), Compression::default());
         enc.write_all(input).unwrap();
         let compressed = enc.finish().unwrap();
@@ -249,7 +249,7 @@ mod tests {
     fn build_decoder_zstd_decompresses() {
         use std::io::Write;
 
-        let input = b"Archive Sniper codec test - Zstd round-trip";
+        let input = b"pluq codec test - Zstd round-trip";
         let mut compressed = Vec::new();
         {
             let mut enc = ::zstd::stream::write::Encoder::new(&mut compressed, 0).unwrap();
@@ -271,7 +271,7 @@ mod tests {
 
     #[test]
     fn build_decoder_lzma_decompresses() {
-        let input = b"Archive Sniper codec test - LZMA round-trip";
+        let input = b"pluq codec test - LZMA round-trip";
         let mut compressed = Vec::new();
         lzma_rs::lzma_compress(&mut &input[..], &mut compressed).unwrap();
 
@@ -353,7 +353,7 @@ mod tests {
     fn build_decoder_lzma_accepts_within_cap() {
         use crate::limits::CodecConfig;
 
-        let input = b"Archive Sniper codec test - LZMA round-trip (cap OK)";
+        let input = b"pluq codec test - LZMA round-trip (cap OK)";
         let mut compressed = Vec::new();
         lzma_rs::lzma_compress(&mut &input[..], &mut compressed).unwrap();
 
@@ -371,7 +371,7 @@ mod tests {
 
     #[test]
     fn build_decoder_lzma_no_cap_when_config_unset() {
-        let input = b"Archive Sniper codec test - LZMA round-trip (no cap)";
+        let input = b"pluq codec test - LZMA round-trip (no cap)";
         let mut compressed = Vec::new();
         lzma_rs::lzma_compress(&mut &input[..], &mut compressed).unwrap();
 

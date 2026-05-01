@@ -1,6 +1,6 @@
 # TUI Vision
 
-> The long-term **feature** vision for Archive Sniper's terminal UI.
+> The long-term **feature** vision for pluq's terminal UI.
 > This document describes *what the TUI can do* — screens, capabilities, user flows.
 > For *how it looks* (colors, borders, layout rules, key bindings), see `TUI_STYLE_GUIDE.md`.
 
@@ -8,15 +8,15 @@
 
 ## Principle
 
-`snipe` with no arguments launches a full interactive application.
+`pluq` with no arguments launches a full interactive application.
 The TUI is the primary experience. CLI commands exist for scripting and automation.
 
 ---
 
 ## Data & Persistence
 
-- **Bookmarks:** Stored in `~/.config/archive-sniper/bookmarks.json`.
-- **Recent:** Stored in `~/.config/archive-sniper/recent.json`.
+- **Bookmarks:** Stored in `~/.config/pluq/bookmarks.json`.
+- **Recent:** Stored in `~/.config/pluq/recent.json`.
 
 ### Schema Example
 ```json
@@ -46,7 +46,7 @@ If a user tries to save or rename a bookmark to a name that already exists, the 
 
 ## Home Screen
 
-Launching `snipe` shows the home screen — an entry point where users can open
+Launching `pluq` shows the home screen — an entry point where users can open
 a new archive or jump back into a saved/recent one.
 
 ### Capabilities & Keys
@@ -54,7 +54,7 @@ a new archive or jump back into a saved/recent one.
 - `r`: **Rename** the selected bookmark.
 - `d`: **Delete** the selected bookmark or recent entry.
 
-### Snipe Input
+### pluq input
 
 - Text input: paste a URL (Google Drive, Dropbox, etc.) or a local file path
 - Tab-completion for local paths (future)
@@ -62,23 +62,23 @@ a new archive or jump back into a saved/recent one.
 ### Bookmarks
 
 - User explicitly saves an archive with a custom name
-- Stored in `~/.config/archive-sniper/bookmarks.json`
+- Stored in `~/.config/pluq/bookmarks.json`
 - Shows: user-given name, provider tag (GDrive / Dropbox / Local), file size
 - Select one to open it immediately
-- Combined with the metadata cache (`~/.cache/archive-sniper/`), re-opens are
+- Combined with the metadata cache (`~/.cache/pluq/`), re-opens are
   near-instant — no re-scan needed
 
 ### Recent Archives
 
 - Automatically tracked — last 10 opened archives
-- Stored in `~/.config/archive-sniper/recent.json`
+- Stored in `~/.config/pluq/recent.json`
 - Duplicates with bookmarks are hidden from the recent list
 
 ---
 
 ## Browse Screen
 
-After opening an archive (from home screen, `snipe <source>`, or a bookmark),
+After opening an archive (from home screen, `pluq <source>`, or a bookmark),
 the user lands in the browse screen — a drill-down file browser.
 
 ### Capabilities
@@ -119,12 +119,12 @@ CLI commands remain for non-interactive use:
 
 | Command | Purpose |
 | --- | --- |
-| `snipe` | Launch TUI (home screen) |
-| `snipe <source>` | Launch TUI directly into browse screen |
-| `snipe list <source>` | Print entries to stdout (scriptable) |
-| `snipe get <source> [glob] [-o dir]` | Non-interactive extraction |
-| `snipe test <source>` | Verify integrity (CI/automation) |
-| `snipe auth add/remove/list` | Manage OAuth tokens |
+| `pluq` | Launch TUI (home screen) |
+| `pluq <source>` | Launch TUI directly into browse screen |
+| `pluq list <source>` | Print entries to stdout (scriptable) |
+| `pluq get <source> [glob] [-o dir]` | Non-interactive extraction |
+| `pluq test <source>` | Verify integrity (CI/automation) |
+| `pluq auth add/remove/list` | Manage OAuth tokens |
 
 The TUI and CLI share all the same core logic. The TUI is the primary UX;
 CLI commands are the scripting/automation interface.

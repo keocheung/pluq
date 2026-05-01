@@ -52,7 +52,7 @@ pub trait ArchiveReader {
     /// Bytes that must be transferred and decompressed to produce this entry.
     ///
     /// Used by the "extraction tax" UX to warn users before expensive cloud
-    /// snipe operations.
+    /// pluq operations.
     ///
     /// - **ZIP**: `entry.compressed_size` (every entry is independently seekable)
     /// - **7z solid block**: sum of compressed sizes for all entries preceding
@@ -86,7 +86,7 @@ pub trait ArchiveReader {
     /// Decompress and verify CRC without retaining output.
     ///
     /// Equivalent to `extract()` to a no-op sink.
-    /// Used for archive integrity checking (`archive-cli test` command).
+    /// Used for archive integrity checking (`pluq test` command).
     fn test(
         &self,
         entry: &ArchiveEntry,

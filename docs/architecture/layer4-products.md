@@ -89,7 +89,7 @@ is the only metered/freemium path.
 
 ### KMP Apps (Android / iOS / Desktop)
 
-Standalone products. They are independent cloud snipers — connect
+Standalone products. They are cloud extractors — connect
 directly to Dropbox/Drive, fetch ranges, extract. Buy once, no metering.
 Built with Compose Multiplatform, consuming the Rust core via UniFFI.
 
@@ -107,7 +107,7 @@ construction.
 
 - Detects source type: local file path, Google Drive URL, generic HTTP
   URL.
-- Looks up credentials (e.g. `ARCHIVE_SNIPER_GDRIVE_KEY`).
+- Looks up credentials (e.g. `PLUQ_GDRIVE_KEY`).
 - Returns `ResolvedSource` enum (`Local(LocalReadAt)` |
   `Http(CachingReadAt<HttpReadAt>)` |
   `GDrive(CachingReadAt<GoogleDriveReadAt>)`).
@@ -116,7 +116,7 @@ construction.
 
 See `docs/SOURCE.md` for the full design.
 
-### CLI (`snipe`) — the v1 product
+### CLI (`pluq`) — the v1 product
 
 Interactive TUI archive browser + cloud sniping from the terminal.
 Handles OAuth externally (browser flow → static bearer token via

@@ -27,7 +27,7 @@ pub struct BookmarkList {
 const MAX_BOOKMARKS: usize = 50;
 
 impl BookmarkList {
-    /// Read `~/.config/archive-sniper/bookmarks.json`. Returns an empty list if the
+    /// Read `~/.config/pluq/bookmarks.json`. Returns an empty list if the
     /// file does not exist, is empty, or fails to parse (log a warning on parse
     /// failure, never propagate).
     pub fn load() -> Self {
@@ -181,7 +181,7 @@ impl BookmarkList {
 }
 
 fn bookmarks_path() -> Option<PathBuf> {
-    let dirs = ProjectDirs::from("", "", "archive-sniper")?;
+    let dirs = ProjectDirs::from("", "", "pluq")?;
     Some(dirs.config_dir().join("bookmarks.json"))
 }
 

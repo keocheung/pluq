@@ -1,6 +1,6 @@
 # Source Resolution — Design Spec
 
-> How ArchiveSniper resolves user input (URL or path) into the right `ReadAt`
+> How pluq resolves user input (URL or path) into the right `ReadAt`
 > reader for the job. Centralizes detection, credential discovery, and reader
 > construction so product layers don't duplicate this logic.
 >
@@ -95,7 +95,7 @@ archive-source              <-- resolve(): detect URL -> construct reader
 archive (facade)            <-- Archive<R: ReadAt>, format detection, cache
     ^
     |
-archive-cli                 <-- calls resolve() + Archive::open(), no provider logic
+pluq                        <-- calls resolve() + Archive::open(), no provider logic
 ```
 
 ### What Moves Out of `archive-core`
@@ -140,7 +140,7 @@ Holds credential discovery state. Product layers construct this at startup.
 
 ```rust
 pub struct SourceConfig {
-    /// OAuth token store (~/.config/archive-sniper/tokens.json).
+    /// OAuth token store (~/.config/pluq/tokens.json).
     /// None in Phase 4 (app credentials only). Added in Phase 4.5.
     pub token_store: Option<TokenStore>,
 
@@ -189,7 +189,7 @@ on them and calls their constructors.
 - `GoogleDriveReadAt` wraps `HttpReadAt` pointed at `googleapis.com/drive/v3/files/{id}?alt=media&key=...`
 - `size()` calls metadata API (`GET /drive/v3/files/{id}?fields=name,size`)
 - URL detection: `is_gdrive_url()`, `extract_file_id()`
-- Auth: API key from `ARCHIVE_SNIPER_GDRIVE_KEY` env var or embedded default
+- Auth: API key from `PLUQ_GDRIVE_KEY` env var or embedded default
 - Errors: `GDriveError` enum (`FileNotFound`, `NotPublic`, `InvalidApiKey`,
   `RateLimited`, `QuotaExceeded`) tunneled via `ReadError::Transport`
 
@@ -200,7 +200,7 @@ on them and calls their constructors.
 - `size()` via `POST /2/sharing/get_shared_link_metadata`
 - URL detection: check host == `dropbox.com`
 - Auth: Basic auth (`Authorization: Basic base64(app_key:app_secret)`), app
-  credentials from `ARCHIVE_SNIPER_DROPBOX_APP_KEY` / `ARCHIVE_SNIPER_DROPBOX_APP_SECRET`.
+  credentials from `PLUQ_DROPBOX_APP_KEY` / `PLUQ_DROPBOX_APP_SECRET`.
   Requires `sharing.read` scope on the Dropbox app.
 - No OAuth required for public shared links
 
@@ -275,7 +275,7 @@ pub fn classify_transport(err: &dyn std::error::Error) -> Option<ProviderError> 
 }
 ```
 
-This replaces the ad-hoc `format_transport_error()` currently in `archive-cli/src/provider.rs`.
+This replaces the ad-hoc `format_transport_error()` currently in `pluq/src/provider.rs`.
 
 ---
 
@@ -290,7 +290,7 @@ accommodates this without architectural changes.
 |---|---|
 | Provider crate (`archive-gdrive`) | **Uses** credentials (headers, token refresh on 401) |
 | Source crate (`archive-source`) | **Discovers** credentials (token store, env vars, embedded) |
-| Product layer (`archive-cli`) | **Acquires** credentials (OAuth browser flow, user prompts) |
+| Product layer (`pluq`) | **Acquires** credentials (OAuth browser flow, user prompts) |
 
 ### Provider Auth Enums
 
@@ -348,7 +348,7 @@ gain OAuth flow code. No architectural surgery.
 
 ### Token Persistence
 
-Tokens live in `~/.config/archive-sniper/tokens.json` (via the `directories`
+Tokens live in `~/.config/pluq/tokens.json` (via the `directories`
 crate for cross-platform resolution). Refresh flow:
 
 1. Reader holds `Arc<TokenStore>` passed through `GDriveAuth::OAuth` / `DropboxAuth::OAuth`.

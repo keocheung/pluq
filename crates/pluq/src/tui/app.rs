@@ -165,7 +165,7 @@ pub enum ExtractionStrategy {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HomeFocus {
-    SnipeInput,
+    PluqInput,
     Bookmarks, // reserved for Plan v2; cycles but shows empty placeholder in MVP
     Recent,
 }
@@ -200,16 +200,16 @@ pub struct BookmarkOverlay {
 impl HomeFocus {
     fn next(self) -> Self {
         match self {
-            Self::SnipeInput => Self::Bookmarks,
+            Self::PluqInput => Self::Bookmarks,
             Self::Bookmarks => Self::Recent,
-            Self::Recent => Self::SnipeInput,
+            Self::Recent => Self::PluqInput,
         }
     }
 
     fn prev(self) -> Self {
         match self {
-            Self::SnipeInput => Self::Recent,
-            Self::Bookmarks => Self::SnipeInput,
+            Self::PluqInput => Self::Recent,
+            Self::Bookmarks => Self::PluqInput,
             Self::Recent => Self::Bookmarks,
         }
     }
@@ -338,10 +338,10 @@ pub struct App {
 
     // NEW — Home Screen state. Only meaningful while `phase == Home`.
     pub home_focus: HomeFocus,
-    pub snipe_input: String,
+    pub pluq_input: String,
     pub home_recent: crate::home::recent::RecentList,
     pub home_recent_selected: usize,
-    /// Error string to show under the Snipe Input (e.g., "File not found").
+    /// Error string to show under the Pluq Input (e.g., "File not found").
     /// Set when archive open fails while user is in Home; cleared on next keypress.
     pub home_input_error: Option<String>,
 
@@ -371,7 +371,7 @@ pub struct App {
 }
 
 impl App {
-    /// Entry from `snipe <source>` — direct browse.
+    /// Entry from `pluq <source>` — direct browse.
     pub fn new_with_source(
         source: String,
         token_store: Option<Arc<archive_auth::TokenStore>>,
@@ -384,7 +384,7 @@ impl App {
         app
     }
 
-    /// Entry from bare `snipe` — Home Screen.
+    /// Entry from bare `pluq` — Home Screen.
     pub fn new_home(token_store: Option<Arc<archive_auth::TokenStore>>) -> Self {
         let mut app = Self::default_state();
         app.phase = AppPhase::Home;
@@ -424,8 +424,8 @@ impl App {
             password_error: None,
             chosen_output_dir: None,
 
-            home_focus: HomeFocus::SnipeInput,
-            snipe_input: String::new(),
+            home_focus: HomeFocus::PluqInput,
+            pluq_input: String::new(),
             home_recent: crate::home::recent::RecentList::default(),
             home_recent_selected: 0,
             home_input_error: None,
@@ -886,7 +886,7 @@ impl App {
         self.home_recent.save();
     }
 
-    /// Common logic for opening an archive from Home (Snipe Input or Recent).
+    /// Common logic for opening an archive from Home (Pluq Input or Recent).
     fn submit_home_source(&mut self, source: String, tx: &mpsc::UnboundedSender<AppMessage>) {
         let mut config = SourceConfig::new();
         if let Some(store) = &self.token_store {
@@ -951,7 +951,7 @@ impl App {
         self.home_input_error = None;
         self.home_pending_provider = None;
         self.home_pending_name = None;
-        self.home_focus = HomeFocus::SnipeInput;
+        self.home_focus = HomeFocus::PluqInput;
         // Intentionally keep `launched_from_home = true`.
     }
 
@@ -991,7 +991,7 @@ impl App {
         let msg = match &self.phase {
             AppPhase::AuthPrompt { provider, .. } => {
                 format!(
-                    "{}: file is private. Run `snipe auth add {}` to authenticate.",
+                    "{}: file is private. Run `pluq auth add {}` to authenticate.",
                     match provider {
                         crate::auth_cmd::AuthProvider::Gdrive => "Google Drive",
                         crate::auth_cmd::AuthProvider::Dropbox => "Dropbox",
@@ -1190,12 +1190,12 @@ impl App {
     fn handle_home_key(&mut self, key: KeyEvent, _tx: &mpsc::UnboundedSender<AppMessage>) {
         match key.code {
             KeyCode::Tab
-                if self.home_focus == HomeFocus::SnipeInput
-                    && !self.snipe_input.is_empty()
-                    && !looks_like_url(&self.snipe_input) =>
+                if self.home_focus == HomeFocus::PluqInput
+                    && !self.pluq_input.is_empty()
+                    && !looks_like_url(&self.pluq_input) =>
             {
-                if let Some((new_input, hits)) = complete_path(&self.snipe_input) {
-                    self.snipe_input = new_input;
+                if let Some((new_input, hits)) = complete_path(&self.pluq_input) {
+                    self.pluq_input = new_input;
                     if hits > 1 {
                         self.status_message = Some(format!("{} matches", hits));
                     } else if hits == 0 {
@@ -1213,7 +1213,7 @@ impl App {
                 if key
                     .modifiers
                     .contains(crossterm::event::KeyModifiers::CONTROL)
-                    == (self.home_focus == HomeFocus::SnipeInput) =>
+                    == (self.home_focus == HomeFocus::PluqInput) =>
             {
                 self.should_quit = true;
             }
@@ -1326,8 +1326,8 @@ impl App {
 
             // Enter
             KeyCode::Enter => match self.home_focus {
-                HomeFocus::SnipeInput => {
-                    let source = self.snipe_input.trim().to_string();
+                HomeFocus::PluqInput => {
+                    let source = self.pluq_input.trim().to_string();
                     if source.is_empty() {
                         self.home_input_error = Some("Paste a link or path first.".into());
                     } else {
@@ -1339,7 +1339,7 @@ impl App {
                     if let Some(entry) = visible.get(self.home_recent_selected) {
                         let source = entry.source.clone();
                         drop(visible);
-                        self.snipe_input.clear();
+                        self.pluq_input.clear();
                         self.submit_home_source(source, _tx);
                     }
                 }
@@ -1350,33 +1350,33 @@ impl App {
                         .get(self.home_bookmarks_selected)
                     {
                         let source = entry.source.clone();
-                        self.snipe_input.clear();
+                        self.pluq_input.clear();
                         self.submit_home_source(source, _tx);
                     }
                 }
             },
 
-            // Snipe Input editing (only if focused)
+            // Pluq Input editing (only if focused)
             KeyCode::Char('u')
                 if key
                     .modifiers
                     .contains(crossterm::event::KeyModifiers::CONTROL)
-                    && self.home_focus == HomeFocus::SnipeInput =>
+                    && self.home_focus == HomeFocus::PluqInput =>
             {
-                self.snipe_input.clear();
+                self.pluq_input.clear();
             }
             KeyCode::Char(c)
-                if self.home_focus == HomeFocus::SnipeInput
+                if self.home_focus == HomeFocus::PluqInput
                     && !key
                         .modifiers
                         .contains(crossterm::event::KeyModifiers::CONTROL)
                     && !key.modifiers.contains(crossterm::event::KeyModifiers::ALT) =>
             {
-                self.snipe_input.push(c);
+                self.pluq_input.push(c);
                 self.home_input_error = None;
             }
-            KeyCode::Backspace if self.home_focus == HomeFocus::SnipeInput => {
-                self.snipe_input.pop();
+            KeyCode::Backspace if self.home_focus == HomeFocus::PluqInput => {
+                self.pluq_input.pop();
             }
 
             _ => {}
@@ -2264,7 +2264,7 @@ mod home_tests {
         let app = App::new_home(None);
         assert!(matches!(app.phase, AppPhase::Home));
         assert!(app.launched_from_home);
-        assert_eq!(app.home_focus, HomeFocus::SnipeInput);
+        assert_eq!(app.home_focus, HomeFocus::PluqInput);
         assert_eq!(app.home_recent_selected, 0);
         assert!(app.home_pending_provider.is_none());
         assert!(app.home_pending_name.is_none());
@@ -2290,7 +2290,7 @@ mod home_tests {
         app.handle_key(make_key(KeyCode::Tab), &tx);
         assert_eq!(app.home_focus, HomeFocus::Recent);
         app.handle_key(make_key(KeyCode::Tab), &tx);
-        assert_eq!(app.home_focus, HomeFocus::SnipeInput);
+        assert_eq!(app.home_focus, HomeFocus::PluqInput);
 
         // Shift+Tab (BackTab) cycles backwards
         app.handle_key(make_key(KeyCode::BackTab), &tx);
@@ -2298,11 +2298,11 @@ mod home_tests {
         app.handle_key(make_key(KeyCode::BackTab), &tx);
         assert_eq!(app.home_focus, HomeFocus::Bookmarks);
         app.handle_key(make_key(KeyCode::BackTab), &tx);
-        assert_eq!(app.home_focus, HomeFocus::SnipeInput);
+        assert_eq!(app.home_focus, HomeFocus::PluqInput);
     }
 
     #[test]
-    fn test_home_snipe_input() {
+    fn test_home_pluq_input() {
         let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
@@ -2310,27 +2310,27 @@ mod home_tests {
         for c in "/tmp/foo.zip".chars() {
             app.handle_key(make_key(KeyCode::Char(c)), &tx);
         }
-        assert_eq!(app.snipe_input, "/tmp/foo.zip");
+        assert_eq!(app.pluq_input, "/tmp/foo.zip");
 
         // Backspace
         app.handle_key(make_key(KeyCode::Backspace), &tx);
-        assert_eq!(app.snipe_input, "/tmp/foo.zi");
+        assert_eq!(app.pluq_input, "/tmp/foo.zi");
 
         // Ctrl+U clears
         app.handle_key(make_ctrl_key(KeyCode::Char('u')), &tx);
-        assert_eq!(app.snipe_input, "");
+        assert_eq!(app.pluq_input, "");
 
         // Backspace on empty is no-op
         app.handle_key(make_key(KeyCode::Backspace), &tx);
-        assert_eq!(app.snipe_input, "");
+        assert_eq!(app.pluq_input, "");
     }
 
     #[test]
     fn test_tab_cycles_focus_when_empty() {
         let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        assert_eq!(app.home_focus, HomeFocus::SnipeInput);
-        assert!(app.snipe_input.is_empty());
+        assert_eq!(app.home_focus, HomeFocus::PluqInput);
+        assert!(app.pluq_input.is_empty());
 
         app.handle_key(make_key(KeyCode::Tab), &tx);
         assert_eq!(app.home_focus, HomeFocus::Bookmarks);
@@ -2340,7 +2340,7 @@ mod home_tests {
     fn test_tab_cycles_focus_when_url() {
         let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        app.snipe_input = "https://google.com".to_string();
+        app.pluq_input = "https://google.com".to_string();
 
         app.handle_key(make_key(KeyCode::Tab), &tx);
         assert_eq!(app.home_focus, HomeFocus::Bookmarks);
@@ -2355,14 +2355,14 @@ mod home_tests {
 
         let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        app.snipe_input = format!("{}/f", dir.path().to_string_lossy());
+        app.pluq_input = format!("{}/f", dir.path().to_string_lossy());
 
         app.handle_key(make_key(KeyCode::Tab), &tx);
-        // Focus stays on SnipeInput
-        assert_eq!(app.home_focus, HomeFocus::SnipeInput);
+        // Focus stays on PluqInput
+        assert_eq!(app.home_focus, HomeFocus::PluqInput);
         // Input is completed
         assert_eq!(
-            app.snipe_input,
+            app.pluq_input,
             format!("{}/foo.zip", dir.path().to_string_lossy())
         );
     }
@@ -2371,15 +2371,15 @@ mod home_tests {
     fn test_backtab_always_cycles_focus() {
         let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        app.snipe_input = "/tmp/foo".to_string();
+        app.pluq_input = "/tmp/foo".to_string();
 
-        // Shift+Tab (BackTab) cycles focus even with text in SnipeInput
+        // Shift+Tab (BackTab) cycles focus even with text in PluqInput
         app.handle_key(make_key(KeyCode::BackTab), &tx);
         assert_eq!(app.home_focus, HomeFocus::Recent);
     }
 
     #[test]
-    fn test_home_snipe_input_accepts_shift_chars() {
+    fn test_home_pluq_input_accepts_shift_chars() {
         let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
@@ -2389,7 +2389,7 @@ mod home_tests {
         app.handle_key(make_shift_key(KeyCode::Char('?')), &tx);
         app.handle_key(make_shift_key(KeyCode::Char('&')), &tx);
 
-        assert_eq!(app.snipe_input, "H?&");
+        assert_eq!(app.pluq_input, "H?&");
     }
 
     #[test]
@@ -2496,12 +2496,12 @@ mod home_tests {
         let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
-        // Focused on SnipeInput: 'q' should type "q", not quit.
+        // Focused on PluqInput: 'q' should type "q", not quit.
         app.handle_key(make_key(KeyCode::Char('q')), &tx);
         assert!(!app.should_quit);
-        assert_eq!(app.snipe_input, "q");
+        assert_eq!(app.pluq_input, "q");
 
-        // Focused on SnipeInput: Ctrl+q should quit.
+        // Focused on PluqInput: Ctrl+q should quit.
         let ctrl_q = KeyEvent {
             code: KeyCode::Char('q'),
             modifiers: KeyModifiers::CONTROL,
@@ -2535,11 +2535,11 @@ mod home_tests {
     }
 
     #[test]
-    fn test_home_snipe_enter_empty() {
+    fn test_home_pluq_enter_empty() {
         let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
-        app.snipe_input = "   ".to_string();
+        app.pluq_input = "   ".to_string();
         app.handle_key(make_key(KeyCode::Enter), &tx);
 
         assert!(matches!(app.phase, AppPhase::Home));
@@ -2548,12 +2548,12 @@ mod home_tests {
     }
 
     #[tokio::test]
-    async fn test_home_snipe_enter_unresolvable() {
+    async fn test_home_pluq_enter_unresolvable() {
         let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         // GDrive URL without file ID should fail resolution
-        app.snipe_input = "https://drive.google.com/drive/my-drive".to_string();
+        app.pluq_input = "https://drive.google.com/drive/my-drive".to_string();
         app.handle_key(make_key(KeyCode::Enter), &tx);
 
         assert!(matches!(app.phase, AppPhase::Home));
@@ -2561,11 +2561,11 @@ mod home_tests {
     }
 
     #[tokio::test]
-    async fn test_home_snipe_enter_success() {
+    async fn test_home_pluq_enter_success() {
         let mut app = App::new_home(None);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
-        app.snipe_input = "test.zip".to_string();
+        app.pluq_input = "test.zip".to_string();
         app.handle_key(make_key(KeyCode::Enter), &tx);
 
         assert!(matches!(app.phase, AppPhase::Opening));
@@ -2671,14 +2671,14 @@ mod home_tests {
         app.home_recent = RecentList::from_entries(entries);
         app.home_focus = HomeFocus::Recent;
         app.home_recent_selected = 0;
-        app.snipe_input = "garbage".into();
+        app.pluq_input = "garbage".into();
 
         app.handle_key(make_key(KeyCode::Enter), &tx);
 
-        // Should transition to Opening and clear snipe_input
+        // Should transition to Opening and clear pluq_input
         assert!(matches!(app.phase, AppPhase::Opening));
         assert_eq!(app.source, "s1.zip");
-        assert!(app.snipe_input.is_empty());
+        assert!(app.pluq_input.is_empty());
     }
 
     #[test]
@@ -2696,7 +2696,7 @@ mod home_tests {
         let app = App::new_home(None);
         assert_eq!(app.home_bookmarks_selected, 0);
         assert_eq!(app.home_recent_selected, 0);
-        assert_eq!(app.home_focus, HomeFocus::SnipeInput);
+        assert_eq!(app.home_focus, HomeFocus::PluqInput);
     }
 
     #[test]

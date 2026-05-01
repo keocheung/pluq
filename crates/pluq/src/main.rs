@@ -17,14 +17,14 @@ use tokio::io::AsyncWrite;
 use archive::{Archive, ArchiveEntry};
 use archive_source::{ResolvedSource, SourceConfig, classify_transport, resolve};
 
-/// Archive Sniper — surgical archive extraction from local or cloud storage.
+/// pluq — surgical archive extraction from local or cloud storage.
 #[derive(Parser)]
-#[command(name = "snipe", version, about, args_conflicts_with_subcommands = true)]
+#[command(name = "pluq", version, about, args_conflicts_with_subcommands = true)]
 struct Cli {
     /// Open an archive directly in the TUI. Omit to launch the Home Screen.
     source: Option<String>,
 
-    /// Enable debug logging to archive-sniper.log (or set ARCHIVE_SNIPER_LOG=debug).
+    /// Enable debug logging to pluq.log (or set PLUQ_LOG=debug).
     #[arg(long, global = true)]
     debug: bool,
 
@@ -82,7 +82,7 @@ enum Command {
     /// Print a shell completion script to stdout.
     ///
     /// Install by redirecting to your shell's completion directory, e.g.
-    /// `snipe completions bash > ~/.local/share/bash-completion/completions/snipe`.
+    /// `pluq completions bash > ~/.local/share/bash-completion/completions/pluq`.
     Completions {
         /// Target shell.
         shell: Shell,
@@ -94,13 +94,13 @@ async fn main() {
     let cli = Cli::parse();
 
     // ── Logging setup ────────────────────────────────────────────────────
-    // Writes to archive-sniper.log in the current directory. Activated by
-    // --debug flag or ARCHIVE_SNIPER_LOG env var (e.g. ARCHIVE_SNIPER_LOG=trace).
+    // Writes to pluq.log in the current directory. Activated by
+    // --debug flag or PLUQ_LOG env var (e.g. PLUQ_LOG=trace).
     // When neither is set, no subscriber is installed and all tracing macros
     // are zero-cost no-ops.
     let _log_guard = init_logging(cli.debug);
 
-    info!(command = ?std::env::args().collect::<Vec<_>>(), "snipe starting");
+    info!(command = ?std::env::args().collect::<Vec<_>>(), "pluq starting");
 
     // ── Cache cleaning ───────────────────────────────────────────────────
     if cli.clean_cache {
@@ -236,7 +236,7 @@ async fn run_subcommand(
         }
         Command::Completions { shell } => {
             let mut cmd = Cli::command();
-            clap_complete::generate(shell, &mut cmd, "snipe", &mut std::io::stdout());
+            clap_complete::generate(shell, &mut cmd, "pluq", &mut std::io::stdout());
         }
         Command::Get {
             source,
@@ -443,11 +443,11 @@ pub(crate) fn format_size(bytes: u64) -> String {
 /// Initialize file-based logging. Returns a guard that must be held alive for the
 /// duration of the program (dropping it flushes the writer).
 ///
-/// Activated by `--debug` flag (sets level to `debug`) or the `ARCHIVE_SNIPER_LOG`
+/// Activated by `--debug` flag (sets level to `debug`) or the `PLUQ_LOG`
 /// env var (accepts any tracing level: `trace`, `debug`, `info`, `warn`, `error`).
 /// When neither is set, returns `None` and all tracing macros are zero-cost no-ops.
 fn init_logging(debug_flag: bool) -> Option<tracing_appender::non_blocking::WorkerGuard> {
-    let env_level = std::env::var("ARCHIVE_SNIPER_LOG").ok();
+    let env_level = std::env::var("PLUQ_LOG").ok();
 
     let level = if debug_flag {
         Some("debug".to_string())
@@ -457,15 +457,14 @@ fn init_logging(debug_flag: bool) -> Option<tracing_appender::non_blocking::Work
 
     let level = level?;
 
-    let file_appender = tracing_appender::rolling::never(".", "archive-sniper.log");
+    let file_appender = tracing_appender::rolling::never(".", "pluq.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
     tracing_subscriber::fmt()
         .with_writer(non_blocking)
         .with_env_filter(
-            tracing_subscriber::EnvFilter::builder().parse_lossy(format!(
-                "archive_core={level},archive={level},archive_cli={level}"
-            )),
+            tracing_subscriber::EnvFilter::builder()
+                .parse_lossy(format!("archive_core={level},archive={level},pluq={level}")),
         )
         .with_ansi(false)
         .with_target(true)
@@ -483,36 +482,36 @@ mod tests {
 
     #[test]
     fn test_cli_parsing() {
-        // snipe -> source: None, command: None
-        let cli = Cli::try_parse_from(["snipe"]).unwrap();
+        // pluq -> source: None, command: None
+        let cli = Cli::try_parse_from(["pluq"]).unwrap();
         assert_eq!(cli.source, None);
         assert!(cli.command.is_none());
 
-        // snipe file.zip -> source: Some("file.zip"), command: None
-        let cli = Cli::try_parse_from(["snipe", "file.zip"]).unwrap();
+        // pluq file.zip -> source: Some("file.zip"), command: None
+        let cli = Cli::try_parse_from(["pluq", "file.zip"]).unwrap();
         assert_eq!(cli.source.as_deref(), Some("file.zip"));
         assert!(cli.command.is_none());
 
-        // snipe list file.zip -> source: None, command: Some(Command::List { ... })
-        let cli = Cli::try_parse_from(["snipe", "list", "file.zip"]).unwrap();
+        // pluq list file.zip -> source: None, command: Some(Command::List { ... })
+        let cli = Cli::try_parse_from(["pluq", "list", "file.zip"]).unwrap();
         assert_eq!(cli.source, None);
         assert!(
             matches!(cli.command, Some(Command::List { ref source, all: false }) if source == "file.zip")
         );
 
-        // snipe file.zip list file.zip -> error (args_conflicts_with_subcommands)
-        let res = Cli::try_parse_from(["snipe", "file.zip", "list", "file.zip"]);
+        // pluq file.zip list file.zip -> error (args_conflicts_with_subcommands)
+        let res = Cli::try_parse_from(["pluq", "file.zip", "list", "file.zip"]);
         assert!(res.is_err());
 
-        // snipe get file.zip -> Get with no glob
-        let cli = Cli::try_parse_from(["snipe", "get", "file.zip"]).unwrap();
+        // pluq get file.zip -> Get with no glob
+        let cli = Cli::try_parse_from(["pluq", "get", "file.zip"]).unwrap();
         assert!(matches!(
             cli.command,
             Some(Command::Get { ref source, glob: None, output: None, all: false }) if source == "file.zip"
         ));
 
-        // snipe get file.zip *.jpg -o out/ --all
-        let cli = Cli::try_parse_from(["snipe", "get", "file.zip", "*.jpg", "-o", "out/", "--all"])
+        // pluq get file.zip *.jpg -o out/ --all
+        let cli = Cli::try_parse_from(["pluq", "get", "file.zip", "*.jpg", "-o", "out/", "--all"])
             .unwrap();
         assert!(matches!(
             cli.command,
@@ -520,8 +519,8 @@ mod tests {
                 if source == "file.zip" && g == "*.jpg" && o.as_os_str() == "out/"
         ));
 
-        // snipe completions bash -> Completions { shell: Bash }
-        let cli = Cli::try_parse_from(["snipe", "completions", "bash"]).unwrap();
+        // pluq completions bash -> Completions { shell: Bash }
+        let cli = Cli::try_parse_from(["pluq", "completions", "bash"]).unwrap();
         assert!(matches!(
             cli.command,
             Some(Command::Completions { shell: Shell::Bash })
@@ -567,7 +566,7 @@ mod tests {
 
     #[test]
     fn test_cli_parsing_auth_add() {
-        let cli = Cli::try_parse_from(["snipe", "auth", "add", "gdrive"]).unwrap();
+        let cli = Cli::try_parse_from(["pluq", "auth", "add", "gdrive"]).unwrap();
         assert!(matches!(
             cli.command,
             Some(Command::Auth {
@@ -578,7 +577,7 @@ mod tests {
 
     #[test]
     fn test_cli_parsing_auth_list() {
-        let cli = Cli::try_parse_from(["snipe", "auth", "list"]).unwrap();
+        let cli = Cli::try_parse_from(["pluq", "auth", "list"]).unwrap();
         assert!(matches!(
             cli.command,
             Some(Command::Auth {
@@ -589,7 +588,7 @@ mod tests {
 
     #[test]
     fn test_cli_parsing_auth_remove() {
-        let cli = Cli::try_parse_from(["snipe", "auth", "remove", "dropbox"]).unwrap();
+        let cli = Cli::try_parse_from(["pluq", "auth", "remove", "dropbox"]).unwrap();
         assert!(matches!(
             cli.command,
             Some(Command::Auth {
@@ -600,14 +599,14 @@ mod tests {
 
     #[test]
     fn test_cli_parsing_auth_invalid_provider() {
-        let result = Cli::try_parse_from(["snipe", "auth", "add", "onedrive"]);
+        let result = Cli::try_parse_from(["pluq", "auth", "add", "onedrive"]);
         assert!(result.is_err()); // clap ValueEnum rejects unknown
     }
 
     #[test]
     fn test_cli_parsing_auth_with_timeout() {
         let cli =
-            Cli::try_parse_from(["snipe", "auth", "add", "gdrive", "--timeout", "60"]).unwrap();
+            Cli::try_parse_from(["pluq", "auth", "add", "gdrive", "--timeout", "60"]).unwrap();
         if let Some(Command::Auth {
             action: auth_cmd::AuthAction::Add { timeout, .. },
         }) = cli.command

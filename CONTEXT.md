@@ -1,4 +1,4 @@
-# Archive Sniper — Project Context & State
+# pluq — Project Context & State
 
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
@@ -36,7 +36,7 @@
 
 ### The Product
 
-**Archive Sniper** is a surgical cloud extraction tool (ZIP/RAR5/RAR4). Focus: Google Drive, Dropbox, OneDrive.
+**pluq** is a surgical cloud extraction tool (ZIP/RAR5/RAR4). Focus: Google Drive, Dropbox, OneDrive.
 
 *   **UX Principle:** Simplicity and sanity. TUI-first (Browse, Search, Select, Extract).
 *   **Philosophy:** Stateless core, surgical metadata discovery.
@@ -46,7 +46,7 @@
 *   **`archive-core`**: Stateless logic, Parsers, Codecs, `ReadAt`, `LocalPath`.
 *   **`archive-source`**: Source resolution — URL detection, credential discovery, `ResolvedSource`.
 *   **`archive`**: State Layer. Caching, Entry Tree, Error Translation. Generic over `R: ReadAt + LocalPath`.
-*   **`archive-cli`**: The TUI product (`ratatui`).
+*   **`pluq`**: The TUI product binary (`ratatui`). Published to crates.io as `pluq`.
 *   **`archive-gdrive`**: Google Drive `ReadAt` implementation.
 *   **`archive-dev`**: Experimental scratchpad.
 

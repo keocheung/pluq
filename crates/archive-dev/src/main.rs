@@ -4,7 +4,7 @@ use std::io::{self, Read, Write};
 use std::process::Command;
 
 fn main() {
-    println!("=== 🎯 Archive Sniper: Dev Scratchpad ===\n");
+    println!("=== 🎯 pluq: Dev Scratchpad ===\n");
     println!("1. Google Drive Test Launcher (TUI)");
     println!("2. Dropbox Test Launcher (TUI)");
     println!("3. Dropbox API PoC (Manual)");
@@ -21,7 +21,7 @@ fn main() {
 // ── Dropbox Launcher (TUI) ───────────────────────────────────────────────────
 
 fn run_dropbox_launcher() {
-    println!("=== 🎯 Archive Sniper: Dropbox TUI Launcher ===\n");
+    println!("=== 🎯 pluq: Dropbox TUI Launcher ===\n");
 
     // 0. Load default URLs from dev_links.json
     let dev_links = match std::fs::read_to_string("dev_links.json") {
@@ -60,17 +60,17 @@ fn run_dropbox_launcher() {
     }
 
     // 1. Check for API Key (Env -> .env file -> Prompt)
-    let mut app_key = std::env::var("ARCHIVE_SNIPER_DROPBOX_APP_KEY").ok();
-    let mut app_secret = std::env::var("ARCHIVE_SNIPER_DROPBOX_APP_SECRET").ok();
+    let mut app_key = std::env::var("PLUQ_DROPBOX_APP_KEY").ok();
+    let mut app_secret = std::env::var("PLUQ_DROPBOX_APP_SECRET").ok();
 
     if app_key.is_none() || app_secret.is_none() {
         // Try reading from .env file
         if let Ok(content) = std::fs::read_to_string(".env") {
             for line in content.lines() {
-                if let Some(val) = line.strip_prefix("ARCHIVE_SNIPER_DROPBOX_APP_KEY=") {
+                if let Some(val) = line.strip_prefix("PLUQ_DROPBOX_APP_KEY=") {
                     app_key = Some(val.trim().trim_matches('\"').to_string());
                 }
-                if let Some(val) = line.strip_prefix("ARCHIVE_SNIPER_DROPBOX_APP_SECRET=") {
+                if let Some(val) = line.strip_prefix("PLUQ_DROPBOX_APP_SECRET=") {
                     app_secret = Some(val.trim().trim_matches('\"').to_string());
                 }
             }
@@ -94,14 +94,14 @@ fn run_dropbox_launcher() {
         println!("💾 Saving keys to .env file...");
         let mut env_content = std::fs::read_to_string(".env").unwrap_or_default();
         if let Some(k) = &app_key
-            && !env_content.contains("ARCHIVE_SNIPER_DROPBOX_APP_KEY=")
+            && !env_content.contains("PLUQ_DROPBOX_APP_KEY=")
         {
-            env_content.push_str(&format!("ARCHIVE_SNIPER_DROPBOX_APP_KEY=\"{k}\"\n"));
+            env_content.push_str(&format!("PLUQ_DROPBOX_APP_KEY=\"{k}\"\n"));
         }
         if let Some(s) = &app_secret
-            && !env_content.contains("ARCHIVE_SNIPER_DROPBOX_APP_SECRET=")
+            && !env_content.contains("PLUQ_DROPBOX_APP_SECRET=")
         {
-            env_content.push_str(&format!("ARCHIVE_SNIPER_DROPBOX_APP_SECRET=\"{s}\"\n"));
+            env_content.push_str(&format!("PLUQ_DROPBOX_APP_SECRET=\"{s}\"\n"));
         }
         let _ = std::fs::write(".env", env_content);
     } else {
@@ -115,7 +115,7 @@ fn run_dropbox_launcher() {
     // 3. Build and Run Command
     println!("\n🚀 Launching TUI Browse...");
 
-    let mut args = vec!["run", "-p", "archive-cli", "--"];
+    let mut args = vec!["run", "-p", "pluq", "--"];
     if use_debug {
         args.push("--debug");
     }
@@ -129,14 +129,14 @@ fn run_dropbox_launcher() {
 
     // Set the env var for the child process
     if let Some(key) = app_key {
-        cmd.env("ARCHIVE_SNIPER_DROPBOX_APP_KEY", key);
+        cmd.env("PLUQ_DROPBOX_APP_KEY", key);
     }
     if let Some(secret) = app_secret {
-        cmd.env("ARCHIVE_SNIPER_DROPBOX_APP_SECRET", secret);
+        cmd.env("PLUQ_DROPBOX_APP_SECRET", secret);
     }
 
     // Inherit stdin/stdout/stderr so the TUI works correctly
-    let status = cmd.status().expect("failed to execute archive-cli");
+    let status = cmd.status().expect("failed to execute pluq");
 
     if !status.success() {
         eprintln!("\n❌ TUI exited with error code: {}", status);
@@ -146,7 +146,7 @@ fn run_dropbox_launcher() {
 // ── Google Drive Launcher (Old Code) ───────────────────────────────────────────
 
 fn run_gdrive_launcher() {
-    println!("=== 🎯 Archive Sniper: Google Drive Test Launcher ===\n");
+    println!("=== 🎯 pluq: Google Drive Test Launcher ===\n");
 
     // 0. Load default URLs from dev_links.json
     let dev_links = match std::fs::read_to_string("dev_links.json") {
@@ -161,13 +161,13 @@ fn run_gdrive_launcher() {
         .unwrap_or("https://drive.google.com/");
 
     // 1. Check for API Key (Env -> .env file -> Prompt)
-    let mut api_key = std::env::var("ARCHIVE_SNIPER_GDRIVE_KEY").ok();
+    let mut api_key = std::env::var("PLUQ_GDRIVE_KEY").ok();
 
     if api_key.is_none() {
         // Try reading from .env file
         if let Ok(content) = std::fs::read_to_string(".env") {
             for line in content.lines() {
-                if let Some(val) = line.strip_prefix("ARCHIVE_SNIPER_GDRIVE_KEY=") {
+                if let Some(val) = line.strip_prefix("PLUQ_GDRIVE_KEY=") {
                     api_key = Some(val.trim().trim_matches('\"').to_string());
                     break;
                 }
@@ -176,7 +176,7 @@ fn run_gdrive_launcher() {
     }
 
     if api_key.is_none() {
-        println!("⚠️  ARCHIVE_SNIPER_GDRIVE_KEY is not set.");
+        println!("⚠️  PLUQ_GDRIVE_KEY is not set.");
         let k = prompt("🔑 Enter your Google Drive API Key: ");
         let k = k.trim().to_string();
         if k.is_empty() {
@@ -186,7 +186,7 @@ fn run_gdrive_launcher() {
 
         // Save to .env file for next time
         println!("💾 Saving key to .env file...");
-        let _ = std::fs::write(".env", format!("ARCHIVE_SNIPER_GDRIVE_KEY=\"{k}\"\n"));
+        let _ = std::fs::write(".env", format!("PLUQ_GDRIVE_KEY=\"{k}\"\n"));
         api_key = Some(k);
     } else {
         println!("✅ API Key found.");
@@ -208,7 +208,7 @@ fn run_gdrive_launcher() {
     // 4. Build and Run Command
     println!("\n🚀 Launching TUI Browse...");
 
-    let mut args = vec!["run", "-p", "archive-cli", "--"];
+    let mut args = vec!["run", "-p", "pluq", "--"];
     if use_debug {
         args.push("--debug");
     }
@@ -222,11 +222,11 @@ fn run_gdrive_launcher() {
 
     // Set the env var for the child process
     if let Some(key) = api_key {
-        cmd.env("ARCHIVE_SNIPER_GDRIVE_KEY", key);
+        cmd.env("PLUQ_GDRIVE_KEY", key);
     }
 
     // Inherit stdin/stdout/stderr so the TUI works correctly
-    let status = cmd.status().expect("failed to execute archive-cli");
+    let status = cmd.status().expect("failed to execute pluq");
 
     if !status.success() {
         eprintln!("\n❌ TUI exited with error code: {}", status);
@@ -236,7 +236,7 @@ fn run_gdrive_launcher() {
 // ── Dropbox PoC (New Code) ───────────────────────────────────────────────────
 
 fn run_dropbox_poc() {
-    println!("=== 🎯 Archive Sniper: Dropbox API PoC ===\n");
+    println!("=== 🎯 pluq: Dropbox API PoC ===\n");
 
     let dev_links = match std::fs::read_to_string("dev_links.json") {
         Ok(s) => serde_json::from_str::<serde_json::Value>(&s).ok(),
@@ -274,17 +274,17 @@ fn run_dropbox_poc() {
     }
 
     // Try to get credentials from env
-    let mut app_key = std::env::var("ARCHIVE_SNIPER_DROPBOX_APP_KEY").ok();
-    let mut app_secret = std::env::var("ARCHIVE_SNIPER_DROPBOX_APP_SECRET").ok();
+    let mut app_key = std::env::var("PLUQ_DROPBOX_APP_KEY").ok();
+    let mut app_secret = std::env::var("PLUQ_DROPBOX_APP_SECRET").ok();
 
     if (app_key.is_none() || app_secret.is_none())
         && let Ok(content) = std::fs::read_to_string(".env")
     {
         for line in content.lines() {
-            if let Some(val) = line.strip_prefix("ARCHIVE_SNIPER_DROPBOX_APP_KEY=") {
+            if let Some(val) = line.strip_prefix("PLUQ_DROPBOX_APP_KEY=") {
                 app_key = Some(val.trim().trim_matches('\"').to_string());
             }
-            if let Some(val) = line.strip_prefix("ARCHIVE_SNIPER_DROPBOX_APP_SECRET=") {
+            if let Some(val) = line.strip_prefix("PLUQ_DROPBOX_APP_SECRET=") {
                 app_secret = Some(val.trim().trim_matches('\"').to_string());
             }
         }
