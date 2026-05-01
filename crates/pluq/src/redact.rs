@@ -32,7 +32,10 @@ mod tests {
 
     #[test]
     fn test_scrub_url() {
-        assert_eq!(scrub("opening https://example.com/file.zip now"), "opening <url> now");
+        assert_eq!(
+            scrub("opening https://example.com/file.zip now"),
+            "opening <url> now"
+        );
     }
 
     #[test]

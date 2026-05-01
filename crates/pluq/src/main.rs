@@ -474,22 +474,19 @@ fn prune_logs(dir: &std::path::Path, max_total_bytes: u64) {
     let mut files = Vec::new();
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
-            if let Ok(metadata) = entry.metadata() {
-                if metadata.is_file() {
-                    let name = entry.file_name();
-                    let name_str = name.to_string_lossy();
-                    if name_str.starts_with("pluq.log") {
-                        files.push((entry.path(), metadata));
-                    }
+            if let Ok(metadata) = entry.metadata()
+                && metadata.is_file()
+            {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.starts_with("pluq.log") {
+                    files.push((entry.path(), metadata));
                 }
             }
         }
     }
     // Sort oldest first
-    files.sort_by_key(|(_, meta)| {
-        meta.modified()
-            .unwrap_or_else(|_| std::time::SystemTime::UNIX_EPOCH)
-    });
+    files.sort_by_key(|(_, meta)| meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH));
 
     let mut total_size: u64 = files.iter().map(|(_, meta)| meta.len()).sum();
     for (path, meta) in files {
