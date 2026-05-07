@@ -458,7 +458,9 @@ async fn rar5_extract_all_streaming_local_byte_count() {
         .await
         .expect("extract_all_streaming");
 
-    assert_eq!(total, 40, "expected 20 + 20 = 40 bytes");
+    assert_eq!(total.bytes_written, 40, "expected 20 + 20 = 40 bytes");
+    assert_eq!(total.succeeded, 2);
+    assert!(total.failed.is_empty());
     assert_eq!(archive.entries().len(), 2);
     assert_eq!(archive.entries()[0].name, "file1.txt");
     assert_eq!(archive.entries()[1].name, "file2.txt");

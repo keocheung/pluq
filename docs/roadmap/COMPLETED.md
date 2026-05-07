@@ -84,3 +84,5 @@
 - [x] **File logging always-on** — `tracing-appender` rolling file → `directories::ProjectDirs` state path. Cap 5 MB. Redact URLs / tokens at log site.
 - [x] **`human-panic` integration** — friendly panic message + log path on crash.
 - [x] **Versioned cache schema** — `schema_version: u32` field (default `0` for old files); version check first in `is_valid`; `load` emits `info!` on mismatch and returns `InvalidData`; `SCHEMA_VERSION = 1` exported from `archive-cache`.
+- [x] **Symlink detection and verification** — Parsers mark `is_symlink` (bumped schema to v2); extraction verifies target stays within output directory bounds. Fallback behavior (file containing path) retained for v1.
+- [x] **Solid RAR UX fix** — Solid entries propagate through `BatchResult.failed` instead of being silently skipped; CLI display appends `"→ request support: <url>"` suffix for `ArchiveError::UnsupportedFormat` errors; TUI result summary updated to show first failure reason.

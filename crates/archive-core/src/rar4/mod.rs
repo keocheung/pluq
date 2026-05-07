@@ -22,8 +22,8 @@ use crate::io::{FetchRegion, LocalPath, build_clusters};
 use crate::junk;
 use crate::progress::ProgressReporter;
 use crate::rar::{
-    RAR4_SIGNATURE, SnippetConfig, SnippetMsg, assemble_and_unrar_synthetic,
-    build_unrar_progress_hooks, consume_snippets, map_unrar_error, verify_and_stream_from_file,
+    RAR4_SIGNATURE, SnippetConfig, assemble_and_unrar_synthetic, build_unrar_progress_hooks,
+    map_unrar_error, verify_and_stream_from_file,
 };
 use crate::rar4::parse::{
     BLOCK_END, BLOCK_FILE, build_rar4_end_block, parse_block_header, parse_file_header,
@@ -62,6 +62,8 @@ pub struct Rar4EntryLocation {
     pub method: u8,
     /// True if an encryption flag was found for this entry.
     pub is_encrypted: bool,
+    /// True if this entry is encoded in solid mode.
+    pub is_solid: bool,
 }
 
 // ── Rar4Archive ───────────────────────────────────────────────────────────────
@@ -364,7 +366,7 @@ impl<R: ReadAt> Rar4Archive<R> {
                     let pack_size = file_hdr.pack_size;
                     let total_advance = header_size_u64 + pack_size;
 
-                    if !is_solid && !is_split {
+                    if !is_split {
                         let modified_at = dos_datetime_to_system_time(
                             (file_hdr.ftime >> 16) as u16,
                             (file_hdr.ftime & 0xFFFF) as u16,
@@ -395,6 +397,7 @@ impl<R: ReadAt> Rar4Archive<R> {
                             crc32: file_hdr.file_crc,
                             method: file_hdr.method,
                             is_encrypted: file_hdr.is_encrypted,
+                            is_solid,
                         };
                         entries.push(entry.clone());
                         locations.push(location);
@@ -470,12 +473,13 @@ impl<R: ReadAt> Rar4Archive<R> {
 
                             if config
                                 .sender
-                                .send(SnippetMsg {
+                                .send(crate::rar::SnippetMsg {
                                     path: snippet_path.clone(),
                                     entry: entry.clone(),
                                     data_size: pack_size,
                                     crc32: Some(file_hdr.file_crc),
                                     blake2_hash: None,
+                                    is_solid,
                                 })
                                 .await
                                 .is_err()
@@ -1288,7 +1292,7 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for Rar4Archive<R> {
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
         limits: &crate::ResourceLimits,
-    ) -> Result<u64, CoreError>
+    ) -> Result<BatchResult, CoreError>
     where
         Filter: Fn(&ArchiveEntry) -> bool + Send + Sync + 'static,
         SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn std::io::Write + Send>> + Send + 'static,
@@ -1302,14 +1306,29 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for Rar4Archive<R> {
                 .map(|e| e.index)
                 .collect();
 
-            let mut total: u64 = 0;
+            let mut batch = BatchResult {
+                bytes_written: 0,
+                succeeded: 0,
+                failed: vec![],
+            };
+
             for idx in matching {
                 let entry = self.entries[idx].clone();
+                let loc = &self.locations[idx];
+
+                if loc.is_solid {
+                    batch.failed.push((
+                        entry.name.clone(),
+                        "solid RAR archives are not yet supported".into(),
+                    ));
+                    continue;
+                }
+
                 let Some(mut sync_sink) = sink_factory(&entry) else {
                     continue;
                 };
                 let mut buf = Vec::new();
-                let bytes = Rar4Archive::extract(
+                match Rar4Archive::extract(
                     self,
                     &entry,
                     &mut buf,
@@ -1317,28 +1336,37 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for Rar4Archive<R> {
                     password,
                     limits,
                 )
-                .await?;
-                use std::io::Write;
-                sync_sink
-                    .write_all(&buf)
-                    .map_err(|e| CoreError::BitstreamError {
-                        detail: format!("write to sink failed: {e}"),
-                    })?;
-                total += bytes;
+                .await
+                {
+                    Ok(bytes) => {
+                        use std::io::Write;
+                        if let Err(e) = sync_sink.write_all(&buf) {
+                            batch
+                                .failed
+                                .push((entry.name, format!("write to sink failed: {}", e)));
+                        } else {
+                            batch.bytes_written += bytes;
+                            batch.succeeded += 1;
+                        }
+                    }
+                    Err(e) => {
+                        batch.failed.push((entry.name, e.to_string()));
+                    }
+                }
             }
-            return Ok(total);
+            return Ok(batch);
         }
 
         // Cloud path: pipelined streaming splitter.
         let preamble_end = self.archive_preamble.len() as u64;
         let size = self.archive_size;
 
-        let (tx, rx) = tokio::sync::mpsc::channel::<SnippetMsg>(2);
+        let (tx, rx) = tokio::sync::mpsc::channel::<crate::rar::SnippetMsg>(2);
         let password_owned = password.map(|p| p.to_vec());
 
         // Spawn consumer.
         let consumer_progress = progress.clone();
-        let consumer = tokio::spawn(consume_snippets(
+        let consumer = tokio::spawn(crate::rar::consume_snippets(
             rx,
             sink_factory,
             consumer_progress,
@@ -1347,7 +1375,7 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for Rar4Archive<R> {
         ));
 
         // Build snippet config.
-        let config = SnippetConfig {
+        let config = crate::rar::SnippetConfig {
             sender: tx,
             preamble: self.archive_preamble.clone(),
             end_block: self.end_block.clone(),
@@ -1369,7 +1397,7 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for Rar4Archive<R> {
         .await?;
 
         // Await consumer.
-        let total_bytes = consumer.await.map_err(|e| CoreError::BitstreamError {
+        let consumer_result = consumer.await.map_err(|e| CoreError::BitstreamError {
             detail: format!("consumer panicked: {e}"),
         })??;
 
@@ -1383,7 +1411,7 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for Rar4Archive<R> {
             progress.lock().unwrap().on_scan_complete(entry_count);
         }
 
-        Ok(total_bytes)
+        Ok(consumer_result)
     }
 }
 

@@ -103,12 +103,12 @@ impl<R: ReadAt + LocalPath + 'static> PendingArchive<R> {
         sink_factory: SinkFn,
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
-    ) -> Result<(Archive<R>, u64), ArchiveError>
+    ) -> Result<(Archive<R>, archive_core::BatchResult), ArchiveError>
     where
         Filter: Fn(&ArchiveEntry) -> bool + Send + Sync + 'static,
         SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn std::io::Write + Send>> + Send + 'static,
     {
-        let total = match &mut self.inner {
+        let batch = match &mut self.inner {
             ArchiveInner::Zip(_) => {
                 return Err(translate_core_error(CoreError::UnsupportedFeature {
                     detail: "streaming extraction not supported for ZIP".into(),
@@ -141,7 +141,7 @@ impl<R: ReadAt + LocalPath + 'static> PendingArchive<R> {
             config: self.config,
         };
 
-        Ok((archive, total))
+        Ok((archive, batch))
     }
 }
 

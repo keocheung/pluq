@@ -388,7 +388,7 @@ async fn rar4_extract_all_streaming_local_byte_count() {
         .await
         .expect("extract_all_streaming");
 
-    assert_eq!(total, (file1.len() + file2.len()) as u64);
+    assert_eq!(total.bytes_written, (file1.len() + file2.len()) as u64);
 }
 
 #[tokio::test]
@@ -464,7 +464,9 @@ async fn rar4_extract_all_streaming_local_filter() {
             .await
             .expect("extract_all_streaming");
 
-    assert_eq!(total, file1.len() as u64);
+    assert_eq!(total.bytes_written, file1.len() as u64);
+    assert_eq!(total.succeeded, 1);
+    assert!(total.failed.is_empty());
     assert_eq!(buf.lock().unwrap().as_slice(), file1 as &[u8]);
 }
 

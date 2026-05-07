@@ -3,8 +3,8 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 5 — Security Hardening & Release
-* **Current Active Task:** SESSION_PLAN.md — Step 2 complete, awaiting review.
-* **Baseline:** Symlink target verification active. evaluate_symlink_target helper in archive-core path_safety; state layer buffers + verifies before forwarding bytes. Escape → ArchiveError::SecurityRisk (single) or BatchResult.failed (batch).
+* **Current Active Task:** [HANDOVER]
+* **Baseline:** All ROADMAP Phase 5 items are complete (Symlink Target Verification and Solid RAR UX fix). Test suite is green and `cargo clippy` is perfectly clean.
 
 
 ---

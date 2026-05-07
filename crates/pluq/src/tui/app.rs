@@ -776,12 +776,14 @@ impl App {
                         crate::format_size(bytes),
                     )
                 } else {
+                    let first_err = &batch.failed[0].1;
                     format!(
-                        "Extracted {} file{} ({}) — {} failed",
+                        "Extracted {} file{} ({}) — {} failed (e.g. {})",
                         n,
                         if n == 1 { "" } else { "s" },
                         crate::format_size(bytes),
                         failed,
+                        first_err
                     )
                 });
             }

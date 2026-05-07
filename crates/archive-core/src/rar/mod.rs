@@ -306,6 +306,8 @@ pub(crate) struct SnippetMsg {
     pub(crate) crc32: Option<u32>,
     /// BLAKE2sp hash (RAR5 only; None for RAR4).
     pub(crate) blake2_hash: Option<[u8; 32]>,
+    /// Whether this entry is solid.
+    pub(crate) is_solid: bool,
 }
 
 /// Extraction config passed into the modified elastic scan.
@@ -701,8 +703,7 @@ impl<R: ReadAt> RarArchive<R> {
                     entries.push(entry.clone());
                     locations.push(location);
 
-                    if !is_solid
-                        && let Some(ref config) = snippet_config
+                    if let Some(ref config) = snippet_config
                         && (config.filter)(&entry)
                     {
                         let hdr_bytes_owned = buf[buf_pos..buf_pos + hdr_bytes].to_vec();
@@ -776,6 +777,7 @@ impl<R: ReadAt> RarArchive<R> {
                                 data_size,
                                 crc32,
                                 blake2_hash,
+                                is_solid,
                             })
                             .await
                             .is_err()
@@ -875,36 +877,56 @@ impl<R: ReadAt> RarArchive<R> {
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
         limits: &crate::ResourceLimits,
-    ) -> Result<u64, CoreError>
+    ) -> Result<BatchResult, CoreError>
     where
         R: Send + Sync + 'static,
         F: FnMut(&ArchiveEntry) -> Option<Box<dyn std::io::Write + Send>> + Send + 'static,
     {
         if entry_indices.is_empty() {
-            return Ok(0);
+            return Ok(BatchResult {
+                bytes_written: 0,
+                succeeded: 0,
+                failed: vec![],
+            });
         }
 
         if let Some(path) = &self.local_path {
-            let work: Vec<(ArchiveEntry, RarEntryLocation)> = entry_indices
-                .iter()
-                .filter(|&&idx| !self.entries[idx].is_directory && !self.locations[idx].is_solid)
-                .map(|&idx| (self.entries[idx].clone(), self.locations[idx].clone()))
-                .collect();
+            let mut failed = Vec::new();
+            let mut work = Vec::new();
+
+            for &idx in entry_indices {
+                if self.entries[idx].is_directory {
+                    continue;
+                }
+                if self.locations[idx].is_solid {
+                    failed.push((
+                        self.entries[idx].name.clone(),
+                        "solid RAR archives are not yet supported".into(),
+                    ));
+                    continue;
+                }
+                work.push((self.entries[idx].clone(), self.locations[idx].clone()));
+            }
 
             if work.is_empty() {
-                return Ok(0);
+                return Ok(BatchResult {
+                    bytes_written: 0,
+                    succeeded: 0,
+                    failed,
+                });
             }
 
             info!(entries = work.len(), "RAR extract_all: local path");
-            return extract_all_via_unrar(
-                path.clone(),
-                work,
-                sink_factory,
-                progress,
-                password,
-                limits,
-            )
-            .await;
+            let succeeded = work.len();
+            let bytes =
+                extract_all_via_unrar(path.clone(), work, sink_factory, progress, password, limits)
+                    .await?;
+
+            return Ok(BatchResult {
+                bytes_written: bytes,
+                succeeded,
+                failed,
+            });
         }
 
         // Cloud path: use streaming splitter pipeline.
@@ -1841,23 +1863,35 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for RarArchive<R> {
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
         limits: &crate::ResourceLimits,
-    ) -> Result<u64, CoreError>
+    ) -> Result<BatchResult, CoreError>
     where
         Filter: Fn(&ArchiveEntry) -> bool + Send + Sync + 'static,
         SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn std::io::Write + Send>> + Send + 'static,
     {
         // Local path: delegate to existing unrar direct path.
         if let Some(path) = &self.local_path {
-            let work: Vec<(ArchiveEntry, RarEntryLocation)> = self
-                .entries
-                .iter()
-                .zip(self.locations.iter())
-                .filter(|(e, loc)| !e.is_directory && !loc.is_solid && filter(e))
-                .map(|(e, loc)| (e.clone(), loc.clone()))
-                .collect();
+            let mut failed = Vec::new();
+            let mut work = Vec::new();
+
+            for (e, loc) in self.entries.iter().zip(self.locations.iter()) {
+                if !e.is_directory && filter(e) {
+                    if loc.is_solid {
+                        failed.push((
+                            e.name.clone(),
+                            "solid RAR archives are not yet supported".into(),
+                        ));
+                    } else {
+                        work.push((e.clone(), loc.clone()));
+                    }
+                }
+            }
 
             if work.is_empty() {
-                return Ok(0);
+                return Ok(BatchResult {
+                    bytes_written: 0,
+                    succeeded: 0,
+                    failed,
+                });
             }
 
             let total_size: u64 = work.iter().map(|(e, _)| e.uncompressed_size).sum();
@@ -1881,15 +1915,16 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for RarArchive<R> {
                 )?;
             }
 
-            return extract_all_via_unrar(
-                path.clone(),
-                work,
-                sink_factory,
-                progress,
-                password,
-                limits,
-            )
-            .await;
+            let succeeded = work.len();
+            let bytes =
+                extract_all_via_unrar(path.clone(), work, sink_factory, progress, password, limits)
+                    .await?;
+
+            return Ok(BatchResult {
+                bytes_written: bytes,
+                succeeded,
+                failed,
+            });
         }
 
         // Cloud path: pipelined streaming splitter.
@@ -1937,7 +1972,7 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for RarArchive<R> {
         .await?;
 
         // Await consumer.
-        let total_bytes = consumer.await.map_err(|e| CoreError::BitstreamError {
+        let consumer_result = consumer.await.map_err(|e| CoreError::BitstreamError {
             detail: format!("consumer panicked: {e}"),
         })??;
 
@@ -1951,7 +1986,7 @@ impl<R: ReadAt + Send + Sync + 'static> ArchiveReader for RarArchive<R> {
             progress.lock().unwrap().on_scan_complete(entry_count);
         }
 
-        Ok(total_bytes)
+        Ok(consumer_result)
     }
 }
 
@@ -2278,13 +2313,26 @@ pub(crate) async fn consume_snippets<SinkFn>(
     progress: Arc<Mutex<dyn ProgressReporter>>,
     password: Option<Vec<u8>>,
     limits: crate::ResourceLimits,
-) -> Result<u64, CoreError>
+) -> Result<BatchResult, CoreError>
 where
     SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn std::io::Write + Send>> + Send + 'static,
 {
-    let mut total_bytes: u64 = 0;
+    let mut batch = BatchResult {
+        bytes_written: 0,
+        succeeded: 0,
+        failed: Vec::new(),
+    };
 
     while let Some(msg) = rx.recv().await {
+        if msg.is_solid {
+            batch.failed.push((
+                msg.entry.name.clone(),
+                "solid RAR archives are not yet supported".into(),
+            ));
+            let _ = tokio::fs::remove_file(&msg.path).await;
+            continue;
+        }
+
         let result = extract_single_snippet(
             &msg,
             &mut sink_factory,
@@ -2297,10 +2345,19 @@ where
         // Always clean up snippet, even on error.
         let _ = tokio::fs::remove_file(&msg.path).await;
 
-        total_bytes += result?;
+        match result {
+            Ok(Some(bytes)) => {
+                batch.bytes_written += bytes;
+                batch.succeeded += 1;
+            }
+            Ok(None) => {} // Skipped by sink_factory
+            Err(e) => {
+                batch.failed.push((msg.entry.name.clone(), e.to_string()));
+            }
+        }
     }
 
-    Ok(total_bytes)
+    Ok(batch)
 }
 
 async fn extract_single_snippet<SinkFn>(
@@ -2309,12 +2366,12 @@ async fn extract_single_snippet<SinkFn>(
     progress: &Arc<Mutex<dyn ProgressReporter>>,
     password: Option<&[u8]>,
     limits: &crate::ResourceLimits,
-) -> Result<u64, CoreError>
+) -> Result<Option<u64>, CoreError>
 where
     SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn std::io::Write + Send>> + Send,
 {
     let Some(mut sink) = sink_factory(&msg.entry) else {
-        return Ok(0); // sink factory says skip
+        return Ok(None); // sink factory says skip
     };
 
     let entry_name = msg.entry.name.clone();
@@ -2339,7 +2396,7 @@ where
     let data_size = msg.data_size;
     let snippet_path_clone = snippet_path.clone();
 
-    tokio::task::spawn_blocking(move || -> Result<u64, CoreError> {
+    let bytes = tokio::task::spawn_blocking(move || -> Result<u64, CoreError> {
         let out_tmp = tempfile::NamedTempFile::new().map_err(|e| CoreError::BitstreamError {
             detail: format!("failed to create extraction temp file: {e}"),
         })?;
@@ -2380,7 +2437,9 @@ where
     .await
     .map_err(|e| CoreError::BitstreamError {
         detail: format!("extraction/verification task panicked: {e}"),
-    })?
+    })??;
+
+    Ok(Some(bytes))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -2587,6 +2646,42 @@ mod tests {
         // Solid entries are listed so the user can see them; extract() rejects.
         assert_eq!(rar.entries().len(), 1);
         assert!(rar.locations[0].is_solid);
+    }
+
+    #[tokio::test]
+    async fn solid_entry_records_failure_in_batch() {
+        use crate::io::LocalReadAt;
+        use std::sync::{Arc, Mutex};
+
+        let data = b"solid data";
+        let archive_bytes = build_minimal_rar5("solid.txt", data, true);
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &archive_bytes).unwrap();
+
+        let reader = LocalReadAt::new(tmp.path().to_str().unwrap());
+        let mut rar = RarArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
+
+        let progress = Arc::new(Mutex::new(()));
+        let result = rar
+            .extract_all_streaming(
+                |_| true,
+                |_entry| -> Option<Box<dyn std::io::Write + Send>> {
+                    Some(Box::new(std::io::sink()))
+                },
+                progress,
+                None,
+                &crate::ResourceLimits::default(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.succeeded, 0);
+        assert_eq!(result.failed.len(), 1);
+        assert_eq!(result.failed[0].0, "solid.txt");
+        assert!(result.failed[0].1.contains("solid"));
     }
 
     #[tokio::test]

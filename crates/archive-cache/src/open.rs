@@ -77,21 +77,21 @@ impl PendingArchive {
         sink_factory: SinkFn,
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
-    ) -> Result<(Archive<ResolvedSource>, u64), ArchiveError>
+    ) -> Result<(Archive<ResolvedSource>, archive_core::BatchResult), ArchiveError>
     where
         Filter: Fn(&archive_core::ArchiveEntry) -> bool + Send + Sync + 'static,
         SinkFn: FnMut(&archive_core::ArchiveEntry) -> Option<Box<dyn std::io::Write + Send>>
             + Send
             + 'static,
     {
-        let (archive, total) = self
+        let (archive, batch) = self
             .inner
             .scan_and_extract(filter, sink_factory, progress, password)
             .await?;
         if let Some(cache_path) = crate::cache_path_for(&self.source) {
             let _ = save_cache(&archive, &self.fingerprint, &cache_path);
         }
-        Ok((archive, total))
+        Ok((archive, batch))
     }
 }
 

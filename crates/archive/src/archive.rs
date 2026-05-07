@@ -590,7 +590,7 @@ impl<R: ReadAt + LocalPath + 'static> Archive<R> {
         mut sink_factory: SinkFn,
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
-    ) -> Result<u64, ArchiveError>
+    ) -> Result<BatchResult, ArchiveError>
     where
         Filter: Fn(&ArchiveEntry) -> bool + Send + Sync + 'static,
         SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn std::io::Write + Send>> + Send + 'static,

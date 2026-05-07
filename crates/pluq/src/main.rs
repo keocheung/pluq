@@ -173,12 +173,32 @@ async fn main() {
             e.downcast_ref::<archive::ArchiveError>()
             && let Some(pe) = classify_transport(inner.as_ref())
         {
-            eprintln!("  Error: {pe}");
+            let suffix = unsupported_suffix(e.as_ref()).unwrap_or_default();
+            eprintln!("  Error: {pe}{suffix}");
             std::process::exit(1);
         }
-        eprintln!("  Error: {e}");
+        let suffix = unsupported_suffix(e.as_ref()).unwrap_or_default();
+        eprintln!("  Error: {e}{suffix}");
         std::process::exit(1);
     }
+}
+
+// TODO(phase6): swap placeholder URL once repo is public.
+// Decision 15 spec: discussions/ideas category once available.
+const IDEAS_URL: &str = "https://github.com/<TBD>/discussions/categories/ideas";
+
+fn unsupported_suffix(e: &(dyn std::error::Error + 'static)) -> Option<String> {
+    let mut current = Some(e);
+    while let Some(err) = current {
+        if matches!(
+            err.downcast_ref::<archive::ArchiveError>(),
+            Some(archive::ArchiveError::UnsupportedFormat { .. })
+        ) {
+            return Some(format!("\n  → request support: {IDEAS_URL}"));
+        }
+        current = err.source();
+    }
+    None
 }
 
 fn source_config(token_store: Option<Arc<archive_auth::TokenStore>>) -> SourceConfig {

@@ -160,7 +160,7 @@ pub trait ArchiveReader {
         progress: Arc<Mutex<dyn ProgressReporter>>,
         password: Option<&[u8]>,
         limits: &crate::ResourceLimits,
-    ) -> impl std::future::Future<Output = Result<u64, CoreError>> + Send
+    ) -> impl std::future::Future<Output = Result<BatchResult, CoreError>> + Send
     where
         Filter: Fn(&ArchiveEntry) -> bool + Send + Sync + 'static,
         SinkFn: FnMut(&ArchiveEntry) -> Option<Box<dyn std::io::Write + Send>> + Send + 'static,
