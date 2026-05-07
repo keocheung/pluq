@@ -36,6 +36,14 @@ pub struct ArchiveEntry {
     /// [`CoreError::PasswordRequired`].
     pub is_encrypted: bool,
 
+    /// `true` if this entry represents a symbolic link (Unix S_IFLNK).
+    ///
+    /// The link target is stored as the entry's data payload — extraction
+    /// reads it like any other entry. The state layer verifies the target
+    /// stays within the output directory before writing.
+    #[serde(default)]
+    pub is_symlink: bool,
+
     /// Last-modified timestamp, if present in the archive.
     ///
     /// Precision and epoch vary by format (ZIP: 2-second DOS precision,
@@ -103,6 +111,7 @@ impl ArchiveEntry {
             uncompressed_size: 0,
             is_directory,
             is_encrypted: false,
+            is_symlink: false,
             modified_at: None,
             compression_method: None,
             index: 0,

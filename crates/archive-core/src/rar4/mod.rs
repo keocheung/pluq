@@ -369,12 +369,20 @@ impl<R: ReadAt> Rar4Archive<R> {
                             (file_hdr.ftime >> 16) as u16,
                             (file_hdr.ftime & 0xFFFF) as u16,
                         );
+
+                        let is_symlink = parse::is_rar4_symlink(file_hdr.host_os, file_hdr.attr);
+                        let mut is_directory = file_hdr.is_directory;
+                        if is_symlink && is_directory {
+                            is_directory = false;
+                        }
+
                         let entry = ArchiveEntry {
                             name: file_hdr.name.clone(),
                             compressed_size: pack_size,
                             uncompressed_size: file_hdr.unp_size,
-                            is_directory: file_hdr.is_directory,
+                            is_directory,
                             is_encrypted: file_hdr.is_encrypted,
+                            is_symlink,
                             modified_at,
                             compression_method: rar4_method_to_codec(file_hdr.method),
                             index: entries.len(),

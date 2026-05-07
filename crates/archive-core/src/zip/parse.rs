@@ -325,6 +325,7 @@ pub async fn parse_central_directory(
         }
 
         // ── CD fixed fields ───────────────────────────────────────────────
+        let version_made_by = read_u16_le(&cd_bytes, cursor + 4);
         let general_purpose_flags = read_u16_le(&cd_bytes, cursor + 8);
         let method_id = read_u16_le(&cd_bytes, cursor + 10);
         let last_mod_time = read_u16_le(&cd_bytes, cursor + 12);
@@ -335,6 +336,8 @@ pub async fn parse_central_directory(
         let name_len = read_u16_le(&cd_bytes, cursor + 28) as usize;
         let extra_len = read_u16_le(&cd_bytes, cursor + 30) as usize;
         let comment_len = read_u16_le(&cd_bytes, cursor + 32) as usize;
+        let external_attrs = read_u32_le(&cd_bytes, cursor + 38);
+        let is_symlink = is_zip_symlink(version_made_by, external_attrs);
         let mut local_header_offset = read_u32_le(&cd_bytes, cursor + 42) as u64;
 
         let name_start = cursor + 46;
@@ -376,7 +379,10 @@ pub async fn parse_central_directory(
         let is_encrypted = (general_purpose_flags & GP_FLAG_ENCRYPTED != 0) || method_id == 99;
 
         let name = decode_zip_filename(&cd_bytes[name_start..name_end], general_purpose_flags);
-        let is_directory = name.ends_with('/');
+        let mut is_directory = name.ends_with('/');
+        if is_symlink && is_directory {
+            is_directory = false;
+        }
 
         let modified_at = dos_datetime_to_system_time(last_mod_date, last_mod_time);
 
@@ -393,6 +399,7 @@ pub async fn parse_central_directory(
             uncompressed_size,
             is_directory,
             is_encrypted,
+            is_symlink,
             modified_at,
             index,
             compression_method,
@@ -435,6 +442,12 @@ pub(crate) fn zip_method_to_codec(id: u16) -> Option<CompressionMethod> {
         98 => Some(CompressionMethod::Ppmd),
         _ => None,
     }
+}
+
+pub(crate) fn is_zip_symlink(version_made_by: u16, external_attrs: u32) -> bool {
+    let host_os = (version_made_by >> 8) as u8;
+    let unix_mode = (external_attrs >> 16) as u16;
+    host_os == 3 && (unix_mode & 0xF000) == 0xA000
 }
 
 /// Parse ZIP64 extra fields to extract real u64 sizes and offsets.
@@ -574,5 +587,15 @@ mod tests {
             "Windows-1252 decode must differ from UTF-8 lossy for 0xE9"
         );
         assert_eq!(win1252, "é");
+    }
+
+    #[test]
+    fn test_is_zip_symlink() {
+        // Unix (3), S_IFLNK (0xA000) | 0o777 = 0xA1FF
+        assert!(is_zip_symlink(0x0314, 0xA1FF0000));
+        // Unix (3), S_IFREG (0x8000) | 0o664 = 0x81B4
+        assert!(!is_zip_symlink(0x0314, 0x81B40000));
+        // DOS (0), S_IFLNK - should be false since host_os != 3
+        assert!(!is_zip_symlink(0x0014, 0xA1FF0000));
     }
 }

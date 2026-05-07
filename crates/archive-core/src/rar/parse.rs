@@ -239,6 +239,10 @@ pub(crate) struct RarFileHeader {
     pub high_precision_time: Option<RarHighPrecisionTime>,
 }
 
+pub(crate) fn is_rar5_symlink(host_os: u8, attributes: u64) -> bool {
+    host_os == 1 && (attributes as u32 & 0xF000) == 0xA000
+}
+
 /// Parse a RAR5 file or service header.
 ///
 /// `data` is the same slice passed to [`parse_block_header`], starting at the
@@ -1167,5 +1171,15 @@ mod tests {
         let blocks = parse_quick_open_data(half, 0);
         // May return 0 or partial results — must not panic.
         let _ = blocks;
+    }
+
+    #[test]
+    fn test_is_rar5_symlink() {
+        // Unix (1), S_IFLNK (0xA000) | 0o777 = 0xA1FF
+        assert!(is_rar5_symlink(1, 0xA1FF));
+        // Unix (1), S_IFREG (0x8000) | 0o664 = 0x81B4
+        assert!(!is_rar5_symlink(1, 0x81B4));
+        // Windows (0), S_IFLNK - should be false
+        assert!(!is_rar5_symlink(0, 0xA1FF));
     }
 }

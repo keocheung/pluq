@@ -666,13 +666,20 @@ impl<R: ReadAt> RarArchive<R> {
                     let file_hdr = parse_file_header(&buf[buf_pos..], block)?;
                     let is_solid = file_hdr.compression.solid;
 
+                    let is_symlink = parse::is_rar5_symlink(file_hdr.host_os, file_hdr.attributes);
+                    let mut is_directory = file_hdr.is_directory;
+                    if is_symlink && is_directory {
+                        is_directory = false;
+                    }
+
                     let hdr_size = file_hdr.raw.total_size - file_hdr.raw.data_size;
                     let entry = ArchiveEntry {
                         name: file_hdr.name.clone(),
                         compressed_size: file_hdr.raw.data_size,
                         uncompressed_size: file_hdr.unpacked_size,
-                        is_directory: file_hdr.is_directory,
+                        is_directory,
                         is_encrypted: file_hdr.encryption.is_some(),
+                        is_symlink,
                         modified_at: file_hdr.mtime.map(unix_to_system_time),
                         compression_method: rar_method_to_codec(file_hdr.compression.method),
                         index: entries.len(),
@@ -1696,13 +1703,20 @@ impl<R: ReadAt> RarArchive<R> {
 
             let is_solid = file_hdr.compression.solid;
 
+            let is_symlink = parse::is_rar5_symlink(file_hdr.host_os, file_hdr.attributes);
+            let mut is_directory = file_hdr.is_directory;
+            if is_symlink && is_directory {
+                is_directory = false;
+            }
+
             let hdr_size = file_hdr.raw.total_size - file_hdr.raw.data_size;
             let entry = ArchiveEntry {
                 name: file_hdr.name.clone(),
                 compressed_size: file_hdr.raw.data_size,
                 uncompressed_size: file_hdr.unpacked_size,
-                is_directory: file_hdr.is_directory,
+                is_directory,
                 is_encrypted: file_hdr.encryption.is_some(),
+                is_symlink,
                 modified_at: file_hdr.mtime.map(unix_to_system_time),
                 compression_method: rar_method_to_codec(file_hdr.compression.method),
                 index: entries.len(),

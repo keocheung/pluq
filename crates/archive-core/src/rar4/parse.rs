@@ -106,10 +106,18 @@ pub(crate) struct Rar4FileHeader {
     pub ftime: u32,
     /// Compression method byte: 0x30 = Store, 0x31-0x35 = RAR compression levels.
     pub method: u8,
+    /// 0=MS-DOS, 1=OS/2, 2=Win32, 3=Unix, 4=macOS, 5=BeOS
+    pub host_os: u8,
+    /// File attributes
+    pub attr: u32,
     /// File path with directory separators normalised to `/`.
     pub name: String,
     pub is_directory: bool,
     pub is_encrypted: bool,
+}
+
+pub(crate) fn is_rar4_symlink(host_os: u8, attr: u32) -> bool {
+    host_os == 3 && (attr & 0xF000) == 0xA000
 }
 
 /// Parse a RAR4 file block header.
@@ -214,6 +222,8 @@ pub(crate) fn parse_file_header(
         file_crc,
         ftime,
         method,
+        host_os,
+        attr,
         name,
         is_directory,
         is_encrypted,
@@ -304,4 +314,19 @@ fn crc16_arc(data: &[u8]) -> u16 {
         }
     }
     crc
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_rar4_symlink() {
+        // Unix (3), S_IFLNK (0xA000) | 0o777 = 0xA1FF
+        assert!(is_rar4_symlink(3, 0xA1FF));
+        // Unix (3), S_IFREG (0x8000) | 0o664 = 0x81B4
+        assert!(!is_rar4_symlink(3, 0x81B4));
+        // Windows (2), S_IFLNK - should be false
+        assert!(!is_rar4_symlink(2, 0xA1FF));
+    }
 }

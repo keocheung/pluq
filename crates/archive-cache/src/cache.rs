@@ -12,8 +12,8 @@ use archive_core::FormatCacheState;
 /// type it transitively contains changes (new field without a `default`,
 /// variant rename, etc.). A mismatch triggers a silent re-scan — no migration.
 ///
-/// **Current value: 1.**
-pub const SCHEMA_VERSION: u32 = 1;
+/// **Current value: 2.**
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Cached metadata for an archive — entry list + format state + fingerprint.
 ///
