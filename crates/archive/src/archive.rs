@@ -13,6 +13,41 @@ use crate::entry_tree::EntryTree;
 use crate::error::{ArchiveError, translate_core_error};
 use crate::opened::{Opened, PendingArchive};
 
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+struct LimitedBuf<'a> {
+    inner: &'a mut Vec<u8>,
+    cap: usize,
+}
+
+impl<'a> AsyncWrite for LimitedBuf<'a> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, std::io::Error>> {
+        let this = self.get_mut();
+        if this.inner.len() + buf.len() > this.cap {
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Symlink target too large (exceeds 4 KiB)",
+            )));
+        }
+        this.inner.extend_from_slice(buf);
+        Poll::Ready(Ok(buf.len()))
+    }
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
+        Poll::Ready(Ok(()))
+    }
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
 /// Internal enum for format-specific archive implementations.
 /// Hidden from consumers — they only see `Archive`.
 pub(crate) enum ArchiveInner<R: ReadAt + LocalPath + 'static> {
@@ -243,6 +278,48 @@ impl<R: ReadAt + LocalPath + 'static> Archive<R> {
             archive_core::PathDecision::Allow => {}
         }
 
+        if entry.is_symlink {
+            let mut buf = Vec::with_capacity(256);
+            let mut bounded = LimitedBuf {
+                inner: &mut buf,
+                cap: 4096,
+            };
+            let bytes = match &self.inner {
+                ArchiveInner::Zip(z) => {
+                    z.extract(entry, &mut bounded, progress.clone(), password, limits)
+                        .await
+                }
+                ArchiveInner::Rar(r) => {
+                    r.extract(entry, &mut bounded, progress.clone(), password, limits)
+                        .await
+                }
+                ArchiveInner::Rar4(r) => {
+                    r.extract(entry, &mut bounded, progress.clone(), password, limits)
+                        .await
+                }
+            }
+            .map_err(translate_core_error)?;
+
+            let target = String::from_utf8_lossy(&buf);
+            match archive_core::evaluate_symlink_target(&entry.name, &target) {
+                archive_core::SymlinkDecision::Reject => {
+                    return Err(translate_core_error(CoreError::SymlinkTargetEscape {
+                        path: entry.name.clone(),
+                        target: target.into_owned(),
+                    }));
+                }
+                archive_core::SymlinkDecision::Allow => {
+                    use tokio::io::AsyncWriteExt;
+                    sink.write_all(&buf)
+                        .await
+                        .map_err(|e| ArchiveError::Internal {
+                            detail: format!("I/O error: {}", e),
+                        })?;
+                    return Ok(bytes);
+                }
+            }
+        }
+
         match &self.inner {
             ArchiveInner::Zip(z) => z.extract(entry, sink, progress, password, limits).await,
             ArchiveInner::Rar(r) => r.extract(entry, sink, progress, password, limits).await,
@@ -280,9 +357,18 @@ impl<R: ReadAt + LocalPath + 'static> Archive<R> {
             }
         }
 
-        let wrapped_factory = {
-            let progress = progress.clone();
-            move |entry: &ArchiveEntry| match archive_core::evaluate_path(
+        let mut symlinks = Vec::new();
+        let mut non_symlinks = Vec::new();
+        for &e in entries {
+            if e.is_symlink {
+                symlinks.push(e);
+            } else {
+                non_symlinks.push(e);
+            }
+        }
+
+        let non_symlink_result = {
+            let mut wrapped_factory = |entry: &ArchiveEntry| match archive_core::evaluate_path(
                 &entry.name,
                 self.config.path_policy,
             ) {
@@ -306,24 +392,134 @@ impl<R: ReadAt + LocalPath + 'static> Archive<R> {
                     sink_factory(&safe_entry)
                 }
                 archive_core::PathDecision::Allow => sink_factory(entry),
+            };
+
+            match &self.inner {
+                ArchiveInner::Zip(z) => {
+                    z.extract_selected(
+                        &non_symlinks,
+                        &mut wrapped_factory,
+                        progress.clone(),
+                        password,
+                        limits,
+                    )
+                    .await
+                }
+                ArchiveInner::Rar(r) => {
+                    r.extract_selected(
+                        &non_symlinks,
+                        &mut wrapped_factory,
+                        progress.clone(),
+                        password,
+                        limits,
+                    )
+                    .await
+                }
+                ArchiveInner::Rar4(r) => {
+                    r.extract_selected(
+                        &non_symlinks,
+                        &mut wrapped_factory,
+                        progress.clone(),
+                        password,
+                        limits,
+                    )
+                    .await
+                }
             }
+            .map_err(translate_core_error)?
         };
 
-        match &self.inner {
-            ArchiveInner::Zip(z) => {
-                z.extract_selected(entries, wrapped_factory, progress, password, limits)
-                    .await
-            }
-            ArchiveInner::Rar(r) => {
-                r.extract_selected(entries, wrapped_factory, progress, password, limits)
-                    .await
-            }
-            ArchiveInner::Rar4(r) => {
-                r.extract_selected(entries, wrapped_factory, progress, password, limits)
-                    .await
+        let mut batch_result = non_symlink_result;
+
+        for entry in symlinks {
+            let safe_entry = match archive_core::evaluate_path(&entry.name, self.config.path_policy)
+            {
+                archive_core::PathDecision::Reject { path } => {
+                    progress
+                        .lock()
+                        .unwrap()
+                        .on_warning(&format!("Skipping unsafe path: {}", path));
+                    continue;
+                }
+                archive_core::PathDecision::Rewrite {
+                    sanitized,
+                    original,
+                } => {
+                    progress.lock().unwrap().on_warning(&format!(
+                        "Sanitized unsafe path: {} -> {}",
+                        original, sanitized
+                    ));
+                    let mut safe = entry.clone();
+                    safe.name = sanitized;
+                    safe
+                }
+                archive_core::PathDecision::Allow => entry.clone(),
+            };
+
+            if let Some(mut sink) = sink_factory(&safe_entry) {
+                let mut buf = Vec::with_capacity(256);
+                let mut bounded = LimitedBuf {
+                    inner: &mut buf,
+                    cap: 4096,
+                };
+                let bytes_res = match &self.inner {
+                    ArchiveInner::Zip(z) => {
+                        z.extract(entry, &mut bounded, progress.clone(), password, limits)
+                            .await
+                    }
+                    ArchiveInner::Rar(r) => {
+                        r.extract(entry, &mut bounded, progress.clone(), password, limits)
+                            .await
+                    }
+                    ArchiveInner::Rar4(r) => {
+                        r.extract(entry, &mut bounded, progress.clone(), password, limits)
+                            .await
+                    }
+                };
+
+                match bytes_res {
+                    Ok(bytes) => {
+                        let target = String::from_utf8_lossy(&buf);
+                        match archive_core::evaluate_symlink_target(&entry.name, &target) {
+                            archive_core::SymlinkDecision::Reject => {
+                                let err = translate_core_error(CoreError::SymlinkTargetEscape {
+                                    path: entry.name.clone(),
+                                    target: target.into_owned(),
+                                });
+                                batch_result
+                                    .failed
+                                    .push((entry.name.clone(), err.to_string()));
+                            }
+                            archive_core::SymlinkDecision::Allow => {
+                                use tokio::io::AsyncWriteExt;
+                                match sink.write_all(&buf).await {
+                                    Ok(_) => {
+                                        batch_result.succeeded += 1;
+                                        batch_result.bytes_written += bytes;
+                                    }
+                                    Err(e) => {
+                                        batch_result.failed.push((
+                                            entry.name.clone(),
+                                            format!("I/O Error: {}", e),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if matches!(e, CoreError::Cancelled) {
+                            return Err(translate_core_error(e));
+                        }
+                        batch_result
+                            .failed
+                            .push((entry.name.clone(), e.to_string()));
+                    }
+                }
             }
         }
-        .map_err(translate_core_error)
+
+        Ok(batch_result)
     }
 
     /// Extract a single entry into memory.
@@ -384,6 +580,10 @@ impl<R: ReadAt + LocalPath + 'static> Archive<R> {
     ///
     /// Populates entries as a side effect (like `scan`).
     /// Returns total uncompressed bytes written.
+    // TODO(symlink): symlink verification not wired into the streaming
+    // path. Single-extract + extract_selected paths verify; streaming
+    // entries flagged is_symlink will write unverified target as plain
+    // content. Tracking for follow-up.
     pub async fn extract_all_streaming<Filter, SinkFn>(
         &mut self,
         filter: Filter,
@@ -750,5 +950,149 @@ mod tests {
         let paths = extracted_paths.lock().unwrap();
         assert!(paths.contains(&"safe.txt".to_string()));
         assert!(paths.contains(&"escape.txt".to_string()));
+    }
+
+    #[tokio::test]
+    async fn extract_symlink_safe_target_writes_plain_text() {
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            // Add a regular file
+            zw.start_file("target.txt", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zw.write_all(b"hello world").unwrap();
+
+            // Add a symlink entry pointing to target.txt
+            let mut options = zip::write::SimpleFileOptions::default();
+            // 0xA000 is the Unix file attribute for symlink
+            options = options.unix_permissions(0xA000 | 0o777);
+            zw.start_file("link.txt", options).unwrap();
+            zw.write_all(b"target.txt").unwrap();
+            zw.finish().unwrap();
+        }
+
+        let (_f, path) = write_temp(&buf);
+        let archive =
+            Archive::open_reader_uncached(LocalReadAt::new(&path), &ArchiveConfig::default())
+                .await
+                .unwrap()
+                .ready()
+                .await
+                .unwrap();
+
+        let mut link_entry = archive
+            .entries_clean()
+            .into_iter()
+            .find(|e| e.name == "link.txt")
+            .unwrap()
+            .clone();
+        link_entry.is_symlink = true;
+
+        let mut out = Vec::new();
+        let progress = Arc::new(Mutex::new(()));
+        let written = archive
+            .extract(&link_entry, &mut out, progress, None)
+            .await
+            .unwrap();
+
+        assert_eq!(written, b"target.txt".len() as u64);
+        assert_eq!(out, b"target.txt");
+    }
+
+    #[tokio::test]
+    async fn extract_symlink_unsafe_target_returns_error() {
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let mut options = zip::write::SimpleFileOptions::default();
+            options = options.unix_permissions(0xA000 | 0o777);
+            zw.start_file("link.txt", options).unwrap();
+            zw.write_all(b"../../../etc/passwd").unwrap();
+            zw.finish().unwrap();
+        }
+
+        let (_f, path) = write_temp(&buf);
+        let archive =
+            Archive::open_reader_uncached(LocalReadAt::new(&path), &ArchiveConfig::default())
+                .await
+                .unwrap()
+                .ready()
+                .await
+                .unwrap();
+
+        let mut link_entry = archive
+            .entries_clean()
+            .into_iter()
+            .find(|e| e.name == "link.txt")
+            .unwrap()
+            .clone();
+        link_entry.is_symlink = true;
+
+        let mut out = Vec::new();
+        let progress = Arc::new(Mutex::new(()));
+        let err = archive
+            .extract(&link_entry, &mut out, progress.clone(), None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, ArchiveError::SecurityRisk { .. }));
+
+        // Test in extract_selected
+        let result = archive
+            .extract_selected(
+                &[&link_entry],
+                |_| Some(Box::new(tokio::io::sink()) as Box<dyn AsyncWrite + Send + Unpin>),
+                progress,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.failed.len(), 1);
+        assert_eq!(result.failed[0].0, "link.txt");
+        assert!(result.failed[0].1.contains("dangerous symlink"));
+    }
+
+    #[tokio::test]
+    async fn extract_symlink_oversized_target_rejected() {
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let mut options = zip::write::SimpleFileOptions::default();
+            options = options.unix_permissions(0xA000 | 0o777);
+            zw.start_file("link.txt", options).unwrap();
+            let large_target = vec![b'a'; 5000]; // > 4096 cap
+            zw.write_all(&large_target).unwrap();
+            zw.finish().unwrap();
+        }
+
+        let (_f, path) = write_temp(&buf);
+        let archive =
+            Archive::open_reader_uncached(LocalReadAt::new(&path), &ArchiveConfig::default())
+                .await
+                .unwrap()
+                .ready()
+                .await
+                .unwrap();
+
+        let mut link_entry = archive
+            .entries_clean()
+            .into_iter()
+            .find(|e| e.name == "link.txt")
+            .unwrap()
+            .clone();
+        link_entry.is_symlink = true;
+
+        let mut out = Vec::new();
+        let progress = Arc::new(Mutex::new(()));
+        let err = archive
+            .extract(&link_entry, &mut out, progress, None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ArchiveError::FileCorrupted { .. } | ArchiveError::Internal { .. }
+        ));
     }
 }

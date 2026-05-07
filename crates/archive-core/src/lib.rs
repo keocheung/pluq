@@ -27,7 +27,9 @@ pub use core_error::{CoreError, PasswordDetectionMethod};
 pub use entry::ArchiveEntry;
 pub use fingerprint::{ArchiveFingerprint, HttpResponseMetadata};
 pub use limits::{CodecConfig, LimitMode, RatioLimit, ResourceLimits};
-pub use path_safety::{PathDecision, PathPolicy, evaluate_path};
+pub use path_safety::{
+    PathDecision, PathPolicy, SymlinkDecision, evaluate_path, evaluate_symlink_target,
+};
 
 // Progress reporting + cancellation.
 pub use progress::ProgressReporter;

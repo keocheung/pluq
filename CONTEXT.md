@@ -3,8 +3,8 @@
 ## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
 
 * **Current Phase:** Phase 5 — Security Hardening & Release
-* **Current Active Task:** [HANDOVER]
-* **Baseline:** Diagnostics & cache schema cluster complete: lockfile policy fixed, file logging always-on (5 MB cap, redacted log sites), human-panic integration, versioned cache schema (`schema_version: u32`, `SCHEMA_VERSION = 1`, mismatch → re-scan + `info!` log).
+* **Current Active Task:** SESSION_PLAN.md — Step 2 complete, awaiting review.
+* **Baseline:** Symlink target verification active. evaluate_symlink_target helper in archive-core path_safety; state layer buffers + verifies before forwarding bytes. Escape → ArchiveError::SecurityRisk (single) or BatchResult.failed (batch).
 
 
 ---
