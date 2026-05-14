@@ -35,3 +35,7 @@ SESSION_PLAN*.md
 docs/sandbox/
 docs/superpowers/
 temp/
+
+# MemPalace per-project files
+mempalace.yaml
+entities.json
