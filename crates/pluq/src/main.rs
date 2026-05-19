@@ -20,7 +20,7 @@ use archive_source::{ResolvedSource, SourceConfig, classify_transport, resolve};
 
 /// pluq — surgical archive extraction from local or cloud storage.
 #[derive(Parser)]
-#[command(name = "pluq", version, about, args_conflicts_with_subcommands = true)]
+#[command(name = "pluq", version, about)]
 struct Cli {
     /// Open an archive directly in the TUI. Omit to launch the Home Screen.
     source: Option<String>,
@@ -161,7 +161,12 @@ async fn main() {
         (None, None) => run_home(cancel, token_store).await,
         (Some(src), None) => run_browse(src, cancel, token_store).await,
         (None, Some(cmd)) => run_subcommand(cmd, cancel, token_store).await,
-        (Some(_), Some(_)) => unreachable!(), // args_conflicts_with_subcommands
+        (Some(_), Some(_)) => {
+            eprintln!("  Error: cannot pass both <SOURCE> and a subcommand");
+            eprintln!("  Usage: pluq [OPTIONS] <SOURCE>");
+            eprintln!("         pluq [OPTIONS] <COMMAND>");
+            std::process::exit(2);
+        }
     };
 
     if let Err(e) = run_result {
@@ -579,9 +584,11 @@ mod tests {
             matches!(cli.command, Some(Command::List { ref source, all: false }) if source == "file.zip")
         );
 
-        // pluq file.zip list file.zip -> error (args_conflicts_with_subcommands)
-        let res = Cli::try_parse_from(["pluq", "file.zip", "list", "file.zip"]);
-        assert!(res.is_err());
+        // pluq file.zip list file.zip -> parses (both branches populated). Runtime in
+        // main() now rejects this with exit code 2; clap itself no longer flags it.
+        let cli = Cli::try_parse_from(["pluq", "file.zip", "list", "file.zip"]).unwrap();
+        assert!(cli.source.is_some());
+        assert!(cli.command.is_some());
 
         // pluq get file.zip -> Get with no glob
         let cli = Cli::try_parse_from(["pluq", "get", "file.zip"]).unwrap();
@@ -695,5 +702,66 @@ mod tests {
         } else {
             panic!("expected Auth::Add with timeout=60");
         }
+    }
+
+    #[test]
+    fn test_cli_parsing_global_clean_cache_with_subcommand_url() {
+        // Regression: pluq --clean-cache list <URL> used to error.
+        let cli =
+            Cli::try_parse_from(["pluq", "--clean-cache", "list", "https://example.com/a.zip"])
+                .expect("global --clean-cache must coexist with subcommand + URL source");
+        assert!(cli.clean_cache);
+        assert!(matches!(cli.command, Some(Command::List { .. })));
+    }
+
+    #[test]
+    fn test_cli_parsing_global_debug_with_subcommand_url() {
+        let cli = Cli::try_parse_from(["pluq", "--debug", "list", "https://example.com/a.zip"])
+            .expect("global --debug must coexist with subcommand + URL source");
+        assert!(cli.debug);
+    }
+
+    #[test]
+    fn test_cli_parsing_global_flags_combined_with_subcommand() {
+        let cli = Cli::try_parse_from([
+            "pluq",
+            "--debug",
+            "--clean-cache",
+            "get",
+            "https://example.com/a.zip",
+            "-o",
+            "/tmp/out",
+        ])
+        .unwrap();
+        assert!(cli.debug);
+        assert!(cli.clean_cache);
+        assert!(matches!(cli.command, Some(Command::Get { .. })));
+    }
+
+    #[test]
+    fn test_cli_parsing_global_flags_with_bare_source() {
+        // pluq --debug --clean-cache <bare-source>  (drops into TUI).
+        let cli = Cli::try_parse_from(["pluq", "--debug", "--clean-cache", "file.zip"]).unwrap();
+        assert!(cli.debug);
+        assert!(cli.clean_cache);
+        assert_eq!(cli.source.as_deref(), Some("file.zip"));
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn test_cli_parsing_global_flags_no_command_no_source() {
+        // pluq --clean-cache  (cache wipe then Home TUI).
+        let cli = Cli::try_parse_from(["pluq", "--clean-cache"]).unwrap();
+        assert!(cli.clean_cache);
+        assert!(cli.source.is_none());
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn test_cli_parsing_flag_after_subcommand_works() {
+        // global flags should also work in the subcommand-suffix position.
+        let cli = Cli::try_parse_from(["pluq", "list", "--debug", "file.zip"]).unwrap();
+        assert!(cli.debug);
+        assert!(matches!(cli.command, Some(Command::List { .. })));
     }
 }
