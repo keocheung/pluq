@@ -72,8 +72,9 @@ pub async fn authenticate(
         eprintln!("{}", auth_url);
     }
 
-    // 5. Receive callback
-    let callback_result = timeout(Duration::from_secs(timeout_secs), async {
+    // 5. Receive callback — race the listener+timeout against Ctrl-C so an
+    //    aborted flow exits immediately instead of hanging until the timeout.
+    let server_fut = timeout(Duration::from_secs(timeout_secs), async {
         let (mut stream, _) = listener
             .accept()
             .await
@@ -114,10 +115,14 @@ pub async fn authenticate(
             .await
             .map_err(|e| AuthError::Callback(e.to_string()))?;
 
-        Ok(code)
-    })
-    .await
-    .map_err(|_| AuthError::Timeout { secs: timeout_secs })??;
+        Ok::<String, AuthError>(code)
+    });
+
+    let callback_result = tokio::select! {
+        biased;
+        _ = tokio::signal::ctrl_c() => return Err(AuthError::Cancelled),
+        res = server_fut => res.map_err(|_| AuthError::Timeout { secs: timeout_secs })??,
+    };
 
     // 6. Exchange code for tokens
     let http_client = reqwest::ClientBuilder::new()

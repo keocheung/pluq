@@ -4,7 +4,7 @@
 
 * **Current Phase:** Phase 5 — Security Hardening & Release
 * **Current Active Task:** [HANDOVER]
-* **Baseline:** All ROADMAP Phase 5 items are complete (Symlink Target Verification and Solid RAR UX fix). Test suite is green and `cargo clippy` is perfectly clean.
+* **Baseline:** All ROADMAP Phase 5 items are complete. B2 (OAuth Ctrl-C hang) is resolved. Test suite is green and `cargo clippy` is perfectly clean.
 
 
 ---

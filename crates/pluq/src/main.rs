@@ -174,6 +174,12 @@ async fn main() {
         if let Some(archive::ArchiveError::Cancelled) = e.downcast_ref::<archive::ArchiveError>() {
             std::process::exit(130); // Standard Unix exit code for Ctrl-C
         }
+        // OAuth flow cancelled via Ctrl-C — "Cancelling..." already printed.
+        if let Some(archive_auth::AuthError::Cancelled) =
+            e.downcast_ref::<archive_auth::AuthError>()
+        {
+            std::process::exit(130);
+        }
         if let Some(archive::ArchiveError::Transport(inner)) =
             e.downcast_ref::<archive::ArchiveError>()
             && let Some(pe) = classify_transport(inner.as_ref())
