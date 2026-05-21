@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use archive_auth::TokenStore;
+use archive_auth::{AuthError, TokenStore};
 use clap::{Subcommand, ValueEnum};
 
 /// Subcommands for `pluq auth`.
@@ -44,19 +44,53 @@ impl AuthProvider {
     }
 }
 
-pub async fn run_auth(
-    action: AuthAction,
-    token_store: Option<Arc<TokenStore>>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let store = token_store.ok_or_else(|| {
-        "OAuth token store unavailable — no standard config directory on this platform.".to_string()
-    })?;
+pub async fn run_auth(action: AuthAction) -> Result<(), Box<dyn std::error::Error>> {
+    let store = match TokenStore::load_default() {
+        Ok(s) => Arc::new(s),
+        Err(e) => return Err(describe_store_load_error(&e).into()),
+    };
 
     match action {
         AuthAction::Add { provider, timeout } => run_add(provider, timeout, store).await,
         AuthAction::Remove { provider } => run_remove(provider, store),
         AuthAction::List => run_list(store),
     }
+}
+
+/// Build a user-facing message for a token-store load failure.
+///
+/// `TokenStore::load_default()` can only fail with `NoConfigDir` (path could
+/// not be resolved), `Io` (file unreadable), or `Json` (file unparseable).
+fn describe_store_load_error(err: &AuthError) -> String {
+    match err {
+        AuthError::NoConfigDir => {
+            "OAuth token store unavailable — no standard config directory on this platform."
+                .to_string()
+        }
+        AuthError::Json(e) => {
+            format!(
+                "OAuth token store at {} is corrupt: {e}\n  \
+                 Recover by deleting that file or restoring a backup.",
+                store_path_for_message(),
+            )
+        }
+        AuthError::Io(e) => {
+            format!(
+                "Cannot read OAuth token store at {}: {e}",
+                store_path_for_message(),
+            )
+        }
+        // Other variants cannot arise from load_default(); fall back to Display.
+        other => other.to_string(),
+    }
+}
+
+/// Resolved token-store path for error messages, or a generic phrase if the
+/// path itself cannot be resolved.
+fn store_path_for_message() -> String {
+    TokenStore::default_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "the token store".to_string())
 }
 
 async fn run_add(
@@ -208,5 +242,34 @@ mod tests {
         // Regression guard: these keys must match TokenStore::save callers in providers.
         assert_eq!(AuthProvider::Gdrive.store_key(), "gdrive");
         assert_eq!(AuthProvider::Dropbox.store_key(), "dropbox");
+    }
+
+    #[test]
+    fn corrupt_store_error_names_file_and_recovery() {
+        let json_err: AuthError =
+            serde_json::from_str::<std::collections::HashMap<String, String>>("not json")
+                .unwrap_err()
+                .into();
+        let msg = describe_store_load_error(&json_err);
+        assert!(msg.contains("corrupt"), "msg: {msg}");
+        assert!(msg.to_lowercase().contains("recover"), "msg: {msg}");
+        assert!(
+            !msg.contains("no standard config directory"),
+            "must not reuse the NoConfigDir message — msg: {msg}"
+        );
+    }
+
+    #[test]
+    fn no_config_dir_error_keeps_message() {
+        let msg = describe_store_load_error(&AuthError::NoConfigDir);
+        assert!(msg.contains("no standard config directory"), "msg: {msg}");
+    }
+
+    #[test]
+    fn io_store_error_names_file() {
+        let io_err: AuthError = std::io::Error::other("disk gone").into();
+        let msg = describe_store_load_error(&io_err);
+        assert!(msg.contains("Cannot read"), "msg: {msg}");
+        assert!(msg.contains("disk gone"), "msg: {msg}");
     }
 }

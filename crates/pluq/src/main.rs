@@ -265,7 +265,7 @@ async fn run_subcommand(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         Command::Auth { action } => {
-            return auth_cmd::run_auth(action, token_store).await;
+            return auth_cmd::run_auth(action).await;
         }
         Command::List { source, all } => {
             let archive = open_with_progress(&source, &cancel, token_store).await?;
