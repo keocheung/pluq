@@ -1,13 +1,4 @@
-# pluq — Project Context & State
-
-## [Dynamic State] - AGENTS MUST UPDATE THIS SECTION
-
-* **Current Phase:** Phase 5 — Security Hardening & Release
-* **Current Active Task:** [HANDOVER]
-* **Baseline:** All ROADMAP Phase 5 items are complete. B2 (OAuth Ctrl-C hang) and B3 (`pluq test` progress counter double-increment) are resolved. Test suite is green and `cargo clippy` is perfectly clean.
-
-
----
+# pluq — Project Context
 
 ## [Static Context] - DO NOT MODIFY WITHOUT PERMISSION
 
@@ -27,10 +18,9 @@
 
 ### Agent Developer Guidelines
 
-1.  **Start of Session:** Read this file first. Consult Tier 2 switchboards on-demand for deeper context. Pull a spoke only when its "Read when" hint matches the work.
-2.  **Session Planning:** Use a "Master-Step" pattern at the project root: `SESSION_PLAN.md` (overview/index) + `SESSION_PLAN_STEP_N.md` (detailed steps in separate files). This naming convention ensures they are automatically ignored by `.gitignore`.
-3.  **During Work:** Keep `Current Active Task` pointing to the active `SESSION_PLAN.md` step.
-3.  **End of Task:** Update `[Dynamic State]` (task pointer + baseline). On plan completion, reset to `[HANDOVER]`. **If completing a roadmap task: check it off `[x]`, move from `ROADMAP.md` to `docs/roadmap/COMPLETED.md`.**
+1.  **Start of Session:** Read this file first. If a `SESSION_PLAN.md` exists at the project root, that is the active work — read it; no plan file means no active task. Consult Tier 2 switchboards on-demand. Pull a spoke only when its "Read when" hint matches the work.
+2.  **Session Planning:** Use a "Master-Step" pattern at the project root: `SESSION_PLAN.md` (overview/index) + `SESSION_PLAN_STEP_N.md` (detailed steps in separate files). This naming convention ensures they are automatically ignored by `.gitignore`. These plan files are the project's only live-state tracker — no committed doc records "where we are".
+3.  **End of Task:** If completing a roadmap task, check it off `[x]` and move it from `ROADMAP.md` to `docs/roadmap/COMPLETED.md`. There is no status section to update.
 4.  **Commits:** **Conventional Commits** with crate scope (`feat(archive-core): ...`). Bodies use strict `-` bullet lists.
 5.  **Git Protocol:** **NEVER** auto-commit or stage. Always ask Stefan first.
 

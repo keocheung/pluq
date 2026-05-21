@@ -12,6 +12,7 @@ crates/*/Cargo.lock
 .gemini/
 .claude/
 .agents/
+.antigravitycli/
 *.swp
 *.swo
 *.log
