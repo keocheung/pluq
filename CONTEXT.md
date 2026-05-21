@@ -4,7 +4,7 @@
 
 * **Current Phase:** Phase 5 — Security Hardening & Release
 * **Current Active Task:** [HANDOVER]
-* **Baseline:** All ROADMAP Phase 5 items are complete. B2 (OAuth Ctrl-C hang) is resolved. Test suite is green and `cargo clippy` is perfectly clean.
+* **Baseline:** All ROADMAP Phase 5 items are complete. B2 (OAuth Ctrl-C hang) and B3 (`pluq test` progress counter double-increment) are resolved. Test suite is green and `cargo clippy` is perfectly clean.
 
 
 ---

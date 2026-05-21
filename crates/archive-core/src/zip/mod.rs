@@ -39,7 +39,6 @@ use crate::{ArchiveEntry, CoreError, ReadAt};
 struct DecompressParams<'a> {
     entry_name: &'a str,
     compressed_size: u64,
-    uncompressed_size: u64,
     method_id: u16,
     aes_info: Option<AesExtraInfo>,
     expected_crc: u32,
@@ -175,126 +174,141 @@ impl<R: ReadAt> ZipArchive<R> {
             return Ok(0);
         }
 
-        limits.check_extraction_limits(
-            &entry.name,
-            entry.compressed_size,
-            entry.uncompressed_size,
-            &progress,
-            false,
-            false,
-        )?;
-
-        info!(
-            name = %entry.name,
-            compressed = entry.compressed_size,
-            uncompressed = entry.uncompressed_size,
-            encrypted = entry.is_encrypted,
-            "ZIP extract start"
-        );
-
-        if entry.is_encrypted && password.is_none() {
-            debug!(name = %entry.name, "password required but not provided");
-            return Err(CoreError::PasswordRequired);
+        {
+            let mut p = progress.lock().unwrap();
+            p.on_entry_start(&entry.name, entry.uncompressed_size);
         }
 
-        let location = &self.locations[entry.index];
+        let progress_clone = progress.clone();
+        let result = async {
+            limits.check_extraction_limits(
+                &entry.name,
+                entry.compressed_size,
+                entry.uncompressed_size,
+                &progress_clone,
+                false,
+                false,
+            )?;
 
-        // Extract ZIP-specific fields before the async boundary so the
-        // spawn_blocking closure can own them without borrowing `self`.
-        let location_method_id = location.method_id;
-        let location_mod_time = location.mod_time;
-        let location_aes_info: Option<AesExtraInfo> = location.aes_info.clone();
+            info!(
+                name = %entry.name,
+                compressed = entry.compressed_size,
+                uncompressed = entry.uncompressed_size,
+                encrypted = entry.is_encrypted,
+                "ZIP extract start"
+            );
 
-        // ── Step 1 (async): resolve data offset via Local File Header ─────
-        // LFH is 30 bytes — small, use read_range.
-        let data_offset = parse::resolve_data_offset(&self.reader, location)
-            .await
-            .map_err(|e| match e {
-                // LFH signature mismatch — structural corruption
-                crate::io::ReadError::Transport(msg) => CoreError::InvalidFormat {
-                    message: msg.to_string(),
+            if entry.is_encrypted && password.is_none() {
+                debug!(name = %entry.name, "password required but not provided");
+                return Err(CoreError::PasswordRequired);
+            }
+
+            let location = &self.locations[entry.index];
+
+            // Extract ZIP-specific fields before the async boundary so the
+            // spawn_blocking closure can own them without borrowing `self`.
+            let location_method_id = location.method_id;
+            let location_mod_time = location.mod_time;
+            let location_aes_info: Option<AesExtraInfo> = location.aes_info.clone();
+
+            // ── Step 1 (async): resolve data offset via Local File Header ─────
+            // LFH is 30 bytes — small, use read_range.
+            let data_offset = parse::resolve_data_offset(&self.reader, location)
+                .await
+                .map_err(|e| match e {
+                    // LFH signature mismatch — structural corruption
+                    crate::io::ReadError::Transport(msg) => CoreError::InvalidFormat {
+                        message: msg.to_string(),
+                    },
+                    other => CoreError::Io(other),
+                })?;
+
+            let compressed_size = entry.compressed_size;
+
+            // ── Step 2 (async): get streaming AsyncRead for compressed data ────
+            // read_stream returns a live byte stream — no buffering of multi-GB data.
+            let compressed_stream = self
+                .reader
+                .read_stream(data_offset, compressed_size)
+                .await
+                .map_err(CoreError::Io)?;
+
+            // ── Step 3 (spawn_blocking): decompress + CRC verify ─────────────
+            // SyncIoBridge wraps the AsyncRead into a sync Read by driving the
+            // async polling from the current runtime handle.
+            let entry_name = entry.name.clone();
+            let expected_crc = location.crc32;
+            let is_encrypted = entry.is_encrypted;
+            let password_bytes: Option<Vec<u8>> = password.map(|p| p.to_vec());
+            let handle = tokio::runtime::Handle::current();
+            let sync_reader = SyncIoBridge::new_with_handle(compressed_stream, handle);
+            let limits_clone = limits.clone();
+
+            let temp_file: tempfile::NamedTempFile = tokio::task::spawn_blocking(
+                move || -> Result<tempfile::NamedTempFile, CoreError> {
+                    use std::io::Write;
+
+                    let temp_file =
+                        tempfile::NamedTempFile::new().map_err(|e| CoreError::BitstreamError {
+                            detail: format!("failed to create temp file: {e}"),
+                        })?;
+
+                    {
+                        let mut temp_writer = std::io::BufWriter::new(temp_file.as_file());
+                        let limits = &limits_clone;
+                        decompress_and_verify(
+                            sync_reader,
+                            &mut temp_writer,
+                            DecompressParams {
+                                entry_name: &entry_name,
+                                compressed_size,
+                                method_id: location_method_id,
+                                mod_time: location_mod_time,
+                                aes_info: location_aes_info,
+                                expected_crc,
+                                is_encrypted,
+                                password: password_bytes.as_deref(),
+                                progress: &progress_clone,
+                                limits,
+                            },
+                        )?;
+                        temp_writer.flush().map_err(|e| CoreError::BitstreamError {
+                            detail: format!("temp file flush failed: {e}"),
+                        })?;
+                    }
+
+                    Ok(temp_file)
                 },
-                other => CoreError::Io(other),
-            })?;
-
-        let compressed_size = entry.compressed_size;
-        let uncompressed_size = entry.uncompressed_size;
-
-        // ── Step 2 (async): get streaming AsyncRead for compressed data ────
-        // read_stream returns a live byte stream — no buffering of multi-GB data.
-        let compressed_stream = self
-            .reader
-            .read_stream(data_offset, compressed_size)
-            .await
-            .map_err(CoreError::Io)?;
-
-        // ── Step 3 (spawn_blocking): decompress + CRC verify ─────────────
-        // SyncIoBridge wraps the AsyncRead into a sync Read by driving the
-        // async polling from the current runtime handle.
-        let entry_name = entry.name.clone();
-        let expected_crc = location.crc32;
-        let is_encrypted = entry.is_encrypted;
-        let password_bytes: Option<Vec<u8>> = password.map(|p| p.to_vec());
-        let handle = tokio::runtime::Handle::current();
-        let sync_reader = SyncIoBridge::new_with_handle(compressed_stream, handle);
-        let limits_clone = limits.clone();
-
-        let temp_file: tempfile::NamedTempFile =
-            tokio::task::spawn_blocking(move || -> Result<tempfile::NamedTempFile, CoreError> {
-                use std::io::Write;
-
-                let temp_file =
-                    tempfile::NamedTempFile::new().map_err(|e| CoreError::BitstreamError {
-                        detail: format!("failed to create temp file: {e}"),
-                    })?;
-
-                {
-                    let mut temp_writer = std::io::BufWriter::new(temp_file.as_file());
-                    let limits = &limits_clone;
-                    decompress_and_verify(
-                        sync_reader,
-                        &mut temp_writer,
-                        DecompressParams {
-                            entry_name: &entry_name,
-                            compressed_size,
-                            uncompressed_size,
-                            method_id: location_method_id,
-                            mod_time: location_mod_time,
-                            aes_info: location_aes_info,
-                            expected_crc,
-                            is_encrypted,
-                            password: password_bytes.as_deref(),
-                            progress: &progress,
-                            limits,
-                        },
-                    )?;
-                    temp_writer.flush().map_err(|e| CoreError::BitstreamError {
-                        detail: format!("temp file flush failed: {e}"),
-                    })?;
-                }
-
-                Ok(temp_file)
-            })
+            )
             .await
             .map_err(|e| CoreError::BitstreamError {
                 detail: format!("decompression task panicked: {e}"),
             })??;
 
-        // ── Step 4 (async): stream verified temp file to sink ──────────────
-        let mut temp_reader = tokio::fs::File::open(temp_file.path()).await.map_err(|e| {
-            CoreError::BitstreamError {
-                detail: format!("failed to reopen temp file: {e}"),
-            }
-        })?;
+            // ── Step 4 (async): stream verified temp file to sink ──────────────
+            let mut temp_reader = tokio::fs::File::open(temp_file.path()).await.map_err(|e| {
+                CoreError::BitstreamError {
+                    detail: format!("failed to reopen temp file: {e}"),
+                }
+            })?;
 
-        let bytes_written = tokio::io::copy(&mut temp_reader, sink).await.map_err(|e| {
-            CoreError::BitstreamError {
-                detail: format!("copy to sink failed: {e}"),
-            }
-        })?;
+            let bytes_written = tokio::io::copy(&mut temp_reader, sink).await.map_err(|e| {
+                CoreError::BitstreamError {
+                    detail: format!("copy to sink failed: {e}"),
+                }
+            })?;
 
-        info!(name = %entry.name, bytes_written, "ZIP extract complete");
-        Ok(bytes_written)
+            info!(name = %entry.name, bytes_written, "ZIP extract complete");
+            Ok(bytes_written)
+        }
+        .await;
+
+        {
+            let mut p = progress.lock().unwrap();
+            p.on_entry_complete(&entry.name, result.is_ok());
+        }
+
+        result
     }
 
     /// Decompress and verify CRC without writing output anywhere.
@@ -409,57 +423,72 @@ impl<R: ReadAt> ZipArchive<R> {
                 let compressed_size = entry.compressed_size;
 
                 if let Some(mut sink) = sink_factory(entry) {
-                    // Read compressed data into memory, then decompress to a temp file.
-                    // This eliminates the O(uncompressed_size) RAM requirement.
-                    let mut compressed = vec![0u8; compressed_size as usize];
-                    sync_reader
-                        .read_exact(&mut compressed)
-                        .map_err(|e| stream_io_err(e, stream_pos))?;
-                    stream_pos += compressed_size;
+                    {
+                        let mut p = progress.lock().unwrap();
+                        p.on_entry_start(&entry.name, entry.uncompressed_size);
+                    }
 
-                    let temp_file =
-                        tempfile::NamedTempFile::new().map_err(|e| CoreError::BitstreamError {
-                            detail: format!("failed to create temp file: {e}"),
+                    let result: Result<u64, CoreError> = (|| {
+                        // Read compressed data into memory, then decompress to a temp file.
+                        // This eliminates the O(uncompressed_size) RAM requirement.
+                        let mut compressed = vec![0u8; compressed_size as usize];
+                        sync_reader
+                            .read_exact(&mut compressed)
+                            .map_err(|e| stream_io_err(e, stream_pos))?;
+                        stream_pos += compressed_size;
+
+                        let temp_file = tempfile::NamedTempFile::new().map_err(|e| {
+                            CoreError::BitstreamError {
+                                detail: format!("failed to create temp file: {e}"),
+                            }
                         })?;
 
-                    let bytes_written = {
-                        let mut temp_writer = std::io::BufWriter::new(temp_file.as_file());
-                        let written = decompress_and_verify(
-                            std::io::Cursor::new(compressed),
-                            &mut temp_writer,
-                            DecompressParams {
-                                entry_name: &entry.name,
-                                compressed_size,
-                                uncompressed_size: entry.uncompressed_size,
-                                method_id: location.method_id,
-                                mod_time: location.mod_time,
-                                aes_info: location.aes_info.clone(),
-                                expected_crc: location.crc32,
-                                is_encrypted: entry.is_encrypted,
-                                password: password_bytes.as_deref(),
-                                progress: &progress,
-                                limits,
-                            },
-                        )?;
-                        temp_writer.flush().map_err(|e| CoreError::BitstreamError {
-                            detail: format!("temp file flush failed: {e}"),
+                        let bytes_written = {
+                            let mut temp_writer = std::io::BufWriter::new(temp_file.as_file());
+                            let written = decompress_and_verify(
+                                std::io::Cursor::new(compressed),
+                                &mut temp_writer,
+                                DecompressParams {
+                                    entry_name: &entry.name,
+                                    compressed_size,
+                                    method_id: location.method_id,
+                                    mod_time: location.mod_time,
+                                    aes_info: location.aes_info.clone(),
+                                    expected_crc: location.crc32,
+                                    is_encrypted: entry.is_encrypted,
+                                    password: password_bytes.as_deref(),
+                                    progress: &progress,
+                                    limits,
+                                },
+                            )?;
+                            temp_writer.flush().map_err(|e| CoreError::BitstreamError {
+                                detail: format!("temp file flush failed: {e}"),
+                            })?;
+                            written
+                        };
+
+                        // Copy verified output from temp to sink.
+                        let mut temp_reader =
+                            std::fs::File::open(temp_file.path()).map_err(|e| {
+                                CoreError::BitstreamError {
+                                    detail: format!("failed to reopen temp file: {e}"),
+                                }
+                            })?;
+                        std::io::copy(&mut temp_reader, &mut sink).map_err(|e| {
+                            CoreError::BitstreamError {
+                                detail: format!("copy to sink failed for '{}': {e}", entry.name),
+                            }
                         })?;
-                        written
-                    };
 
-                    // Copy verified output from temp to sink.
-                    let mut temp_reader = std::fs::File::open(temp_file.path()).map_err(|e| {
-                        CoreError::BitstreamError {
-                            detail: format!("failed to reopen temp file: {e}"),
-                        }
-                    })?;
-                    std::io::copy(&mut temp_reader, &mut sink).map_err(|e| {
-                        CoreError::BitstreamError {
-                            detail: format!("copy to sink failed for '{}': {e}", entry.name),
-                        }
-                    })?;
+                        Ok(bytes_written)
+                    })();
 
-                    total_bytes += bytes_written;
+                    {
+                        let mut p = progress.lock().unwrap();
+                        p.on_entry_complete(&entry.name, result.is_ok());
+                    }
+
+                    total_bytes += result?;
                 } else {
                     // Skip compressed data.
                     skip_exact(&mut sync_reader, compressed_size)?;
@@ -761,6 +790,11 @@ fn decompress_cluster(
             .map_err(|e| stream_io_err(e, stream_pos))?;
         stream_pos += compressed_size;
 
+        {
+            let mut p = progress.lock().unwrap();
+            p.on_entry_start(&entry.name, entry.uncompressed_size);
+        }
+
         // Decompress + CRC-verify into a temp file (per-entry failure → Err item, loop continues).
         let result: Result<tempfile::NamedTempFile, CoreError> = (|| {
             let temp_file =
@@ -776,7 +810,6 @@ fn decompress_cluster(
                     DecompressParams {
                         entry_name: &entry.name,
                         compressed_size,
-                        uncompressed_size: entry.uncompressed_size,
                         method_id: location.method_id,
                         mod_time: location.mod_time,
                         aes_info: location.aes_info.clone(),
@@ -794,6 +827,11 @@ fn decompress_cluster(
 
             Ok(temp_file)
         })();
+
+        {
+            let mut p = progress.lock().unwrap();
+            p.on_entry_complete(&entry.name, result.is_ok());
+        }
 
         results.push(result);
     }
@@ -971,11 +1009,6 @@ fn decompress_and_verify<R: Read + Send, W: std::io::Write>(
     let mut total_written: u64 = 0;
     let mut chunk_buf = vec![0u8; CHUNK_SIZE];
 
-    {
-        let mut p = params.progress.lock().unwrap();
-        p.on_entry_start(params.entry_name, params.uncompressed_size);
-    }
-
     loop {
         let n = decoder.read(&mut chunk_buf).map_err(|io_err| {
             if let Some(inner) = io_err.into_inner()
@@ -1023,7 +1056,6 @@ fn decompress_and_verify<R: Read + Send, W: std::io::Write>(
             let mut p = params.progress.lock().unwrap();
             p.on_bytes_progress(total_written);
             if p.should_cancel() {
-                p.on_entry_complete(params.entry_name, false);
                 return Err(CoreError::Cancelled);
             }
         }
@@ -1044,8 +1076,6 @@ fn decompress_and_verify<R: Read + Send, W: std::io::Write>(
                 actual = format_args!("{actual_crc:#010x}"),
                 "CRC32 mismatch"
             );
-            let mut p = params.progress.lock().unwrap();
-            p.on_entry_complete(params.entry_name, false);
             return Err(CoreError::CrcMismatch {
                 entry: params.entry_name.to_owned(),
                 expected: params.expected_crc,
@@ -1053,12 +1083,6 @@ fn decompress_and_verify<R: Read + Send, W: std::io::Write>(
             });
         }
     }
-
-    {
-        let mut p = params.progress.lock().unwrap();
-        p.on_entry_complete(params.entry_name, true);
-    }
-
     Ok(total_written)
 }
 
@@ -2060,5 +2084,79 @@ mod tests {
         .unwrap();
 
         assert_eq!(buf, content);
+    }
+
+    /// Regression test: when the compression-ratio guard fires, `on_entry_complete`
+    /// must still be called exactly once with `success == false`.
+    ///
+    /// Before B3, the ratio-guard early exit (`check_extraction_limits(...)?`)
+    /// returned without ever calling `on_entry_complete`, causing the progress
+    /// counter to under-count by one for every subsequent entry.
+    #[tokio::test]
+    async fn ratio_guard_triggers_exactly_one_entry_complete() {
+        #[derive(Default)]
+        struct SpyState {
+            entry_complete_count: u32,
+            complete_success: Option<bool>,
+        }
+
+        struct SpyReporter {
+            state: Arc<Mutex<SpyState>>,
+        }
+
+        impl ProgressReporter for SpyReporter {
+            fn on_entry_complete(&mut self, _name: &str, success: bool) {
+                let mut s = self.state.lock().unwrap();
+                s.entry_complete_count += 1;
+                s.complete_success = Some(success);
+            }
+        }
+
+        // 2000 bytes of a single repeated byte compresses to ~12 bytes with Deflate.
+        // With max_ratio=5 the ratio check fires well before the loop finishes.
+        let content = vec![b'a'; 2000];
+        let (_tmp, reader) = create_test_zip(&[(
+            "highly_compressible.txt",
+            &content,
+            ZipCrateMethod::Deflated,
+        )]);
+
+        let limits = crate::ResourceLimits {
+            ratio_limit: Some(crate::limits::RatioLimit {
+                max_ratio: 5,
+                mode: crate::limits::LimitMode::HardError,
+            }),
+            ..Default::default()
+        };
+
+        let zip = ZipArchive::open(reader, &crate::ResourceLimits::default())
+            .await
+            .unwrap();
+
+        let state = Arc::new(Mutex::new(SpyState::default()));
+        let progress: Arc<Mutex<dyn ProgressReporter>> = Arc::new(Mutex::new(SpyReporter {
+            state: Arc::clone(&state),
+        }));
+
+        let mut sink = tokio::io::sink();
+        let result = zip
+            .extract(&zip.entries()[0], &mut sink, progress, None, &limits)
+            .await;
+
+        assert!(
+            matches!(result, Err(CoreError::ResourceLimitExceeded { .. })),
+            "expected ResourceLimitExceeded, got: {result:?}"
+        );
+
+        let s = state.lock().unwrap();
+        assert_eq!(
+            s.entry_complete_count, 1,
+            "on_entry_complete must fire exactly once even on ratio-guard error"
+        );
+        assert_eq!(
+            s.complete_success,
+            Some(false),
+            "on_entry_complete must report success=false on ratio-guard error"
+        );
     }
 }

@@ -46,102 +46,93 @@ pub(crate) async fn verify_and_stream_from_file<W: AsyncWrite + Send + Unpin>(
     progress: &Arc<Mutex<dyn ProgressReporter>>,
     limits: &crate::ResourceLimits,
 ) -> Result<u64, CoreError> {
-    use std::io::Seek;
-    file.seek(std::io::SeekFrom::Start(0))
-        .map_err(|e| CoreError::BitstreamError {
-            detail: format!("failed to seek temp file for verification: {e}"),
-        })?;
-
-    let mut file = tokio::fs::File::from_std(file);
-    let mut crc_hasher = crc32fast::Hasher::new();
-    let mut blake_state = blake2sp::State::new();
-    let mut buf = vec![0u8; 256 * 1024];
-    let mut total_bytes = 0u64;
-    let mut ratio_warned = false;
-
-    loop {
-        let n = file
-            .read(&mut buf)
-            .await
+    async {
+        use std::io::Seek;
+        file.seek(std::io::SeekFrom::Start(0))
             .map_err(|e| CoreError::BitstreamError {
-                detail: format!("failed to read from temp file: {e}"),
+                detail: format!("failed to seek temp file for verification: {e}"),
             })?;
 
-        if n == 0 {
-            break;
+        let mut file = tokio::fs::File::from_std(file);
+        let mut crc_hasher = crc32fast::Hasher::new();
+        let mut blake_state = blake2sp::State::new();
+        let mut buf = vec![0u8; 256 * 1024];
+        let mut total_bytes = 0u64;
+        let mut ratio_warned = false;
+
+        loop {
+            let n = file
+                .read(&mut buf)
+                .await
+                .map_err(|e| CoreError::BitstreamError {
+                    detail: format!("failed to read from temp file: {e}"),
+                })?;
+
+            if n == 0 {
+                break;
+            }
+
+            let chunk = &buf[..n];
+            if verify.expected_crc.is_some() {
+                crc_hasher.update(chunk);
+            }
+            if verify.expected_blake2.is_some() {
+                blake_state.update(chunk);
+            }
+
+            sink.write_all(chunk)
+                .await
+                .map_err(|e| CoreError::BitstreamError {
+                    detail: format!("failed to write to sink: {e}"),
+                })?;
+
+            total_bytes += n as u64;
+
+            if !ratio_warned {
+                ratio_warned = limits.check_extraction_limits(
+                    verify.name,
+                    verify.compressed_size,
+                    total_bytes,
+                    progress,
+                    true,
+                    false,
+                )?;
+            } else {
+                limits.check_extraction_limits(
+                    verify.name,
+                    verify.compressed_size,
+                    total_bytes,
+                    progress,
+                    true,
+                    true,
+                )?;
+            }
         }
 
-        let chunk = &buf[..n];
-        if verify.expected_crc.is_some() {
-            crc_hasher.update(chunk);
-        }
-        if verify.expected_blake2.is_some() {
-            blake_state.update(chunk);
+        // Finalize hashes and compare.
+        if let Some(expected) = verify.expected_crc {
+            let actual = crc_hasher.finalize();
+            if actual != expected {
+                return Err(CoreError::CrcMismatch {
+                    entry: verify.name.to_owned(),
+                    expected,
+                    actual,
+                });
+            }
         }
 
-        sink.write_all(chunk)
-            .await
-            .map_err(|e| CoreError::BitstreamError {
-                detail: format!("failed to write to sink: {e}"),
-            })?;
-
-        total_bytes += n as u64;
-
-        if !ratio_warned {
-            ratio_warned = limits.check_extraction_limits(
-                verify.name,
-                verify.compressed_size,
-                total_bytes,
-                progress,
-                true,
-                false,
-            )?;
-        } else {
-            limits.check_extraction_limits(
-                verify.name,
-                verify.compressed_size,
-                total_bytes,
-                progress,
-                true,
-                true,
-            )?;
+        if let Some(expected) = verify.expected_blake2 {
+            let actual = blake_state.finalize();
+            if actual.as_bytes() != expected {
+                return Err(CoreError::BitstreamError {
+                    detail: format!("BLAKE2sp hash mismatch for '{}'", verify.name),
+                });
+            }
         }
+
+        Ok(total_bytes)
     }
-
-    // Finalize hashes and compare.
-    if let Some(expected) = verify.expected_crc {
-        let actual = crc_hasher.finalize();
-        if actual != expected {
-            progress
-                .lock()
-                .unwrap()
-                .on_entry_complete(verify.name, false);
-            return Err(CoreError::CrcMismatch {
-                entry: verify.name.to_owned(),
-                expected,
-                actual,
-            });
-        }
-    }
-
-    if let Some(expected) = verify.expected_blake2 {
-        let actual = blake_state.finalize();
-        if actual.as_bytes() != expected {
-            progress
-                .lock()
-                .unwrap()
-                .on_entry_complete(verify.name, false);
-            return Err(CoreError::BitstreamError {
-                detail: format!("BLAKE2sp hash mismatch for '{}'", verify.name),
-            });
-        }
-    }
-
-    progress
-        .lock()
-        .unwrap()
-        .on_entry_complete(verify.name, true);
-    Ok(total_bytes)
+    .await
 }
 
 /// Blocking version of [`verify_and_stream_from_file`] for use inside `spawn_blocking`.
@@ -152,97 +143,87 @@ pub(crate) fn verify_and_stream_from_file_sync<W: Write>(
     progress: &Arc<Mutex<dyn ProgressReporter>>,
     limits: &crate::ResourceLimits,
 ) -> Result<u64, CoreError> {
-    use std::io::Seek;
-    file.seek(std::io::SeekFrom::Start(0))
-        .map_err(|e| CoreError::BitstreamError {
-            detail: format!("failed to seek temp file for sync verification: {e}"),
-        })?;
-
-    let mut crc_hasher = crc32fast::Hasher::new();
-    let mut blake_state = blake2sp::State::new();
-    let mut buf = vec![0u8; 256 * 1024];
-    let mut total_bytes = 0u64;
-    let mut ratio_warned = false;
-
-    loop {
-        let n = file.read(&mut buf).map_err(|e| CoreError::BitstreamError {
-            detail: format!("failed to read from temp file (sync): {e}"),
-        })?;
-
-        if n == 0 {
-            break;
-        }
-
-        let chunk = &buf[..n];
-        if verify.expected_crc.is_some() {
-            crc_hasher.update(chunk);
-        }
-        if verify.expected_blake2.is_some() {
-            blake_state.update(chunk);
-        }
-
-        sink.write_all(chunk)
+    (|| {
+        use std::io::Seek;
+        file.seek(std::io::SeekFrom::Start(0))
             .map_err(|e| CoreError::BitstreamError {
-                detail: format!("failed to write to sink (sync): {e}"),
+                detail: format!("failed to seek temp file for sync verification: {e}"),
             })?;
 
-        total_bytes += n as u64;
+        let mut crc_hasher = crc32fast::Hasher::new();
+        let mut blake_state = blake2sp::State::new();
+        let mut buf = vec![0u8; 256 * 1024];
+        let mut total_bytes = 0u64;
+        let mut ratio_warned = false;
 
-        if !ratio_warned {
-            ratio_warned = limits.check_extraction_limits(
-                verify.name,
-                verify.compressed_size,
-                total_bytes,
-                progress,
-                true,
-                false,
-            )?;
-        } else {
-            limits.check_extraction_limits(
-                verify.name,
-                verify.compressed_size,
-                total_bytes,
-                progress,
-                true,
-                true,
-            )?;
+        loop {
+            let n = file.read(&mut buf).map_err(|e| CoreError::BitstreamError {
+                detail: format!("failed to read from temp file (sync): {e}"),
+            })?;
+
+            if n == 0 {
+                break;
+            }
+
+            let chunk = &buf[..n];
+            if verify.expected_crc.is_some() {
+                crc_hasher.update(chunk);
+            }
+            if verify.expected_blake2.is_some() {
+                blake_state.update(chunk);
+            }
+
+            sink.write_all(chunk)
+                .map_err(|e| CoreError::BitstreamError {
+                    detail: format!("failed to write to sink (sync): {e}"),
+                })?;
+
+            total_bytes += n as u64;
+
+            if !ratio_warned {
+                ratio_warned = limits.check_extraction_limits(
+                    verify.name,
+                    verify.compressed_size,
+                    total_bytes,
+                    progress,
+                    true,
+                    false,
+                )?;
+            } else {
+                limits.check_extraction_limits(
+                    verify.name,
+                    verify.compressed_size,
+                    total_bytes,
+                    progress,
+                    true,
+                    true,
+                )?;
+            }
         }
-    }
 
-    // Finalize hashes and compare.
-    if let Some(expected) = verify.expected_crc {
-        let actual = crc_hasher.finalize();
-        if actual != expected {
-            progress
-                .lock()
-                .unwrap()
-                .on_entry_complete(verify.name, false);
-            return Err(CoreError::CrcMismatch {
-                entry: verify.name.to_owned(),
-                expected,
-                actual,
-            });
+        // Finalize hashes and compare.
+        if let Some(expected) = verify.expected_crc {
+            let actual = crc_hasher.finalize();
+            if actual != expected {
+                return Err(CoreError::CrcMismatch {
+                    entry: verify.name.to_owned(),
+                    expected,
+                    actual,
+                });
+            }
         }
-    }
 
-    if let Some(expected) = verify.expected_blake2 {
-        let actual = blake_state.finalize();
-        if actual.as_bytes() != expected {
-            progress
-                .lock()
-                .unwrap()
-                .on_entry_complete(verify.name, false);
-            return Err(CoreError::BitstreamError {
-                detail: format!("BLAKE2sp hash mismatch for '{}'", verify.name),
-            });
+        if let Some(expected) = verify.expected_blake2 {
+            let actual = blake_state.finalize();
+            if actual.as_bytes() != expected {
+                return Err(CoreError::BitstreamError {
+                    detail: format!("BLAKE2sp hash mismatch for '{}'", verify.name),
+                });
+            }
         }
-    }
 
-    progress
-        .lock()
-        .unwrap()
-        .on_entry_complete(verify.name, true);
-    Ok(total_bytes)
+        Ok(total_bytes)
+    })()
 }
 
 use serde::{Deserialize, Serialize};
@@ -1123,32 +1104,47 @@ impl<R: ReadAt> RarArchive<R> {
             // 7. Verification and streaming.
             for (result, region) in results.into_iter().zip(cluster.iter()) {
                 let (entry, loc) = region.payload;
-                match result {
-                    Ok(out_tmp) => {
-                        if let Some(mut sink) = sink_factory(entry) {
-                            let verify_res = verify_and_stream_from_file(
-                                out_tmp.into_file(),
-                                VerifyData {
-                                    name: &entry.name,
-                                    expected_crc: loc.crc32,
-                                    expected_blake2: loc.blake2_hash,
-                                    compressed_size: loc.data_size,
-                                },
-                                &mut sink,
-                                &progress,
-                                limits,
-                            )
-                            .await;
+                {
+                    let mut p = progress.lock().unwrap();
+                    p.on_entry_start(&entry.name, entry.uncompressed_size);
+                }
 
-                            match verify_res {
-                                Ok(written) => {
-                                    batch.bytes_written += written;
-                                    batch.succeeded += 1;
-                                }
-                                Err(e) => {
-                                    batch.failed.push((entry.name.clone(), e.to_string()));
-                                }
+                let entry_res = async {
+                    match result {
+                        Ok(out_tmp) => {
+                            if let Some(mut sink) = sink_factory(entry) {
+                                verify_and_stream_from_file(
+                                    out_tmp.into_file(),
+                                    VerifyData {
+                                        name: &entry.name,
+                                        expected_crc: loc.crc32,
+                                        expected_blake2: loc.blake2_hash,
+                                        compressed_size: loc.data_size,
+                                    },
+                                    &mut sink,
+                                    &progress,
+                                    limits,
+                                )
+                                .await
+                            } else {
+                                Ok(0) // Skipped by factory
                             }
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+                .await;
+
+                {
+                    let mut p = progress.lock().unwrap();
+                    p.on_entry_complete(&entry.name, entry_res.is_ok());
+                }
+
+                match entry_res {
+                    Ok(written) => {
+                        if written > 0 {
+                            batch.bytes_written += written;
+                            batch.succeeded += 1;
                         }
                     }
                     Err(e) => {
@@ -1195,61 +1191,77 @@ impl<R: ReadAt> RarArchive<R> {
             return Ok(0);
         }
 
-        limits.check_extraction_limits(
-            &entry.name,
-            entry.compressed_size,
-            entry.uncompressed_size,
-            &progress,
-            false,
-            false,
-        )?;
-
-        let loc = &self.locations[entry.index];
-
-        info!(
-            name = %entry.name,
-            method = loc.method,
-            compressed = loc.data_size,
-            uncompressed = entry.uncompressed_size,
-            encrypted = loc.is_encrypted,
-            solid = loc.is_solid,
-            "RAR extract start"
-        );
-
-        if loc.is_encrypted && password.is_none() {
-            debug!(name = %entry.name, "password required but not provided");
-            return Err(CoreError::PasswordRequired);
+        {
+            let mut p = progress.lock().unwrap();
+            p.on_entry_start(&entry.name, entry.uncompressed_size);
         }
 
-        if loc.is_solid {
-            return Err(CoreError::UnsupportedFeature {
-                detail: "solid RAR archives are not yet supported".into(),
-            });
-        }
+        let progress_clone = progress.clone();
+        let result = async {
+            limits.check_extraction_limits(
+                &entry.name,
+                entry.compressed_size,
+                entry.uncompressed_size,
+                &progress_clone,
+                false,
+                false,
+            )?;
 
-        // Encrypted entries must go through unrar (it handles AES decryption).
-        if loc.is_encrypted {
-            debug!(name = %entry.name, "encrypted entry — routing to unrar");
-            return self
-                .extract_compressed(entry, loc, sink, progress, password, limits)
-                .await;
-        }
+            let loc = &self.locations[entry.index];
 
-        match loc.method {
-            0 => {
-                debug!(name = %entry.name, "store extraction (method 0)");
-                self.extract_store(entry, loc, sink, progress, limits).await
-            }
-            1..=5 => {
-                debug!(name = %entry.name, method = loc.method, "compressed extraction via unrar");
-                self.extract_compressed(entry, loc, sink, progress, password, limits)
-                    .await
+            info!(
+                name = %entry.name,
+                method = loc.method,
+                compressed = loc.data_size,
+                uncompressed = entry.uncompressed_size,
+                encrypted = loc.is_encrypted,
+                solid = loc.is_solid,
+                "RAR extract start"
+            );
+
+            if loc.is_encrypted && password.is_none() {
+                debug!(name = %entry.name, "password required but not provided");
+                return Err(CoreError::PasswordRequired);
             }
 
-            m => Err(CoreError::UnsupportedCompression {
-                algorithm: format!("RAR method {m}"),
-            }),
+            if loc.is_solid {
+                return Err(CoreError::UnsupportedFeature {
+                    detail: "solid RAR archives are not yet supported".into(),
+                });
+            }
+
+            // Encrypted entries must go through unrar (it handles AES decryption).
+            if loc.is_encrypted {
+                debug!(name = %entry.name, "encrypted entry — routing to unrar");
+                return self
+                    .extract_compressed(entry, loc, sink, progress_clone, password, limits)
+                    .await;
+            }
+
+            match loc.method {
+                0 => {
+                    debug!(name = %entry.name, "store extraction (method 0)");
+                    self.extract_store(entry, loc, sink, progress_clone, limits).await
+                }
+                1..=5 => {
+                    debug!(name = %entry.name, method = loc.method, "compressed extraction via unrar");
+                    self.extract_compressed(entry, loc, sink, progress_clone, password, limits)
+                        .await
+                }
+
+                m => Err(CoreError::UnsupportedCompression {
+                    algorithm: format!("RAR method {m}"),
+                }),
+            }
         }
+        .await;
+
+        {
+            let mut p = progress.lock().unwrap();
+            p.on_entry_complete(&entry.name, result.is_ok());
+        }
+
+        result
     }
 
     /// Decompress and verify CRC without retaining output.
@@ -1282,7 +1294,6 @@ impl<R: ReadAt> RarArchive<R> {
     ) -> Result<u64, CoreError> {
         // Capture owned values before the async/blocking boundary.
         let entry_name = entry.name.clone();
-        let uncompressed_size = entry.uncompressed_size;
         let expected_crc = loc.crc32;
         let expected_blake2 = loc.blake2_hash;
         let compressed_size = loc.data_size;
@@ -1319,108 +1330,95 @@ impl<R: ReadAt> RarArchive<R> {
                     tempfile::NamedTempFile::new().map_err(|e| CoreError::BitstreamError {
                         detail: format!("failed to create temp file: {e}"),
                     })?;
-                let mut temp_writer = std::io::BufWriter::new(temp_file.as_file());
 
-                {
-                    let mut p = progress.lock().unwrap();
-                    p.on_entry_start(&entry_name, uncompressed_size);
-                }
+                (|| -> Result<tempfile::NamedTempFile, CoreError> {
+                    let mut temp_writer = std::io::BufWriter::new(temp_file.as_file());
+                    loop {
+                        let n = sync_reader.read(&mut chunk_buf).map_err(|io_err| {
+                            if let Some(inner) = io_err.into_inner()
+                                && let Ok(read_error) = inner.downcast::<crate::io::ReadError>()
+                            {
+                                return CoreError::Io(*read_error);
+                            }
+                            CoreError::BitstreamError {
+                                detail: format!("read failed for '{entry_name}'"),
+                            }
+                        })?;
+                        if n == 0 {
+                            break;
+                        }
 
-                loop {
-                    let n = sync_reader.read(&mut chunk_buf).map_err(|io_err| {
-                        if let Some(inner) = io_err.into_inner()
-                            && let Ok(read_error) = inner.downcast::<crate::io::ReadError>()
+                        crc_hasher.update(&chunk_buf[..n]);
+                        if let Some(ref mut state) = blake2_state {
+                            state.update(&chunk_buf[..n]);
+                        }
+
+                        temp_writer.write_all(&chunk_buf[..n]).map_err(|e| {
+                            CoreError::BitstreamError {
+                                detail: format!("temp file write failed for '{entry_name}': {e}"),
+                            }
+                        })?;
+
+                        total_written += n as u64;
+
+                        if !ratio_warned {
+                            ratio_warned = limits_clone.check_extraction_limits(
+                                &entry_name,
+                                compressed_size,
+                                total_written,
+                                &progress,
+                                true,
+                                false,
+                            )?;
+                        } else {
+                            limits_clone.check_extraction_limits(
+                                &entry_name,
+                                compressed_size,
+                                total_written,
+                                &progress,
+                                true,
+                                true,
+                            )?;
+                        }
+
                         {
-                            return CoreError::Io(*read_error);
+                            let mut p = progress.lock().unwrap();
+                            p.on_bytes_progress(total_written);
+                            if p.should_cancel() {
+                                return Err(CoreError::Cancelled);
+                            }
                         }
-                        CoreError::BitstreamError {
-                            detail: format!("read failed for '{entry_name}'"),
-                        }
+                    }
+
+                    temp_writer.flush().map_err(|e| CoreError::BitstreamError {
+                        detail: format!("temp file flush failed for '{entry_name}': {e}"),
                     })?;
-                    if n == 0 {
-                        break;
-                    }
+                    drop(temp_writer);
 
-                    crc_hasher.update(&chunk_buf[..n]);
-                    if let Some(ref mut state) = blake2_state {
-                        state.update(&chunk_buf[..n]);
-                    }
-
-                    temp_writer.write_all(&chunk_buf[..n]).map_err(|e| {
-                        CoreError::BitstreamError {
-                            detail: format!("temp file write failed for '{entry_name}': {e}"),
-                        }
-                    })?;
-
-                    total_written += n as u64;
-
-                    if !ratio_warned {
-                        ratio_warned = limits_clone.check_extraction_limits(
-                            &entry_name,
-                            compressed_size,
-                            total_written,
-                            &progress,
-                            true,
-                            false,
-                        )?;
-                    } else {
-                        limits_clone.check_extraction_limits(
-                            &entry_name,
-                            compressed_size,
-                            total_written,
-                            &progress,
-                            true,
-                            true,
-                        )?;
-                    }
-
-                    {
-                        let mut p = progress.lock().unwrap();
-                        p.on_bytes_progress(total_written);
-                        if p.should_cancel() {
-                            p.on_entry_complete(&entry_name, false);
-                            return Err(CoreError::Cancelled);
+                    // CRC32 verification.
+                    if let Some(expected) = expected_crc {
+                        let actual = crc_hasher.finalize();
+                        if actual != expected {
+                            return Err(CoreError::CrcMismatch {
+                                entry: entry_name.clone(),
+                                expected,
+                                actual,
+                            });
                         }
                     }
-                }
 
-                temp_writer.flush().map_err(|e| CoreError::BitstreamError {
-                    detail: format!("temp file flush failed for '{entry_name}': {e}"),
-                })?;
-                drop(temp_writer);
-
-                // CRC32 verification.
-                if let Some(expected) = expected_crc {
-                    let actual = crc_hasher.finalize();
-                    if actual != expected {
-                        let mut p = progress.lock().unwrap();
-                        p.on_entry_complete(&entry_name, false);
-                        return Err(CoreError::CrcMismatch {
-                            entry: entry_name,
-                            expected,
-                            actual,
-                        });
+                    // BLAKE2sp verification (present only when the extra area record 0x02 exists).
+                    if let (Some(state), Some(expected_hash)) = (blake2_state, expected_blake2) {
+                        let actual_hash = state.finalize();
+                        if actual_hash.as_array() != &expected_hash {
+                            return Err(CoreError::BitstreamError {
+                                detail: format!("BLAKE2sp hash mismatch for '{entry_name}'"),
+                            });
+                        }
                     }
-                }
 
-                // BLAKE2sp verification (present only when the extra area record 0x02 exists).
-                if let (Some(state), Some(expected_hash)) = (blake2_state, expected_blake2) {
-                    let actual_hash = state.finalize();
-                    if actual_hash.as_array() != &expected_hash {
-                        let mut p = progress.lock().unwrap();
-                        p.on_entry_complete(&entry_name, false);
-                        return Err(CoreError::BitstreamError {
-                            detail: format!("BLAKE2sp hash mismatch for '{entry_name}'"),
-                        });
-                    }
-                }
-
-                {
-                    let mut p = progress.lock().unwrap();
-                    p.on_entry_complete(&entry_name, true);
-                }
-
-                Ok(temp_file)
+                    Ok(temp_file)
+                })()
             })
             .await
             .map_err(|e| CoreError::BitstreamError {
@@ -1486,18 +1484,12 @@ impl<R: ReadAt> RarArchive<R> {
         let path = archive_path.to_path_buf();
         let target_name = entry.name.clone();
         let entry_name = entry.name.clone();
-        let uncompressed_size = entry.uncompressed_size;
         let expected_crc = loc.crc32;
         let expected_blake2 = loc.blake2_hash;
         let password_bytes = password.map(|p| p.to_vec());
 
-        {
-            let mut p = progress.lock().unwrap();
-            p.on_entry_start(&entry_name, uncompressed_size);
-        }
-
         let (cancel, on_progress) = build_unrar_progress_hooks(&progress);
-        let out_tmp =
+        let out_tmp_res =
             tokio::task::spawn_blocking(move || -> Result<tempfile::NamedTempFile, CoreError> {
                 let out_tmp =
                     tempfile::NamedTempFile::new().map_err(|e| CoreError::BitstreamError {
@@ -1535,10 +1527,19 @@ impl<R: ReadAt> RarArchive<R> {
                     archive = header.skip().map_err(map_unrar_error)?;
                 }
             })
-            .await
-            .map_err(|e| CoreError::BitstreamError {
-                detail: format!("extraction task panicked: {e}"),
-            })??;
+            .await;
+
+        let out_tmp = match out_tmp_res {
+            Ok(Ok(file)) => file,
+            Ok(Err(e)) => {
+                return Err(e);
+            }
+            Err(e) => {
+                return Err(CoreError::BitstreamError {
+                    detail: format!("extraction task panicked: {e}"),
+                });
+            }
+        };
 
         verify_and_stream_from_file(
             out_tmp.into_file(),
@@ -1570,29 +1571,35 @@ impl<R: ReadAt> RarArchive<R> {
         limits: &crate::ResourceLimits,
     ) -> Result<u64, CoreError> {
         let entry_name = entry.name.clone();
-        let uncompressed_size = entry.uncompressed_size;
         let expected_crc = loc.crc32;
         let expected_blake2 = loc.blake2_hash;
         let password_bytes = password.map(|p| p.to_vec());
 
-        {
-            let mut p = progress.lock().unwrap();
-            p.on_entry_start(&entry_name, uncompressed_size);
-        }
-
         // 1. Download the file header bytes (they contain the entry metadata unrar needs).
-        let file_header_bytes = self
+        let file_header_bytes = match self
             .reader
             .read_range(loc.header_offset, loc.header_size)
             .await
-            .map_err(CoreError::Io)?;
+            .map_err(CoreError::Io)
+        {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                return Err(e);
+            }
+        };
 
         // 2. Open a streaming reader for the compressed data (no RAM buffering).
-        let compressed_stream = self
+        let compressed_stream = match self
             .reader
             .read_stream(loc.data_offset, loc.data_size)
             .await
-            .map_err(CoreError::Io)?;
+            .map_err(CoreError::Io)
+        {
+            Ok(stream) => stream,
+            Err(e) => {
+                return Err(e);
+            }
+        };
 
         let archive_preamble = self.archive_preamble.clone();
         let end_block = self.end_block.clone();
@@ -1602,7 +1609,7 @@ impl<R: ReadAt> RarArchive<R> {
         let mut sync_reader = SyncIoBridge::new_with_handle(compressed_stream, handle);
         let prog_clone = progress.clone();
 
-        let out_tmp = tokio::task::spawn_blocking(move || {
+        let out_tmp_res = tokio::task::spawn_blocking(move || {
             assemble_and_unrar_synthetic(
                 archive_preamble.as_ref(),
                 file_header_bytes.as_ref(),
@@ -1613,10 +1620,19 @@ impl<R: ReadAt> RarArchive<R> {
                 &prog_clone,
             )
         })
-        .await
-        .map_err(|e| CoreError::BitstreamError {
-            detail: format!("extraction task panicked: {e}"),
-        })??;
+        .await;
+
+        let out_tmp = match out_tmp_res {
+            Ok(Ok(file)) => file,
+            Ok(Err(e)) => {
+                return Err(e);
+            }
+            Err(e) => {
+                return Err(CoreError::BitstreamError {
+                    detail: format!("extraction task panicked: {e}"),
+                });
+            }
+        };
 
         verify_and_stream_from_file(
             out_tmp.into_file(),
@@ -2246,42 +2262,55 @@ where
                 let (entry, loc) = &work[idx];
 
                 if let Some(mut sink) = sink_factory(entry) {
-                    progress
-                        .lock()
-                        .unwrap()
-                        .on_entry_start(&name, entry.uncompressed_size);
+                    {
+                        progress
+                            .lock()
+                            .unwrap()
+                            .on_entry_start(&name, entry.uncompressed_size);
+                    }
 
-                    let (cancel, on_progress) = build_unrar_progress_hooks(&progress);
+                    let result = (|| {
+                        let (cancel, on_progress) = build_unrar_progress_hooks(&progress);
 
-                    // Create extraction temp file.
-                    let out_tmp =
-                        tempfile::NamedTempFile::new().map_err(|e| CoreError::BitstreamError {
-                            detail: format!(
-                                "failed to create extraction temp file for '{name}': {e}"
-                            ),
+                        // Create extraction temp file.
+                        let out_tmp = tempfile::NamedTempFile::new().map_err(|e| {
+                            CoreError::BitstreamError {
+                                detail: format!(
+                                    "failed to create extraction temp file for '{name}': {e}"
+                                ),
+                            }
                         })?;
-                    let out_path = out_tmp.path().to_path_buf();
+                        let out_path = out_tmp.path().to_path_buf();
 
-                    let next_archive = header
-                        .extract_to_with_progress(&out_path, Some(cancel), Some(on_progress))
-                        .map_err(map_unrar_error)?;
+                        let next_archive = header
+                            .extract_to_with_progress(&out_path, Some(cancel), Some(on_progress))
+                            .map_err(map_unrar_error)?;
+
+                        let bytes = verify_and_stream_from_file_sync(
+                            out_tmp.into_file(),
+                            VerifyData {
+                                name: &name,
+                                expected_crc: loc.crc32,
+                                expected_blake2: loc.blake2_hash,
+                                compressed_size: loc.data_size,
+                            },
+                            &mut sink,
+                            &progress,
+                            &limits_clone,
+                        )?;
+
+                        Ok::<_, CoreError>((next_archive, bytes))
+                    })();
+
+                    {
+                        progress
+                            .lock()
+                            .unwrap()
+                            .on_entry_complete(&name, result.is_ok());
+                    }
+
+                    let (next_archive, bytes) = result?;
                     archive = next_archive;
-
-                    // Verify and stream from temp file to sink using sync verifier.
-                    // Passes the opened file handle to avoid Permission Denied on reopen.
-                    let bytes = verify_and_stream_from_file_sync(
-                        out_tmp.into_file(),
-                        VerifyData {
-                            name: &name,
-                            expected_crc: loc.crc32,
-                            expected_blake2: loc.blake2_hash,
-                            compressed_size: loc.data_size,
-                        },
-                        &mut sink,
-                        &progress,
-                        &limits_clone,
-                    )?;
-
                     total_bytes += bytes;
                 } else {
                     // Sink factory returned None — skip this entry.
@@ -2396,7 +2425,7 @@ where
     let data_size = msg.data_size;
     let snippet_path_clone = snippet_path.clone();
 
-    let bytes = tokio::task::spawn_blocking(move || -> Result<u64, CoreError> {
+    let result = tokio::task::spawn_blocking(move || -> Result<u64, CoreError> {
         let out_tmp = tempfile::NamedTempFile::new().map_err(|e| CoreError::BitstreamError {
             detail: format!("failed to create extraction temp file: {e}"),
         })?;
@@ -2419,8 +2448,6 @@ where
             .extract_to_with_progress(&out_path, Some(cancel), Some(on_progress))
             .map_err(map_unrar_error)?;
 
-        // Verify and stream from temp file to sink using sync verifier.
-        // Passes the opened file handle to avoid Permission Denied on reopen.
         verify_and_stream_from_file_sync(
             out_tmp.into_file(),
             VerifyData {
@@ -2434,10 +2461,34 @@ where
             &limits_clone,
         )
     })
-    .await
-    .map_err(|e| CoreError::BitstreamError {
-        detail: format!("extraction/verification task panicked: {e}"),
-    })??;
+    .await;
+
+    let bytes = match result {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(e)) => {
+            progress
+                .lock()
+                .unwrap()
+                .on_entry_complete(&msg.entry.name, false);
+            return Err(e);
+        }
+        Err(e) => {
+            progress
+                .lock()
+                .unwrap()
+                .on_entry_complete(&msg.entry.name, false);
+            return Err(CoreError::BitstreamError {
+                detail: format!("extraction/verification task panicked: {e}"),
+            });
+        }
+    };
+
+    {
+        progress
+            .lock()
+            .unwrap()
+            .on_entry_complete(&msg.entry.name, true);
+    }
 
     Ok(Some(bytes))
 }
@@ -2664,10 +2715,10 @@ mod tests {
             .await
             .unwrap();
 
-        let progress = Arc::new(Mutex::new(()));
+        let progress: Arc<Mutex<dyn ProgressReporter>> = Arc::new(Mutex::new(()));
         let result = rar
             .extract_all_streaming(
-                |_| true,
+                |_entry: &ArchiveEntry| true,
                 |_entry| -> Option<Box<dyn std::io::Write + Send>> {
                     Some(Box::new(std::io::sink()))
                 },

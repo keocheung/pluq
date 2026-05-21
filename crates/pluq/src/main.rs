@@ -392,23 +392,9 @@ async fn run_subcommand(
                     continue;
                 }
 
-                {
-                    let mut p = progress.lock().unwrap();
-                    p.on_entry_start(&entry.name, entry.uncompressed_size);
-                }
-
-                match archive.test(entry, progress.clone()).await {
-                    Ok(()) => {
-                        let mut p = progress.lock().unwrap();
-                        p.on_entry_complete(&entry.name, true);
-                    }
-                    Err(e) => {
-                        let mut p = progress.lock().unwrap();
-                        p.on_entry_complete(&entry.name, false);
-                        drop(p);
-                        eprintln!("  FAIL {} — {e}", entry.name);
-                        failures += 1;
-                    }
+                if let Err(e) = archive.test(entry, progress.clone()).await {
+                    eprintln!("  FAIL {} — {e}", entry.name);
+                    failures += 1;
                 }
             }
 
