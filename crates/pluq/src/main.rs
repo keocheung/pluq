@@ -33,6 +33,10 @@ struct Cli {
     #[arg(long, global = true)]
     clean_cache: bool,
 
+    /// Delete the debug log directory before starting the operation.
+    #[arg(long, global = true)]
+    clean_logs: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -107,6 +111,24 @@ async fn main() {
     );
 
     let cli = Cli::parse();
+
+    // ── Log cleaning ─────────────────────────────────────────────────────
+    // Runs before init_logging: the daily appender opens a handle inside the
+    // logs dir, so removing the dir afterwards would orphan this run's log.
+    // init_logging recreates the dir. No tracing macros here — no subscriber
+    // is installed yet, so info!/warn! would be silent no-ops.
+    if cli.clean_logs {
+        match log_path() {
+            Some(dir) if dir.exists() => match std::fs::remove_dir_all(&dir) {
+                Ok(_) => eprintln!("  Logs cleared: {}", dir.display()),
+                Err(e) => eprintln!("  Warning: Failed to clear logs: {e}"),
+            },
+            Some(_) => {
+                eprintln!("  Logs directory does not exist, nothing to clear.");
+            }
+            None => {}
+        }
+    }
 
     // ── Logging setup ────────────────────────────────────────────────────
     // Always-on rolling log file under the platform state directory.
@@ -604,6 +626,35 @@ mod tests {
             cli.command,
             Some(Command::Completions { shell: Shell::Bash })
         ));
+    }
+
+    #[test]
+    fn test_clean_logs_flag() {
+        // global flag — parses before a bare source
+        let cli = Cli::try_parse_from(["pluq", "--clean-logs", "file.zip"]).unwrap();
+        assert!(cli.clean_logs);
+
+        // and after a subcommand (global = true)
+        let cli = Cli::try_parse_from(["pluq", "get", "file.zip", "--clean-logs"]).unwrap();
+        assert!(cli.clean_logs);
+
+        // absent by default
+        let cli = Cli::try_parse_from(["pluq", "file.zip"]).unwrap();
+        assert!(!cli.clean_logs);
+
+        // all three global flags combinable — --debug, --clean-cache, --clean-logs
+        let cli = Cli::try_parse_from([
+            "pluq",
+            "get",
+            "file.zip",
+            "--debug",
+            "--clean-cache",
+            "--clean-logs",
+        ])
+        .unwrap();
+        assert!(cli.debug);
+        assert!(cli.clean_cache);
+        assert!(cli.clean_logs);
     }
 
     #[test]
