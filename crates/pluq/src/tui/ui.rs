@@ -995,7 +995,22 @@ fn draw_footer(frame: &mut Frame<'_>, app: &App, area: ratatui::layout::Rect) {
         Line::default()
     };
 
-    frame.render_widget(Paragraph::new(line), area);
+    if area.width < 40 {
+        frame.render_widget(Paragraph::new(line), area);
+    } else {
+        let chunks = Layout::horizontal([Constraint::Min(0), Constraint::Length(8)]).split(area);
+        frame.render_widget(Paragraph::new(line), chunks[0]);
+
+        let help_hint = Line::from(vec![
+            Span::styled("?", Style::default().fg(Color::Cyan)),
+            Span::raw(" "),
+            Span::styled("help ", Style::default().fg(Color::DarkGray)),
+        ]);
+        frame.render_widget(
+            Paragraph::new(help_hint).alignment(Alignment::Right),
+            chunks[1],
+        );
+    }
 }
 
 fn draw_help_popup(frame: &mut Frame<'_>, area: ratatui::layout::Rect) {

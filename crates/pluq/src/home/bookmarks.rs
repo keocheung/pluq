@@ -171,7 +171,11 @@ fn read_entries(path: &Path) -> Vec<BookmarkEntry> {
             match serde_json::from_str::<Vec<BookmarkEntry>>(&content) {
                 Ok(entries) => entries,
                 Err(e) => {
-                    tracing::warn!("Failed to parse bookmarks.json at {}: {}", path.display(), e);
+                    tracing::warn!(
+                        "Failed to parse bookmarks.json at {}: {}",
+                        path.display(),
+                        e
+                    );
                     Vec::new()
                 }
             }
