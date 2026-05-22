@@ -2,6 +2,7 @@ use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
+    text::{Line, Span},
     widgets::{Block, Borders, Cell, Clear, Gauge, Paragraph, Row, Table},
 };
 
@@ -797,14 +798,22 @@ fn draw_review(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     // Footer
     let total_size: u64 = review_items.iter().map(|e| e.uncompressed_size).sum();
     let n = review_items.len();
-    let footer_text = format!(
-        " [ {} file{} — {} ]  Space deselect  Enter choice  Tab return",
+    let info = format!(
+        " [ {} file{} — {} ]",
         n,
         if n == 1 { "" } else { "s" },
         crate::format_size(total_size),
     );
-    let footer = Paragraph::new(footer_text).style(Style::default().fg(Color::DarkGray));
-    frame.render_widget(footer, chunks[4]);
+    let mut footer_spans = vec![Span::styled(info, Style::default().fg(Color::DarkGray))];
+    push_hints(
+        &mut footer_spans,
+        &[
+            ("Space", "deselect"),
+            ("Enter", "choice"),
+            ("Tab", "return"),
+        ],
+    );
+    frame.render_widget(Paragraph::new(Line::from(footer_spans)), chunks[4]);
 }
 
 fn draw_extraction_strategy_modal(
@@ -902,9 +911,34 @@ fn draw_extraction_strategy_modal(
     frame.render_widget(hint, inner_chunks[5]);
 }
 
+/// Append `(key, description)` hint pairs to a footer span list: keys in
+/// `accent`, descriptions in `muted`. A pair with an empty key renders the
+/// description alone. Each pair is preceded by a two-space gap.
+fn push_hints(spans: &mut Vec<Span<'static>>, pairs: &[(&str, &str)]) {
+    let key_style = Style::default().fg(Color::Cyan);
+    let desc_style = Style::default().fg(Color::DarkGray);
+    for (key, desc) in pairs {
+        spans.push(Span::raw("  "));
+        if !key.is_empty() {
+            spans.push(Span::styled((*key).to_string(), key_style));
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::styled((*desc).to_string(), desc_style));
+    }
+}
+
+/// Build a footer line entirely from `(key, description)` hint pairs.
+fn hint_line(pairs: &[(&str, &str)]) -> Line<'static> {
+    let mut spans = Vec::new();
+    push_hints(&mut spans, pairs);
+    Line::from(spans)
+}
+
 fn draw_footer(frame: &mut Frame<'_>, app: &App, area: ratatui::layout::Rect) {
-    let text = if let Some(msg) = &app.status_message {
-        format!(" {}", msg)
+    let muted = Style::default().fg(Color::DarkGray);
+
+    let line: Line = if let Some(msg) = &app.status_message {
+        Line::from(Span::styled(format!(" {}", msg), muted))
     } else if !app.toggled.is_empty() {
         let n = app.toggled.len();
         let total_size: u64 = app
@@ -926,15 +960,18 @@ fn draw_footer(frame: &mut Frame<'_>, app: &App, area: ratatui::layout::Rect) {
             })
             .sum();
 
-        format!(
-            " [ {} file{} — {} · Cost: {} ]  Enter choice  q quit",
+        let info = format!(
+            " [ {} file{} — {} · Cost: {} ]",
             n,
             if n == 1 { "" } else { "s" },
             crate::format_size(total_size),
             crate::format_size(total_cost),
-        )
+        );
+        let mut spans = vec![Span::styled(info, muted)];
+        push_hints(&mut spans, &[("Enter", "choice"), ("q", "quit")]);
+        Line::from(spans)
     } else if let Some(item) = app.visible_items.get(app.selected) {
-        if item.is_directory {
+        let info = if item.is_directory {
             format!(" {}/", item.full_path)
         } else {
             let cost = if let Some(idx) = item.entry_index {
@@ -952,13 +989,13 @@ fn draw_footer(frame: &mut Frame<'_>, app: &App, area: ratatui::layout::Rect) {
                 crate::format_size(item.uncompressed_size),
                 crate::format_size(cost)
             )
-        }
+        };
+        Line::from(Span::styled(info, muted))
     } else {
-        String::new()
+        Line::default()
     };
 
-    let footer = Paragraph::new(text).style(Style::default().fg(Color::DarkGray));
-    frame.render_widget(footer, area);
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 fn draw_help_popup(frame: &mut Frame<'_>, area: ratatui::layout::Rect) {
@@ -1226,28 +1263,42 @@ fn draw_home(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 
     // Footer
-    let footer_text = if let Some(ref msg) = app.status_message {
-        format!("  {}", msg)
+    let footer_line: Line = if let Some(ref msg) = app.status_message {
+        Line::from(Span::styled(
+            format!("  {}", msg),
+            Style::default().fg(Color::DarkGray),
+        ))
     } else {
         match app.home_focus {
-            HomeFocus::PluqInput if app.pluq_input.is_empty() => {
-                "  Paste a link or path. Tab cycle  Ctrl+q quit".into()
-            }
+            HomeFocus::PluqInput if app.pluq_input.is_empty() => hint_line(&[
+                ("", "Paste a link or path."),
+                ("Tab", "cycle"),
+                ("Ctrl+q", "quit"),
+            ]),
             HomeFocus::PluqInput if looks_like_url(&app.pluq_input) => {
-                "  Enter open  Tab cycle  Ctrl+q quit".into()
+                hint_line(&[("Enter", "open"), ("Tab", "cycle"), ("Ctrl+q", "quit")])
             }
-            HomeFocus::PluqInput => "  Enter open  Tab complete  Ctrl+q quit".into(),
-            HomeFocus::Recent if !visible_recent.is_empty() => {
-                "  Enter open  b bookmark  d delete  Tab cycle  q quit".into()
+            HomeFocus::PluqInput => {
+                hint_line(&[("Enter", "open"), ("Tab", "complete"), ("Ctrl+q", "quit")])
             }
-            HomeFocus::Bookmarks if !app.home_bookmarks.is_empty() => {
-                "  Enter open  r rename  d delete  Tab cycle  q quit".into()
-            }
-            _ => "  Tab cycle  q quit".into(),
+            HomeFocus::Recent if !visible_recent.is_empty() => hint_line(&[
+                ("Enter", "open"),
+                ("b", "bookmark"),
+                ("d", "delete"),
+                ("Tab", "cycle"),
+                ("q", "quit"),
+            ]),
+            HomeFocus::Bookmarks if !app.home_bookmarks.is_empty() => hint_line(&[
+                ("Enter", "open"),
+                ("r", "rename"),
+                ("d", "delete"),
+                ("Tab", "cycle"),
+                ("q", "quit"),
+            ]),
+            _ => hint_line(&[("Tab", "cycle"), ("q", "quit")]),
         }
     };
-    let footer = Paragraph::new(footer_text).style(Style::default().fg(Color::DarkGray));
-    frame.render_widget(footer, chunks[4]);
+    frame.render_widget(Paragraph::new(footer_line), chunks[4]);
 }
 
 fn draw_bookmark_overlay(frame: &mut Frame<'_>, app: &App, area: Rect) {

@@ -22,6 +22,9 @@ pub struct BookmarkEntry {
 #[derive(Default)]
 pub struct BookmarkList {
     entries: Vec<BookmarkEntry>,
+    /// Backing file. `Some` only for lists created via `load()`; `save()` is a
+    /// no-op when `None`, so test-constructed lists never touch real config.
+    path: Option<PathBuf>,
 }
 
 const MAX_BOOKMARKS: usize = 50;
@@ -31,60 +34,30 @@ impl BookmarkList {
     /// file does not exist, is empty, or fails to parse (log a warning on parse
     /// failure, never propagate).
     pub fn load() -> Self {
-        if let Some(path) = bookmarks_path() {
-            Self::load_from(&path)
-        } else {
-            Self {
-                entries: Vec::new(),
-            }
+        match bookmarks_path() {
+            Some(path) => Self::load_from(&path),
+            None => Self::default(),
         }
     }
 
-    /// Internal load helper for testing and main load.
+    /// Internal load helper for testing and main load. Records `path` so a
+    /// later `save()` writes back to the same file.
     fn load_from(path: &Path) -> Self {
-        if !path.exists() {
-            return Self {
-                entries: Vec::new(),
-            };
-        }
-
-        match std::fs::read_to_string(path) {
-            Ok(content) => {
-                if content.trim().is_empty() {
-                    return Self {
-                        entries: Vec::new(),
-                    };
-                }
-                match serde_json::from_str::<Vec<BookmarkEntry>>(&content) {
-                    Ok(entries) => Self { entries },
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to parse bookmarks.json at {}: {}",
-                            path.display(),
-                            e
-                        );
-                        Self {
-                            entries: Vec::new(),
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Failed to read bookmarks.json at {}: {}", path.display(), e);
-                Self {
-                    entries: Vec::new(),
-                }
-            }
+        Self {
+            entries: read_entries(path),
+            path: Some(path.to_path_buf()),
         }
     }
 
     /// Write atomically via tempfile + rename. Creates the parent directory
     /// with `fs::create_dir_all` if missing. Errors are logged and swallowed
     /// — the Home Screen must still function if the disk is read-only.
+    /// No-op for lists without a backing path (test-constructed lists).
     pub fn save(&self) {
-        if let Some(path) = bookmarks_path()
-            && let Err(e) = self.save_to(&path)
-        {
+        let Some(path) = self.path.as_deref() else {
+            return;
+        };
+        if let Err(e) = self.save_to(path) {
             tracing::error!("Failed to save bookmarks.json to {}: {}", path.display(), e);
         }
     }
@@ -176,7 +149,37 @@ impl BookmarkList {
 #[cfg(test)]
 impl BookmarkList {
     pub fn from_entries(entries: Vec<BookmarkEntry>) -> Self {
-        Self { entries }
+        Self {
+            entries,
+            path: None,
+        }
+    }
+}
+
+/// Read and parse the bookmark file. Returns an empty list if the file is
+/// missing, empty, or unparseable (parse/read failures are logged, not
+/// propagated — the Home Screen must still work).
+fn read_entries(path: &Path) -> Vec<BookmarkEntry> {
+    if !path.exists() {
+        return Vec::new();
+    }
+    match std::fs::read_to_string(path) {
+        Ok(content) => {
+            if content.trim().is_empty() {
+                return Vec::new();
+            }
+            match serde_json::from_str::<Vec<BookmarkEntry>>(&content) {
+                Ok(entries) => entries,
+                Err(e) => {
+                    tracing::warn!("Failed to parse bookmarks.json at {}: {}", path.display(), e);
+                    Vec::new()
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Failed to read bookmarks.json at {}: {}", path.display(), e);
+            Vec::new()
+        }
     }
 }
 

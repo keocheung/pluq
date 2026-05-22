@@ -380,6 +380,9 @@ impl App {
         app.source = source;
         app.phase = AppPhase::Opening;
         app.launched_from_home = false;
+        // Load existing bookmarks so a `b` press in Browsing appends to them
+        // (and persists) instead of overwriting the file with a single entry.
+        app.home_bookmarks = crate::home::bookmarks::BookmarkList::load();
         app.token_store = token_store;
         app
     }
