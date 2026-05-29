@@ -70,7 +70,7 @@
 - [x] **`pluq auth {add, remove, list}`** — CLI subcommand for managing stored OAuth tokens. `list` shows provider + status + refresh-token presence (no secrets printed).
 - [x] **TUI auth prompt** — `NotPublic` / `InvalidCredentials` on known providers surfaces an in-app prompt. Y runs the OAuth flow in a background task, N surfaces a hint to use `pluq auth add`. On success the failed archive open is retried transparently.
 
-### Phase 5: Security Hardening & Release (in progress)
+### Phase 5: Security Hardening & v1 Polish (Completed)
 - [x] **CLI rename to match product spec** — Folded `extract` + `extract-all` into `pluq get [glob] [-o dir] [--all]`. Gitignore-style glob (pattern with `/` matches full path, else basename) via `glob` crate. Binary renamed to `pluq` via `[[bin]]` in `pluq/Cargo.toml`.
 - [x] **Shell completions** — `pluq completions {bash,zsh,fish,powershell,elvish}` emits script to stdout via `clap_complete`. Install pattern documented in subcommand help.
 - [x] **Anti-bomb safeguards** — Implementation of `ResourceLimits` (max entries, header size, total unpacked, per-entry unpacked, and compression ratio guards). Enforced at the boundary of `ArchiveReader` in ZIP, RAR5, and RAR4 parsers.

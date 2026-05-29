@@ -36,7 +36,7 @@
 *   **`archive-core`**: Stateless logic, Parsers, Codecs, `ReadAt`, `LocalPath`.
 *   **`archive-source`**: Source resolution — URL detection, credential discovery, `ResolvedSource`.
 *   **`archive`**: State Layer. Caching, Entry Tree, Error Translation. Generic over `R: ReadAt + LocalPath`.
-*   **`pluq`**: The TUI product binary (`ratatui`). Published to crates.io as `pluq`.
+*   **`pluq`**: The TUI product binary (`ratatui`). Distributed as a prebuilt binary (GH releases, Homebrew, install script); crates.io name reserved but **not** published. See `docs/ROADMAP.md` Phase 6.
 *   **`archive-gdrive`**: Google Drive `ReadAt` implementation.
 *   **`archive-dev`**: Experimental scratchpad.
 
