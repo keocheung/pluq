@@ -86,3 +86,13 @@
 - [x] **Versioned cache schema** — `schema_version: u32` field (default `0` for old files); version check first in `is_valid`; `load` emits `info!` on mismatch and returns `InvalidData`; `SCHEMA_VERSION = 1` exported from `archive-cache`.
 - [x] **Symlink detection and verification** — Parsers mark `is_symlink` (bumped schema to v2); extraction verifies target stays within output directory bounds. Fallback behavior (file containing path) retained for v1.
 - [x] **Solid RAR UX fix** — Solid entries propagate through `BatchResult.failed` instead of being silently skipped; CLI display appends `"→ request support: <url>"` suffix for `ArchiveError::UnsupportedFormat` errors; TUI result summary updated to show first failure reason.
+
+### Phase 6.1: Engineering Prep (Completed)
+- [x] **Final naming pass** — verified: production source + all `Cargo.toml` already on `pluq` / `PLUQ_*`; bin crate is `pluq`. Residual hits confined to gitignored/personal files + the `mempalace.yaml` wing name (intentional).
+- [x] **MSRV** — `rust-version = "1.88"` via `[workspace.package]`, inherited by all nine crates. Enforced by the CI `msrv` job.
+- [x] **License metadata** — `license = "MIT OR Apache-2.0"` via `[workspace.package]`, inherited by all crates.
+- [x] **CI workflow** — `.github/workflows/ci.yml`: `fmt`, `clippy`, `doc`, `msrv@1.88`, `test` matrix (mac/linux/win), `cargo-deny`; on PR + push to main.
+- [x] **`cargo clippy --all-targets --all-features`** clean (CI gate).
+- [x] **`cargo doc --no-deps`** clean (CI gate).
+- [x] **`cargo deny`** wired into CI (`deny.toml`: licenses + advisories + bans + sources; unrar git source allow-listed).
+

@@ -14,7 +14,7 @@ pub struct GoogleDriveReadAt {
     file_id: String,
     auth: GDriveAuth,
     client: Client,
-    /// Base URL for API requests. Production: "https://www.googleapis.com".
+    /// Base URL for API requests. Production: `https://www.googleapis.com`.
     api_base_url: String,
     /// Lazily populated file metadata.
     metadata: OnceCell<GDriveMetadata>,

@@ -6,17 +6,6 @@
 
 > Release plumbing only — no engine work remains (Phases 1–5 are in [`COMPLETED.md`](./roadmap/COMPLETED.md)). Sub-phases are an explicit **dependency chain** so nothing needs retro-fixing (Stefan's standing preference): freeze names/versions → restructure repo → write URL-bound docs & features → wire distribution → seal history → flip public. The crate name `pluq` is locked, so the repo URL (`github.com/<owner>/pluq`) is predictable — URL-bound items carry no placeholder-swap risk.
 
-### 6.1 — Engineering prep
-> URL-independent. Freeze the facts (names, MSRV, crate metadata) that every later stage references. Do first so docs, badges, and publish never point at a moving target.
-
-- [x] **Final naming pass** — substitute residual `archive-sniper`→`pluq`, `snipe`→`pluq` across source + `Cargo.toml`. Pattern B: only `archive-cli`→`pluq` (bin crate); `archive-*` substrate libs unchanged. Full scope: `docs/sandbox/V1_LOCKED.md` Decision 9. *(First, because names must be frozen before any doc, badge, or URL references them.)*
-- [x] **MSRV** — `rust-version = "1.85"` on every crate. Edition 2024 floors MSRV at **1.85** (not the old 1.80). Verify the true minimum with `cargo msrv` and bump if a dep needs newer. Per V1_LOCKED Decision 25 (revised 2026-05-29 from the stale 1.80).
-- [x] **License metadata** — `license = "MIT OR Apache-2.0"` field on every crate. *(OSS hygiene + `cargo deny`. No `version`/`repository`/dual-dep work — Path A ships binary-only, never publishes to crates.io. See 6.7.)*
-- [x] **CI workflow** — `.github/workflows/ci.yml`: fmt + clippy + test + build matrix (mac/linux/win) on PR + push to main. Free on public repos (unlimited Actions minutes). Powers the README CI badge + contributor trust.
-- [ ] **`cargo clippy --all-targets --all-features`** clean (gate; wired into the CI workflow above).
-- [ ] **`cargo doc --no-deps`** clean (gate).
-- [x] **`cargo deny`** integrated into the CI workflow (licenses + advisories + bans), PR + nightly. *(Needs the CI workflow + license fields above.)*
-
 ### 6.2 — Repo restructure
 > Do **before** the history scrub (6.6) so the public HEAD already has the clean stub layout and the scrub's path list is final.
 

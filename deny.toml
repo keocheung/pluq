@@ -26,7 +26,8 @@ allow = [
     "MPL-2.0",
     "CC0-1.0",
     "Unlicense",
-    "OpenSSL",
+    "bzip2-1.0.6",
+    "CDLA-Permissive-2.0",
 ]
 exceptions = []
 # Our own workspace crates (some are publish = false) — skip linting their licenses.

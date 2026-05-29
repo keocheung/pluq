@@ -13,7 +13,7 @@ use crate::codec::CompressionMethod;
 ///
 /// `ArchiveEntry` contains **zero format-specific fields**. Byte offsets,
 /// folder indexes, CRC values, and other per-format location details are held
-/// privately by the format parser in a parallel array keyed by [`index`].
+/// privately by the format parser in a parallel array keyed by `index`.
 /// This keeps the public API stable as new formats are added.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchiveEntry {
@@ -33,7 +33,7 @@ pub struct ArchiveEntry {
     /// `true` if this entry's data is encrypted.
     ///
     /// Attempting to extract an encrypted entry without a password will return
-    /// [`CoreError::PasswordRequired`].
+    /// [`crate::CoreError::PasswordRequired`].
     pub is_encrypted: bool,
 
     /// `true` if this entry represents a symbolic link (Unix S_IFLNK).

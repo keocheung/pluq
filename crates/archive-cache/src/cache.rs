@@ -81,7 +81,7 @@ impl ArchiveCache {
     ///
     /// If the file deserializes successfully but carries an old `schema_version`,
     /// this function emits a single `info!` log line and returns an
-    /// [`io::ErrorKind::InvalidData`] error so callers treat it identically to
+    /// [`std::io::ErrorKind::InvalidData`] error so callers treat it identically to
     /// a missing or corrupt cache file (→ re-scan, no crash).
     pub fn load(path: &std::path::Path) -> Result<Self, std::io::Error> {
         let json = std::fs::read_to_string(path)?;

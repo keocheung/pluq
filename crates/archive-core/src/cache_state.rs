@@ -14,7 +14,7 @@ pub enum FormatCacheState {
     },
     Rar {
         locations: Vec<RarEntryLocation>,
-        /// RAR5 signature + main header bytes (stored as Vec<u8> because Bytes is not Serialize).
+        /// RAR5 signature + main header bytes (stored as `Vec<u8>` because `Bytes` is not Serialize).
         archive_preamble: Vec<u8>,
         /// End-of-archive marker block.
         end_block: Vec<u8>,

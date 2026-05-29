@@ -24,6 +24,8 @@ dev_links.json
 
 # Test / scratch ZIPs
 *.zip
+# …but keep committed test fixtures (in-tree archives the tests read)
+!crates/archive-core/tests/fixtures/*.zip
 
 # Dev crate output (listings, extracted files)
 crates/archive-dev/output/

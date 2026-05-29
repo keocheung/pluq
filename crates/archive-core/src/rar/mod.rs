@@ -1491,11 +1491,8 @@ impl<R: ReadAt> RarArchive<R> {
         let (cancel, on_progress) = build_unrar_progress_hooks(&progress);
         let out_tmp_res =
             tokio::task::spawn_blocking(move || -> Result<tempfile::NamedTempFile, CoreError> {
-                let out_tmp =
-                    tempfile::NamedTempFile::new().map_err(|e| CoreError::BitstreamError {
-                        detail: format!("failed to create extraction temp file: {e}"),
-                    })?;
-                let out_path = out_tmp.path().to_path_buf();
+                let out_path_guard = reserve_unrar_out_path()?;
+                let out_path = out_path_guard.to_path_buf();
 
                 let mut archive = match &password_bytes {
                     Some(pw) => unrar::Archive::with_password(&path, pw.as_slice())
@@ -1522,7 +1519,8 @@ impl<R: ReadAt> RarArchive<R> {
                         header
                             .extract_to_with_progress(&out_path, Some(cancel), Some(on_progress))
                             .map_err(map_unrar_error)?;
-                        return Ok(out_tmp);
+                        let file = reopen_unrar_extracted(&out_path)?;
+                        return Ok(tempfile::NamedTempFile::from_parts(file, out_path_guard));
                     }
                     archive = header.skip().map_err(map_unrar_error)?;
                 }
@@ -2111,6 +2109,47 @@ pub(crate) fn map_unrar_error(e: unrar::error::UnrarError) -> CoreError {
     }
 }
 
+/// Reserve a temp path for the `unrar` C++ library to extract into.
+///
+/// `unrar` creates the output file itself with exclusive-create semantics: it
+/// fails with "Could not create file" if the path already exists (Windows is
+/// strict about this), and on Windows a live `NamedTempFile` handle holds a
+/// mandatory lock that blocks `unrar` entirely. So we create a `NamedTempFile`
+/// only to reserve a unique path, then split off and drop the handle and delete
+/// the placeholder file — handing `unrar` a free path it can create itself.
+///
+/// The returned [`tempfile::TempPath`] deletes the file when dropped, so keep it
+/// alive until the extracted contents have been read.
+pub(crate) fn reserve_unrar_out_path() -> Result<tempfile::TempPath, CoreError> {
+    let tmp = tempfile::NamedTempFile::new().map_err(|e| CoreError::BitstreamError {
+        detail: format!("failed to create extraction temp file: {e}"),
+    })?;
+    let (_, temp_path) = tmp.into_parts();
+    let _ = std::fs::remove_file(&temp_path);
+    Ok(temp_path)
+}
+
+/// Reopen a file `unrar` just extracted, returning a readable handle.
+///
+/// On Unix `unrar` stamps the new file with the archive entry's stored mode,
+/// which is frequently unreadable by us — a fresh `open()` would hit `EACCES`.
+/// Restore owner read/write first. (Windows uses ACLs, not Unix mode bits, and
+/// the owning process can reopen its own file.)
+pub(crate) fn reopen_unrar_extracted(path: &Path) -> Result<std::fs::File, CoreError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
+            CoreError::BitstreamError {
+                detail: format!("failed to set perms on extraction temp file: {e}"),
+            }
+        })?;
+    }
+    std::fs::File::open(path).map_err(|e| CoreError::BitstreamError {
+        detail: format!("failed to reopen extraction temp file: {e}"),
+    })
+}
+
 /// Assemble a synthetic standalone RAR archive and extract it.
 ///
 /// Internal helper used by cloud extraction paths (single and batched)
@@ -2181,11 +2220,10 @@ fn unrar_synthetic_to_tmp(
     cancel: Arc<AtomicBool>,
     on_progress: Box<dyn Fn(usize) + Send>,
 ) -> Result<tempfile::NamedTempFile, CoreError> {
-    // Create temp file for extraction output.
-    let out_tmp = tempfile::NamedTempFile::new().map_err(|e| CoreError::BitstreamError {
-        detail: format!("failed to create extraction temp file: {e}"),
-    })?;
-    let out_path = out_tmp.path().to_path_buf();
+    // unrar creates the output file itself, so hand it a reserved, non-existent
+    // path (see `reserve_unrar_out_path` for the Windows lock / create rationale).
+    let out_path_guard = reserve_unrar_out_path()?;
+    let out_path = out_path_guard.to_path_buf();
 
     let archive = match password {
         Some(pw) => unrar::Archive::with_password(synthetic_path, pw)
@@ -2206,7 +2244,10 @@ fn unrar_synthetic_to_tmp(
             .map_err(map_unrar_error)?;
     } // archive (and header) dropped here, releasing synthetic_path and out_path handles.
 
-    Ok(out_tmp)
+    // Reopen the freshly extracted file and reattach it to the temp path so the
+    // caller receives a live NamedTempFile handle with auto-cleanup.
+    let file = reopen_unrar_extracted(&out_path)?;
+    Ok(tempfile::NamedTempFile::from_parts(file, out_path_guard))
 }
 
 /// Extract multiple entries from a RAR5 archive via `unrar` in a single pass.
@@ -2272,22 +2313,17 @@ where
                     let result = (|| {
                         let (cancel, on_progress) = build_unrar_progress_hooks(&progress);
 
-                        // Create extraction temp file.
-                        let out_tmp = tempfile::NamedTempFile::new().map_err(|e| {
-                            CoreError::BitstreamError {
-                                detail: format!(
-                                    "failed to create extraction temp file for '{name}': {e}"
-                                ),
-                            }
-                        })?;
-                        let out_path = out_tmp.path().to_path_buf();
+                        // unrar creates the output file itself; hand it a reserved,
+                        // non-existent path (see `reserve_unrar_out_path`).
+                        let out_path_guard = reserve_unrar_out_path()?;
+                        let out_path = out_path_guard.to_path_buf();
 
                         let next_archive = header
                             .extract_to_with_progress(&out_path, Some(cancel), Some(on_progress))
                             .map_err(map_unrar_error)?;
 
                         let bytes = verify_and_stream_from_file_sync(
-                            out_tmp.into_file(),
+                            reopen_unrar_extracted(&out_path)?,
                             VerifyData {
                                 name: &name,
                                 expected_crc: loc.crc32,
@@ -2426,10 +2462,8 @@ where
     let snippet_path_clone = snippet_path.clone();
 
     let result = tokio::task::spawn_blocking(move || -> Result<u64, CoreError> {
-        let out_tmp = tempfile::NamedTempFile::new().map_err(|e| CoreError::BitstreamError {
-            detail: format!("failed to create extraction temp file: {e}"),
-        })?;
-        let out_path = out_tmp.path().to_path_buf();
+        let out_path_guard = reserve_unrar_out_path()?;
+        let out_path = out_path_guard.to_path_buf();
 
         let archive = match &password_bytes {
             Some(pw) => unrar::Archive::with_password(&snippet_path_clone, pw.as_slice())
@@ -2449,7 +2483,7 @@ where
             .map_err(map_unrar_error)?;
 
         verify_and_stream_from_file_sync(
-            out_tmp.into_file(),
+            reopen_unrar_extracted(&out_path)?,
             VerifyData {
                 name: &entry_name,
                 expected_crc,

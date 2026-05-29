@@ -822,11 +822,8 @@ impl<R: ReadAt> Rar4Archive<R> {
         let (cancel, on_progress) = build_unrar_progress_hooks(&progress);
         let out_tmp_res =
             tokio::task::spawn_blocking(move || -> Result<tempfile::NamedTempFile, CoreError> {
-                let out_tmp =
-                    tempfile::NamedTempFile::new().map_err(|e| CoreError::BitstreamError {
-                        detail: format!("failed to create extraction temp file: {e}"),
-                    })?;
-                let out_path = out_tmp.path().to_path_buf();
+                let out_path_guard = crate::rar::reserve_unrar_out_path()?;
+                let out_path = out_path_guard.to_path_buf();
 
                 let mut archive = match &password_bytes {
                     Some(pw) => unrar::Archive::with_password(&path, pw.as_slice())
@@ -853,7 +850,8 @@ impl<R: ReadAt> Rar4Archive<R> {
                         header
                             .extract_to_with_progress(&out_path, Some(cancel), Some(on_progress))
                             .map_err(map_unrar_error)?;
-                        return Ok(out_tmp);
+                        let file = crate::rar::reopen_unrar_extracted(&out_path)?;
+                        return Ok(tempfile::NamedTempFile::from_parts(file, out_path_guard));
                     }
                     archive = header.skip().map_err(map_unrar_error)?;
                 }
@@ -980,12 +978,10 @@ impl<R: ReadAt> Rar4Archive<R> {
                     })?;
                 }
 
-                // Create second temp file for extraction output.
-                let out_tmp =
-                    tempfile::NamedTempFile::new().map_err(|e| CoreError::BitstreamError {
-                        detail: format!("failed to create extraction temp file: {e}"),
-                    })?;
-                let out_path = out_tmp.path().to_path_buf();
+                // unrar creates the output file itself; hand it a reserved,
+                // non-existent path (see `crate::rar::reserve_unrar_out_path`).
+                let out_path_guard = crate::rar::reserve_unrar_out_path()?;
+                let out_path = out_path_guard.to_path_buf();
 
                 let temp_path = temp_file.path().to_path_buf();
                 let archive = match &password_bytes {
@@ -1005,8 +1001,9 @@ impl<R: ReadAt> Rar4Archive<R> {
                     .extract_to_with_progress(&out_path, Some(cancel), Some(on_progress))
                     .map_err(map_unrar_error)?;
 
-                // temp_file dropped here — temp file deleted automatically.
-                Ok(out_tmp)
+                // temp_file (synthetic input) dropped here — deleted automatically.
+                let file = crate::rar::reopen_unrar_extracted(&out_path)?;
+                Ok(tempfile::NamedTempFile::from_parts(file, out_path_guard))
             })
             .await;
 

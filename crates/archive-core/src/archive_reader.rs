@@ -34,7 +34,8 @@ pub struct BatchResult {
 /// Unified read interface implemented by every format parser.
 ///
 /// Consumers (CLI, UI, server) use only this trait. Format-specific types
-/// (`ZipArchive`, `RarArchive`, …) are hidden behind [`Archive`](archive::Archive).
+/// (`ZipArchive`, `RarArchive`, …) are hidden behind the higher-level `Archive`
+/// facade in the `archive` crate.
 pub trait ArchiveReader {
     /// All entries in the archive, including OS-generated junk.
     fn entries(&self) -> &[ArchiveEntry];

@@ -3,7 +3,7 @@ use tokio::io::AsyncRead;
 
 use crate::io::ReadError;
 
-/// The core I/O abstraction for pluq.  **[LOCKED]**
+/// The core I/O abstraction for pluq.  **\[LOCKED\]**
 ///
 /// Every archive parser consumes a `ReadAt`. The implementor decides
 /// where the bytes actually come from — local disk, HTTP range requests,

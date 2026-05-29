@@ -58,7 +58,7 @@ impl std::error::Error for ReadError {
 ///
 /// Carries enough information to:
 /// - Build a human-readable message without string matching.
-/// - Route to the correct [`ArchiveError`](archive::ArchiveError) variant.
+/// - Route to the correct `ArchiveError` variant (in the `archive` crate).
 /// - Log with meaningful source and operation context.
 #[derive(Debug)]
 pub struct ReadFailure {

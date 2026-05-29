@@ -2919,9 +2919,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.10"
+version = "0.103.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df33b2b81ac578cabaf06b89b0631153a3f416b0a886e8a7a1707fb51abbd1ef"
+checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
 dependencies = [
  "aws-lc-rs",
  "ring",
@@ -3763,7 +3763,7 @@ checksum = "81e544489bf3d8ef66c953931f56617f423cd4b5494be343d9b9d3dda037b9a3"
 [[package]]
 name = "unrar"
 version = "0.5.9"
-source = "git+https://github.com/stefandekanski/unrar.rs.git?branch=master#bfebb9261bbfbedc1c602c99bdb4b8997e146560"
+source = "git+https://github.com/stefandekanski/unrar.rs.git?branch=master#87ae7407c069969b5769a5c20094bd2b9b9daf8c"
 dependencies = [
  "bitflags 2.11.0",
  "regex",
@@ -3774,7 +3774,7 @@ dependencies = [
 [[package]]
 name = "unrar_sys"
 version = "0.5.8"
-source = "git+https://github.com/stefandekanski/unrar.rs.git?branch=master#bfebb9261bbfbedc1c602c99bdb4b8997e146560"
+source = "git+https://github.com/stefandekanski/unrar.rs.git?branch=master#87ae7407c069969b5769a5c20094bd2b9b9daf8c"
 dependencies = [
  "cc",
  "libc",

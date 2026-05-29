@@ -58,7 +58,7 @@ pub(crate) enum ArchiveInner<R: ReadAt + LocalPath + 'static> {
 
 /// Product-facing handle to an open archive.
 ///
-/// Created via [`Archive::open`], which auto-detects the source type
+/// Created via `Archive::open`, which auto-detects the source type
 /// (local file or HTTP URL) and the archive format (ZIP, RAR, ...).
 ///
 /// `open()` returns [`Opened`] — either immediately usable ([`Opened::Ready`])

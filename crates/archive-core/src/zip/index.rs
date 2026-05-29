@@ -16,7 +16,7 @@ use crate::{ArchiveEntry, CoreError};
 
 /// A cached, serializable snapshot of a ZIP archive's file listing.
 ///
-/// **Superseded by [`archive::ArchiveCache`]** — format-agnostic and
+/// **Superseded by `archive::ArchiveCache`** — format-agnostic and
 /// richer staleness detection. `ZipIndex` is kept for backwards compatibility
 /// and will be removed in a future release.
 #[derive(Debug, Serialize, Deserialize)]

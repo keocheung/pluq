@@ -71,7 +71,7 @@ pub fn complete_path(input: &str) -> Option<(String, usize)> {
     }
 
     // Sort entries for deterministic output.
-    entries.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    entries.sort_by_key(|a| a.0.to_lowercase());
 
     let (new_tail, hits) = if entries.len() == 1 {
         let (name, is_dir) = &entries[0];
