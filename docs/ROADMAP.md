@@ -9,9 +9,9 @@
 ### 6.1 — Engineering prep
 > URL-independent. Freeze the facts (names, MSRV, crate metadata) that every later stage references. Do first so docs, badges, and publish never point at a moving target.
 
-- [ ] **Final naming pass** — substitute residual `archive-sniper`→`pluq`, `snipe`→`pluq` across source + `Cargo.toml`. Pattern B: only `archive-cli`→`pluq` (bin crate); `archive-*` substrate libs unchanged. Full scope: `docs/sandbox/V1_LOCKED.md` Decision 9. *(First, because names must be frozen before any doc, badge, or URL references them.)*
-- [ ] **MSRV** — `rust-version = "1.85"` on every crate. Edition 2024 floors MSRV at **1.85** (not the old 1.80). Verify the true minimum with `cargo msrv` and bump if a dep needs newer. Per V1_LOCKED Decision 25 (revised 2026-05-29 from the stale 1.80).
-- [ ] **License metadata** — `license = "MIT OR Apache-2.0"` field on every crate. *(OSS hygiene + `cargo deny`. No `version`/`repository`/dual-dep work — Path A ships binary-only, never publishes to crates.io. See 6.7.)*
+- [x] **Final naming pass** — substitute residual `archive-sniper`→`pluq`, `snipe`→`pluq` across source + `Cargo.toml`. Pattern B: only `archive-cli`→`pluq` (bin crate); `archive-*` substrate libs unchanged. Full scope: `docs/sandbox/V1_LOCKED.md` Decision 9. *(First, because names must be frozen before any doc, badge, or URL references them.)*
+- [x] **MSRV** — `rust-version = "1.85"` on every crate. Edition 2024 floors MSRV at **1.85** (not the old 1.80). Verify the true minimum with `cargo msrv` and bump if a dep needs newer. Per V1_LOCKED Decision 25 (revised 2026-05-29 from the stale 1.80).
+- [x] **License metadata** — `license = "MIT OR Apache-2.0"` field on every crate. *(OSS hygiene + `cargo deny`. No `version`/`repository`/dual-dep work — Path A ships binary-only, never publishes to crates.io. See 6.7.)*
 - [ ] **CI workflow** — `.github/workflows/ci.yml`: fmt + clippy + test + build matrix (mac/linux/win) on PR + push to main. Free on public repos (unlimited Actions minutes). Powers the README CI badge + contributor trust.
 - [ ] **`cargo clippy --all-targets --all-features`** clean (gate; wired into the CI workflow above).
 - [ ] **`cargo doc --no-deps`** clean (gate).

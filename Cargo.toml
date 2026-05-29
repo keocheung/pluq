@@ -2,6 +2,10 @@
 resolver = "2"
 members = ["crates/archive-core", "crates/archive", "crates/pluq", "crates/archive-dev", "crates/archive-gdrive", "crates/archive-dropbox", "crates/archive-source", "crates/archive-auth", "crates/archive-cache"]
 
+[workspace.package]
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+
 [patch.crates-io]
 unrar = { git = "https://github.com/stefandekanski/unrar.rs.git", branch = "master" }
 unrar_sys = { git = "https://github.com/stefandekanski/unrar.rs.git", branch = "master" }

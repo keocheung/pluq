@@ -2,6 +2,8 @@
 name = "archive-dev"
 version = "0.0.0"
 edition = "2024"
+rust-version.workspace = true
+license.workspace = true
 publish = false
 
 # Scratchpad crate — NOT production code.
