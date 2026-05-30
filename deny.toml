@@ -38,12 +38,17 @@ private = { ignore = true }
 # surface them but don't fail CI on them at v0.1.0.
 multiple-versions = "warn"
 wildcards = "warn"
-# Guardrail for the zip/aes 0.8 pin (see issue #9): globally we only warn, but
-# aes + ctr must stay single-version. If a future change pulls 0.8 and 0.9 into
-# the tree at once (e.g. bumping archive-core before zip catches up), fail CI.
+# Guardrail for the RustCrypto cipher/digest set (see issue #9): globally we only
+# warn on duplicates, but aes/ctr/hmac/pbkdf2/sha1 must each stay single-version.
+# If a partial bump lands one crate at a new major while the rest (or the dev-only
+# `zip` dep, which still pulls the 0.8-era set via aes-crypto) hold the old major,
+# two versions enter the tree — fail CI rather than ship a desynced crypto stack.
 deny = [
     { name = "aes", deny-multiple-versions = true },
     { name = "ctr", deny-multiple-versions = true },
+    { name = "hmac", deny-multiple-versions = true },
+    { name = "pbkdf2", deny-multiple-versions = true },
+    { name = "sha1", deny-multiple-versions = true },
 ]
 
 [sources]

@@ -8,11 +8,19 @@ updates:
     commit-message:
       prefix: "build(deps)"
     ignore:
-      # Blocked: zip v8.x pins aes 0.8 via its aes-crypto feature. Bumping our
-      # direct aes/ctr deps now would put two crypto versions in the binary.
-      # Revisit when zip moves off aes 0.8 — tracked in issue #9.
+      # The RustCrypto cipher/digest set (aes/ctr/hmac/pbkdf2/sha1) is one matched
+      # group. Our WinZip-AE code in archive-core/src/zip/aes.rs calls them
+      # directly (pbkdf2_hmac::<Sha1>, Hmac/Mac, Ctr128LE, Aes*) and they share a
+      # single `digest`/`crypto-common` generation, so a major bump on any one
+      # forces a coordinated rewrite of all five — for zero functional gain, since
+      # the ZIP AE algorithm is spec-fixed. Hold the whole set until we choose to
+      # do that work in one PR. (The `zip` dep that also pulls aes 0.8 is dev-only,
+      # so this is about the API rewrite, not the shipped binary.) Tracked in #9.
       - dependency-name: "aes"
       - dependency-name: "ctr"
+      - dependency-name: "hmac"
+      - dependency-name: "pbkdf2"
+      - dependency-name: "sha1"
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
