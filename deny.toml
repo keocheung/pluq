@@ -38,6 +38,13 @@ private = { ignore = true }
 # surface them but don't fail CI on them at v0.1.0.
 multiple-versions = "warn"
 wildcards = "warn"
+# Guardrail for the zip/aes 0.8 pin (see issue #9): globally we only warn, but
+# aes + ctr must stay single-version. If a future change pulls 0.8 and 0.9 into
+# the tree at once (e.g. bumping archive-core before zip catches up), fail CI.
+deny = [
+    { name = "aes", deny-multiple-versions = true },
+    { name = "ctr", deny-multiple-versions = true },
+]
 
 [sources]
 unknown-registry = "deny"

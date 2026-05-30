@@ -7,9 +7,20 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "build(deps)"
+    ignore:
+      # Blocked: zip v8.x pins aes 0.8 via its aes-crypto feature. Bumping our
+      # direct aes/ctr deps now would put two crypto versions in the binary.
+      # Revisit when zip moves off aes 0.8 — tracked in issue #9.
+      - dependency-name: "aes"
+      - dependency-name: "ctr"
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: weekly
     commit-message:
       prefix: "ci(deps)"
+    ignore:
+      # dtolnay/rust-toolchain's git tag IS the Rust version it installs;
+      # @1.88.0 in ci.yml pins our MSRV. Dependabot bumping it broke CI by
+      # trying to install unreleased Rust 1.100 (#2). MSRV is raised by hand.
+      - dependency-name: "dtolnay/rust-toolchain"
