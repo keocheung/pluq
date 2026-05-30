@@ -878,7 +878,7 @@ impl App {
             .take()
             .unwrap_or_else(|| source.clone());
 
-        // Size: MVP ships size=0 (see SESSION_PLAN_STEP_6 Design).
+        // Archive size isn't known until the source is scanned; store 0 as a placeholder.
         let size = 0u64;
 
         self.home_recent.push(crate::home::recent::RecentEntry {

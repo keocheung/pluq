@@ -5,7 +5,10 @@
 # Cargo lock files — keep root lock, ignore crate-level ones
 crates/*/Cargo.lock
 
-# Editor / OS / Tool files
+# Personal / transient workspace (session plans, scratch, sandbox, dev dumps)
+.workspace/
+
+# Agent / editor / OS / tool files
 .DS_Store
 .idea/
 .vscode/
@@ -17,27 +20,16 @@ crates/*/Cargo.lock
 *.swo
 *.log
 
-# Environment files (never commit secrets)
+# Secrets — never commit
 .env
 .env.*
-dev_links.json
 
-# Test / scratch ZIPs
+# Test / scratch ZIPs (but keep committed in-tree fixtures the tests read)
 *.zip
-# …but keep committed test fixtures (in-tree archives the tests read)
 !crates/archive-core/tests/fixtures/*.zip
 
 # Dev crate output (listings, extracted files)
 crates/archive-dev/output/
-
-# Learning log (private/internal progress tracking)
-LEARNING.md
-
-# Session plan (transient/internal project state)
-SESSION_PLAN*.md
-docs/sandbox/
-docs/superpowers/
-temp/
 
 # MemPalace per-project files
 mempalace.yaml

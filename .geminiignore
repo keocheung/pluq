@@ -1,42 +1,22 @@
-# MIRRORED FROM .gitignore (except for files Gemini should see)
+# Universal ignores for Gemini context (NOT a mirror of .gitignore).
+# Gemini SEES: .workspace/ (session plans), all docs/, all source.
 
-# Rust build artifacts
+# Build artifacts
 /target/
 **/target/
+crates/*/Cargo.lock
 
-# Cargo lock files — keep root lock, ignore crate-level ones
-Cargo.lock
+# Secrets — never expose
+.env
+.env.*
 
-# Editor / OS / Tool files
+# Other agents' / editor / OS private dirs
 .DS_Store
 .idea/
 .vscode/
-.gemini/
 .claude/
-*.swp
-*.swo
-# *.log
-!pluq.log
+.agents/
+.antigravitycli/
 
-# Environment files (never commit secrets)
-.env
-.env.*
-dev_links.json
-
-# Test / scratch ZIPs
-*.zip
-
-# Dev crate output (listings, extracted files)
+# Dev crate output
 crates/archive-dev/output/
-
-# Learning log (private/internal progress tracking)
-LEARNING.md
-
-# Session plan (Gemini is ALLOWED to see these)
-# SESSION_PLAN*.md
-
-# Documentation folders
-docs/sandbox/
-# docs/superpowers/ (Gemini is ALLOWED to see these)
-
-temp/

@@ -1,0 +1,60 @@
+name: Bug report
+description: Something broke while extracting or browsing an archive.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. **Do not paste private share-links, credentials, or real
+        private archives.** A minimal reproduction archive is ideal.
+  - type: input
+    id: version
+    attributes:
+      label: pluq version
+      description: Output of `pluq --version`.
+      placeholder: pluq 0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: [macOS, Linux, Windows]
+    validations:
+      required: true
+  - type: input
+    id: arch
+    attributes:
+      label: Architecture
+      placeholder: arm64 / x86_64
+    validations:
+      required: true
+  - type: dropdown
+    id: source
+    attributes:
+      label: Source type
+      options: [Local file, HTTP(S) URL, Google Drive, Dropbox]
+    validations:
+      required: true
+  - type: dropdown
+    id: format
+    attributes:
+      label: Archive format
+      options: [ZIP, RAR5, RAR4, "Not sure"]
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you do, what did you expect, what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: Run with `--debug` and paste the relevant lines. Redact any URLs/tokens.
+      render: shell
+    validations:
+      required: false

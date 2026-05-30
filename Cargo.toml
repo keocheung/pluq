@@ -5,6 +5,9 @@ members = ["crates/archive-core", "crates/archive", "crates/pluq", "crates/archi
 [workspace.package]
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/StefanDekanski/pluq"
+homepage = "https://github.com/StefanDekanski/pluq"
+authors = ["Stefan Dekanski <stefandekanski@gmail.com>"]
 
 [patch.crates-io]
 unrar = { git = "https://github.com/stefandekanski/unrar.rs.git", branch = "master" }

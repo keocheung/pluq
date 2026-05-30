@@ -7,8 +7,8 @@
 *   **Tier 1 (Switchboard):** `CONTEXT.md` (You are here). Read first for orientation.
 *   **Tier 2 (Canonical Switchboards):** `docs/ARCHITECTURE.md`, `docs/ERRORS.md`, `docs/ROADMAP.md`, `docs/SOURCE.md`. **Always-load.** Hold the load-bearing mental model: 5 layers, 6 Golden Rules, 4-tier error model, dependency direction. **These override the CONTEXT.md gist.**
 *   **Tier 2.5 (On-Demand Spokes):** `docs/architecture/*.md`, `docs/errors/*.md`. Implementation detail behind each switchboard section. Pull individually using the "Read when" hints in the switchboard's spoke index. **Do not bulk-read the whole directory.**
-*   **Tier 3 (Sandbox):** `docs/sandbox/`. Transient/Human docs (experiments, learning). **IGNORE BY DEFAULT**.
-*   **Tier 4 (The Plan):** `SESSION_PLAN.md`. The instruction set for today.
+*   **Tier 3 (Sandbox):** `.workspace/sandbox/` (gitignored). Transient/Human docs (experiments, learning). **IGNORE BY DEFAULT**.
+*   **Tier 4 (The Plan):** the active working plan in `.workspace/` (gitignored), if any. The instruction set for the current task.
 
 > **Anti-spaghetti rule.** The 5-layer model, 6 Golden Rules, crate
 > dependency direction, and 4-tier error model are non-negotiable. Spokes
@@ -16,13 +16,10 @@
 > spoke seems to contradict a switchboard rule, the switchboard wins;
 > flag it for Stefan.
 
-### Agent Developer Guidelines
+### Working conventions
 
-1.  **Start of Session:** Read this file first. If a `SESSION_PLAN.md` exists at the project root, that is the active work — read it; no plan file means no active task. Consult Tier 2 switchboards on-demand. Pull a spoke only when its "Read when" hint matches the work.
-2.  **Session Planning:** Use a "Master-Step" pattern at the project root: `SESSION_PLAN.md` (overview/index) + `SESSION_PLAN_STEP_N.md` (detailed steps in separate files). This naming convention ensures they are automatically ignored by `.gitignore`. These plan files are the project's only live-state tracker — no committed doc records "where we are".
-3.  **End of Task:** If completing a roadmap task, check it off `[x]` and move it from `ROADMAP.md` to `docs/roadmap/COMPLETED.md`. There is no status section to update.
-4.  **Commits:** **Conventional Commits** with crate scope (`feat(archive-core): ...`). Bodies use strict `-` bullet lists.
-5.  **Git Protocol:** **NEVER** auto-commit or stage. Always ask Stefan first.
+Session flow, commit format, and git protocol live in **`AGENTS.md`** (the working agreement).
+This file is the *architecture* switchboard only.
 
 ### The Product
 

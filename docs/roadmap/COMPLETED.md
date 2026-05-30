@@ -96,3 +96,20 @@
 - [x] **`cargo doc --no-deps`** clean (CI gate).
 - [x] **`cargo deny`** wired into CI (`deny.toml`: licenses + advisories + bans + sources; unrar git source allow-listed).
 
+### Phase 6.2: Repo restructure (Completed 2026-05-30)
+- [x] **`.workspace/` convention** — moved personal/transient files (`dev_links.json`, `temp/`, `docs/sandbox/`, `docs/superpowers/`, `entities.json`) into `.workspace/`.
+- [x] **`.gitignore`** collapsed to a single `.workspace/` rule + agent/editor/OS files (kept `SESSION_PLAN*.md`, test-fixture allowlist, mempalace files).
+- [x] **`.geminiignore`** trimmed to universal rules only — keeps `.workspace/` visible to Gemini (session plans).
+- [x] **Root `CLAUDE.md` + `GEMINI.md`** reduced to redirect stubs (→ `AGENTS.md` + `CONTEXT.md`).
+- [x] **`CONTEXT.md`** trimmed to architecture-only; the agent-process section moved to `AGENTS.md`.
+
+### Phase 6.3: OSS docs & scaffolding (Completed 2026-05-30 — demo GIF + FUNDING.yml deferred, still in ROADMAP)
+- [x] **`AGENTS.md`** — vendor-neutral working conventions (absorbs the trimmed `CONTEXT.md` process bits).
+- [x] **`README.md`** — pitch, install matrix, quickstart, badges (CI/license/MSRV), maintenance-status; OneDrive marked planned-only.
+- [x] **`LICENSE-MIT` + `LICENSE-APACHE`** (dual-license) + `Cargo.toml` package metadata (repository/homepage/description/keywords/categories).
+- [x] **`LICENSE-THIRD-PARTY.md`** — UnRAR license reproduced **verbatim** (clause 2 obligation); fork verified FFI to the original UnRAR C++ source; extraction-only compliance documented.
+- [x] **`CONTRIBUTING.md`, `SECURITY.md`** (GH Security Advisories), **`CODE_OF_CONDUCT.md`** (Contributor Covenant 2.1).
+- [x] **`CHANGELOG.md` + `cliff.toml`** (git-cliff; placeholder until release-time generation in 6.7).
+- [x] **`.github/`** — `ISSUE_TEMPLATE/` (bug + feature + config) + `PULL_REQUEST_TEMPLATE.md` + `dependabot.yml` (cargo + github-actions).
+- [x] **`docs/INSTALL.md`, `docs/USAGE.md`, `docs/AUTH.md`** — incl. macOS Gatekeeper note, ToS scope statement, and the embedded-keys decision (rclone-model: embed app-level creds, per-user token stays local, `PLUQ_*` BYO override).
+

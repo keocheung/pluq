@@ -7,7 +7,12 @@ fn dev_link(key: &str) -> Option<String> {
     if let Ok(val) = std::env::var(&env_key) {
         return Some(val);
     }
-    let paths = ["dev_links.json", "../../dev_links.json"];
+    let paths = [
+        ".workspace/dev_links.json",
+        "../../.workspace/dev_links.json",
+        "dev_links.json",
+        "../../dev_links.json",
+    ];
     for path in paths {
         let Ok(content) = std::fs::read_to_string(path) else {
             continue;

@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question / idea / show & tell
+    url: https://github.com/StefanDekanski/pluq/discussions
+    about: For questions, ideas, and sharing — use Discussions, not issues.

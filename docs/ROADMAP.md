@@ -6,31 +6,11 @@
 
 > Release plumbing only — no engine work remains (Phases 1–5 are in [`COMPLETED.md`](./roadmap/COMPLETED.md)). Sub-phases are an explicit **dependency chain** so nothing needs retro-fixing (Stefan's standing preference): freeze names/versions → restructure repo → write URL-bound docs & features → wire distribution → seal history → flip public. The crate name `pluq` is locked, so the repo URL (`github.com/<owner>/pluq`) is predictable — URL-bound items carry no placeholder-swap risk.
 
-### 6.2 — Repo restructure
-> Do **before** the history scrub (6.6) so the public HEAD already has the clean stub layout and the scrub's path list is final.
+### 6.3 — OSS docs & scaffolding (mostly complete)
+> Core docs + scaffolding landed 2026-05-30 (6.2 restructure + the doc bundle — see [`COMPLETED.md`](./roadmap/COMPLETED.md)). Two items remain:
 
-- [ ] Create `.workspace/`. Move personal files: `SESSION_PLAN*.md`, `dev_links.json`, `LEARNING.md`, `pluq.log`, `temp/`. *(`docs/sandbox/`, `docs/superpowers/` are already gitignored / untracked — move for tidiness, but they were never committed.)*
-- [ ] Update `.gitignore` (single `.workspace/` rule + agent files).
-- [ ] Update `.geminiignore` (universal rules only; do NOT add `.workspace/`).
-- [ ] Trim `CLAUDE.md` + `GEMINI.md` to redirect-stubs.
-- [ ] Trim `CONTEXT.md` (universal bits → `AGENTS.md`, created in 6.3).
-
-### 6.3 — OSS docs & scaffolding
-> Write once names (6.1) and the repo URL are final → no placeholder swap. `AGENTS.md` absorbs the universal content trimmed from `CONTEXT.md` in 6.2.
-
-- [ ] `README.md` — pitch, demo (see below), install matrix, quickstart, badges (CI, license, MSRV), Mac Gatekeeper note (`xattr -cr` workaround — documenting it, not signing/notarizing), maintenance-status statement.
-- [ ] **Demo asciicast/GIF** (`vhs` or `asciinema`) — TUI sniping one file from a cloud ZIP. Hero asset for README + Show HN. *(Highest-leverage showoff item — the demo is the pitch.)*
-- [ ] `LICENSE-MIT` + `LICENSE-APACHE` (dual-license).
-- [ ] `LICENSE-THIRD-PARTY.md` — document `unrar` non-free terms (extraction-only, no archive creation). Confirm fork is FFI to original C source.
-- [ ] `CONTRIBUTING.md` — layer rules, Conventional Commits, PR flow, `.workspace/` convention.
-- [ ] `SECURITY.md` — private vuln reporting via GH Security Advisories.
-- [ ] `CODE_OF_CONDUCT.md` — Contributor Covenant boilerplate.
-- [ ] `CHANGELOG.md` — auto-generated via `git-cliff`.
-- [ ] `AGENTS.md` — vendor-neutral project conventions (absorbs trimmed `CONTEXT.md` bits).
-- [ ] `.github/ISSUE_TEMPLATE/` (bug + feature) + `.github/PULL_REQUEST_TEMPLATE.md`.
+- [ ] **Demo asciicast/GIF** (`vhs` or `asciinema`) — TUI sniping one file from a cloud ZIP. Hero asset for README + Show HN. *(Deferred — manual recording task: needs a running binary + a real cloud archive + a recording session, not a headless step. Highest-leverage showoff item — the demo is the pitch.)*
 - [ ] `.github/FUNDING.yml` — **parked 2026-05-29** (monetization deferred; revisit post-launch only if a signal appears).
-- [ ] `.github/dependabot.yml` — Cargo + GitHub Actions auto-updates.
-- [ ] `docs/INSTALL.md`, `docs/USAGE.md`, `docs/AUTH.md` — incl. cloud-provider ToS scope statement: own files OK; shared-with-you / public links = user honors source ToS.
 
 ### 6.4 — URL-bound product features
 > Depend on the final repo / Discussions URLs. Placed after 6.3 settles those URLs so they're written once. Spec: V1_LOCKED Decisions 14 + 5.

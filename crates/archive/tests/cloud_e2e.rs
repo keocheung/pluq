@@ -89,8 +89,13 @@ fn dev_link(key: &str) -> Option<String> {
         return Some(val);
     }
 
-    // 2. Try dev_links.json (workspace root or crate root)
-    let paths = ["dev_links.json", "../../dev_links.json"];
+    // 2. Try dev_links.json (.workspace/ first, then legacy root / crate root)
+    let paths = [
+        ".workspace/dev_links.json",
+        "../../.workspace/dev_links.json",
+        "dev_links.json",
+        "../../dev_links.json",
+    ];
     for path in paths {
         let Ok(content) = std::fs::read_to_string(path) else {
             continue;

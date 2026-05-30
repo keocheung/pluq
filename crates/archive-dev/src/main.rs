@@ -24,7 +24,9 @@ fn run_dropbox_launcher() {
     println!("=== 🎯 pluq: Dropbox TUI Launcher ===\n");
 
     // 0. Load default URLs from dev_links.json
-    let dev_links = match std::fs::read_to_string("dev_links.json") {
+    let dev_links = match std::fs::read_to_string(".workspace/dev_links.json")
+        .or_else(|_| std::fs::read_to_string("dev_links.json"))
+    {
         Ok(s) => serde_json::from_str::<serde_json::Value>(&s).ok(),
         Err(_) => None,
     };
@@ -149,7 +151,9 @@ fn run_gdrive_launcher() {
     println!("=== 🎯 pluq: Google Drive Test Launcher ===\n");
 
     // 0. Load default URLs from dev_links.json
-    let dev_links = match std::fs::read_to_string("dev_links.json") {
+    let dev_links = match std::fs::read_to_string(".workspace/dev_links.json")
+        .or_else(|_| std::fs::read_to_string("dev_links.json"))
+    {
         Ok(s) => serde_json::from_str::<serde_json::Value>(&s).ok(),
         Err(_) => None,
     };
@@ -238,7 +242,9 @@ fn run_gdrive_launcher() {
 fn run_dropbox_poc() {
     println!("=== 🎯 pluq: Dropbox API PoC ===\n");
 
-    let dev_links = match std::fs::read_to_string("dev_links.json") {
+    let dev_links = match std::fs::read_to_string(".workspace/dev_links.json")
+        .or_else(|_| std::fs::read_to_string("dev_links.json"))
+    {
         Ok(s) => serde_json::from_str::<serde_json::Value>(&s).ok(),
         Err(_) => None,
     };
