@@ -11,27 +11,6 @@
 
 - [ ] **Demo asciicast/GIF** (`vhs` or `asciinema`) — TUI sniping one file from a cloud ZIP. Hero asset for README + Show HN. **Off-chain / parallel:** independent of 6.4–6.6, needs only a running binary + a real cloud archive + a recording session (manual, not headless). Must land **before the 6.7 flip-public**, but gates nothing in the chain — record whenever convenient. Highest-leverage showoff item — the demo is the pitch.
 
-### 6.4 — URL-bound product features
-> Depend on the final repo / Discussions URLs. Placed after 6.3 settles those URLs so they're written once. Spec: V1_LOCKED Decisions 14 + 5. **Day-one priority** (with 6.5 install): small early userbase → each report is precious → rich + easy + safe bug capture from launch pays back directly in fix speed. New deps: `webbrowser`, `human-panic` (2.x).
-
-- [ ] **`pluq feedback`** — opens browser (`webbrowser` crate) to GH Issues / Discussions. Sub-options: `--bug` (new-issue bug template), `--idea` (Ideas discussion), `--say-hi` (Discussions home: `https://github.com/StefanDekanski/pluq/discussions`).
-- [ ] **`pluq bug-report`** — collects a **rich, redacted** diagnostic → `pluq-bugreport-<ts>.txt`. Prints path + prefilled GH issue URL. **Never auto-uploads.** Payload:
-  - pluq version + **build git-sha + build date + target triple**
-  - OS + OS-version + arch
-  - configured backends (gdrive / dropbox / local) — **names only, no creds**
-  - recent **log tail** through `redact.rs::scrub`
-  - last **error chain** (4-tier model — gold for diagnosis)
-  - TUI/term info (`$TERM`, terminal size)
-  - which `PLUQ_*` env vars are **set** — **names only, never values** (they hold BYO creds)
-  - last crash report (from panic-hook below) if present
-- [ ] **Panic-hook** (`human-panic` 2.x) — auto-write crash report (TOML, temp dir) on unexpected panic; print path + point user at `pluq bug-report` / issue URL via custom `Metadata`. Catches the crashes users wouldn't bother reporting. Release-build + panic-only — complements on-demand `bug-report`.
-- [ ] **Privacy controls** (the safety gate for the three above):
-  - All collected text through `redact.rs::scrub` — **plus** home paths `/Users/<name>` → `~`, archive filenames stripped/`<file>` unless needed, runtime paths in panic msg scrubbed.
-  - On write, print what the file contains + "nothing is sent anywhere."
-  - **`PRIVACY.md`** (+ README section): "pluq collects zero telemetry; crash/bug reports are local files, never transmitted without your explicit action."
-  - **Bug issue-template warning:** "this file may contain your username / file paths — review and remove anything sensitive before attaching (public issue = public forever)."
-> **Why local-only + no-upload is the whole privacy strategy.** You collect nothing at runtime → no GDPR/CCPA consent-machinery, no privacy-policy obligation, no data-retention duty. The "collection" moment is the user choosing to attach the file (user-initiated disclosure). Inform + give control (inspectable plaintext) = sufficient; no consent checkbox needed. Auto-upload would flip all of that on — so it stays banned.
-
 ### 6.5 — Distribution pipeline
 > **Day-one priority** (with 6.4 bug-capture): easy install is the other thing that must work at launch. `cargo-dist` compiles the `pluq` binary per platform **and** generates the install front-ends. The `curl | sh` one-liner is the **hero path** (rustup / Claude-Code style): detects OS+arch, downloads the prebuilt binary, drops it on `PATH` → `pluq` works immediately. A compiled CLI *is* a binary; every method below delivers the **same** self-contained executable, no runtime required — that's the whole appeal.
 >

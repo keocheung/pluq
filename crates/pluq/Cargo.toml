@@ -40,6 +40,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 regex = "1"
 human-panic = "2"
+os_info = "3"
+webbrowser = "1"
+
 
 [dev-dependencies]
 tempfile = "3"

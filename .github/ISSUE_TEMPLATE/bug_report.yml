@@ -7,6 +7,10 @@ body:
       value: |
         Thanks for the report. **Do not paste private share-links, credentials, or real
         private archives.** A minimal reproduction archive is ideal.
+
+        If you attach a `pluq-bugreport-*.txt` file, it may contain your username, file paths, or
+        environment details — open it and remove anything sensitive first. A public issue is public
+        forever.
   - type: input
     id: version
     attributes:

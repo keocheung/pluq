@@ -1,4 +1,6 @@
 mod auth_cmd;
+mod bug_report;
+mod build_info;
 mod cli_progress;
 mod glob_match;
 pub mod home;
@@ -84,6 +86,20 @@ enum Command {
         #[command(subcommand)]
         action: auth_cmd::AuthAction,
     },
+    /// Write a redacted local diagnostic file for bug reports (never uploaded).
+    BugReport,
+    /// Open the browser to report a bug, suggest an idea, or say hi.
+    Feedback {
+        /// Report a bug (opens a prefilled new-issue form).
+        #[arg(long, group = "target")]
+        bug: bool,
+        /// Suggest an idea (opens the Ideas discussion category).
+        #[arg(long, group = "target")]
+        idea: bool,
+        /// Say hi / ask a question (opens Discussions home).
+        #[arg(long, group = "target")]
+        say_hi: bool,
+    },
     /// Print a shell completion script to stdout.
     ///
     /// Install by redirecting to your shell's completion directory, e.g.
@@ -106,7 +122,7 @@ async fn main() {
     human_panic::setup_panic!(
         human_panic::Metadata::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
             .authors("Stefan Dekanski")
-            .homepage("") // TODO(release): set repo URL once public
+            .homepage(REPO_URL)
             .support(log_msg.clone())
     );
 
@@ -216,9 +232,11 @@ async fn main() {
     }
 }
 
-// TODO(phase6): swap placeholder URL once repo is public.
-// Decision 15 spec: discussions/ideas category once available.
-const IDEAS_URL: &str = "https://github.com/<TBD>/discussions/categories/ideas";
+pub(crate) const REPO_URL: &str = "https://github.com/StefanDekanski/pluq";
+pub(crate) const ISSUES_NEW_URL: &str =
+    "https://github.com/StefanDekanski/pluq/issues/new?template=bug_report.yml";
+pub(crate) const DISCUSSIONS_URL: &str = "https://github.com/StefanDekanski/pluq/discussions";
+const IDEAS_URL: &str = "https://github.com/StefanDekanski/pluq/discussions/categories/ideas";
 
 fn unsupported_suffix(e: &(dyn std::error::Error + 'static)) -> Option<String> {
     let mut current = Some(e);
@@ -266,6 +284,26 @@ async fn run_subcommand(
     match command {
         Command::Auth { action } => {
             return auth_cmd::run_auth(action).await;
+        }
+        Command::BugReport => {
+            return bug_report::run_bug_report().await;
+        }
+        Command::Feedback { bug, idea, say_hi } => {
+            let url = if bug {
+                ISSUES_NEW_URL
+            } else if idea {
+                IDEAS_URL
+            } else if say_hi {
+                DISCUSSIONS_URL
+            } else {
+                // No flag → Discussions home is the natural landing.
+                eprintln!("  Tip: --bug to report a bug, --idea to suggest one, --say-hi to chat.");
+                DISCUSSIONS_URL
+            };
+            if webbrowser::open(url).is_err() {
+                eprintln!("  Could not open a browser. Visit:\n    {url}");
+            }
+            return Ok(());
         }
         Command::List { source, all } => {
             let archive = open_with_progress(&source, &cancel, token_store).await?;
@@ -695,6 +733,12 @@ mod tests {
     }
 
     #[test]
+    fn test_cli_parsing_bug_report() {
+        let cli = Cli::try_parse_from(["pluq", "bug-report"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::BugReport)));
+    }
+
+    #[test]
     fn test_cli_parsing_auth_add() {
         let cli = Cli::try_parse_from(["pluq", "auth", "add", "gdrive"]).unwrap();
         assert!(matches!(
@@ -806,5 +850,20 @@ mod tests {
         let cli = Cli::try_parse_from(["pluq", "list", "--debug", "file.zip"]).unwrap();
         assert!(cli.debug);
         assert!(matches!(cli.command, Some(Command::List { .. })));
+    }
+
+    #[test]
+    fn test_cli_parsing_feedback() {
+        let cli = Cli::try_parse_from(["pluq", "feedback", "--bug"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Feedback { bug: true, .. })
+        ));
+
+        // mutually exclusive: --bug + --idea must error
+        assert!(Cli::try_parse_from(["pluq", "feedback", "--bug", "--idea"]).is_err());
+
+        // no flag is allowed
+        assert!(Cli::try_parse_from(["pluq", "feedback"]).is_ok());
     }
 }

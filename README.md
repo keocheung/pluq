@@ -73,6 +73,11 @@ well. Fixes are best-effort; archive creation is explicitly out of scope. Bug re
 are welcome via [Issues](https://github.com/StefanDekanski/pluq/issues) and
 [Discussions](https://github.com/StefanDekanski/pluq/discussions).
 
+## Privacy
+
+pluq collects **zero telemetry** — nothing is ever transmitted. `pluq bug-report` and crash
+reports are **local files** you choose whether to share. See [PRIVACY.md](PRIVACY.md).
+
 ## License
 
 Dual-licensed under either of **MIT** ([LICENSE-MIT](LICENSE-MIT)) or **Apache-2.0**

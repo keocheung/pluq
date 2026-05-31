@@ -113,3 +113,12 @@
 - [x] **`.github/`** — `ISSUE_TEMPLATE/` (bug + feature + config) + `PULL_REQUEST_TEMPLATE.md` + `dependabot.yml` (cargo + github-actions).
 - [x] **`docs/INSTALL.md`, `docs/USAGE.md`, `docs/AUTH.md`** — incl. macOS Gatekeeper note, ToS scope statement, and the embedded-keys decision (rclone-model: embed app-level creds, per-user token stays local, `PLUQ_*` BYO override).
 
+### Phase 6.4: feedback / bug-report / privacy (Completed 2026-05-31)
+> New deps: `webbrowser`, `os_info` (`human-panic` was already present). Shared repo URL consts live in `main.rs`; they 404 until the repo goes public in 6.7.
+- [x] **`pluq feedback`** — opens the browser (`webbrowser` crate). Flags `--bug` (new-issue bug template), `--idea` (Discussions Ideas category), `--say-hi` (Discussions home); no flag → Discussions home. Prints the URL as a fallback when no browser is available.
+- [x] **`pluq bug-report`** — writes a rich, **redacted** diagnostic to `pluq-bugreport-<ts>.txt` in the CWD; prints the path, "nothing is sent anywhere", and the new-issue URL. **Never uploads.** Payload (every section error-tolerant, all dynamic text through `redact::scrub_report`): pluq version + git-sha + build timestamp + target triple (via `build.rs` / `build_info`); OS + OS-version (`os_info`) + arch; configured backends (gdrive/dropbox/local — **names only**); `PLUQ_*` env var **names only** (never values); `$TERM` + terminal size; scrubbed 200-line tail of the newest log (where the 4-tier error chain surfaces); newest `report-*.toml` crash report if present.
+- [x] **Panic-hook** (`human-panic` 2.x) — already wired in `main()`; set its `homepage` to the repo URL. Release-build, panic-only; writes a local crash TOML and points the user at the support log.
+- [x] **`redact::scrub_report`** — diagnostic scrubber layering home-dir redaction (`/Users/<name>`, `/home/<name>`, `C:\Users\<name>` → `~`) over the existing URL+token `scrub`. The logging hot path (`scrub`) stays untouched.
+- [x] **Privacy docs** — `PRIVACY.md` (zero-telemetry, local-only, no-transmit, "you choose to attach") + README Privacy section + bug-report attach-warning appended to the issue template.
+- **Deferred (intentionally not done):** archive-filename stripping inside reports — low value once home paths collapse to `~`, and over-stripping kills diagnostic value; revisit only on a real leak. Panic-message runtime-path scrubbing relies on `human-panic`'s defaults rather than a bespoke pass.
+
