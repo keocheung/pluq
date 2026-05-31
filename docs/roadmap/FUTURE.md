@@ -18,6 +18,10 @@
 - [ ] **`pluq doctor`** health-check subcommand (token store status, cache dir writable, network reachable, FFI deps OK).
 - [ ] **Anonymous `--help` survey link** — only if structured-feedback need emerges post-launch.
 
+### Distribution & monetization (signal-gated)
+- [ ] **Scoop manifest** (Windows) — *not* a cargo-dist installer; needs a manual bucket repo + per-release version/hash bumps. cargo-dist already covers Windows via `powershell` (irm|iex) + `msi`, so add only on real Scoop demand. Watch: GH Release win-x64 download counts, explicit asks ("scoop manifest?").
+- [ ] **`.github/FUNDING.yml`** — **parked 2026-05-29**; monetization deferred. Revisit post-launch only if a funding signal appears.
+
 ### Performance
 - [ ] **Parallel extraction** for ZIP / non-solid RAR.
 
