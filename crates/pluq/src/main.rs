@@ -232,11 +232,11 @@ async fn main() {
     }
 }
 
-pub(crate) const REPO_URL: &str = "https://github.com/StefanDekanski/pluq";
+pub(crate) const REPO_URL: &str = "https://github.com/stefandekanski/pluq";
 pub(crate) const ISSUES_NEW_URL: &str =
-    "https://github.com/StefanDekanski/pluq/issues/new?template=bug_report.yml";
-pub(crate) const DISCUSSIONS_URL: &str = "https://github.com/StefanDekanski/pluq/discussions";
-const IDEAS_URL: &str = "https://github.com/StefanDekanski/pluq/discussions/categories/ideas";
+    "https://github.com/stefandekanski/pluq/issues/new?template=bug_report.yml";
+pub(crate) const DISCUSSIONS_URL: &str = "https://github.com/stefandekanski/pluq/discussions";
+const IDEAS_URL: &str = "https://github.com/stefandekanski/pluq/discussions/categories/ideas";
 
 fn unsupported_suffix(e: &(dyn std::error::Error + 'static)) -> Option<String> {
     let mut current = Some(e);

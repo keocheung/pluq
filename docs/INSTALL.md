@@ -6,12 +6,12 @@ pluq ships as a single self-contained binary — no runtime, no Rust toolchain n
 
 **macOS / Linux**
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/StefanDekanski/pluq/releases/latest/download/pluq-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/stefandekanski/pluq/releases/latest/download/pluq-installer.sh | sh
 ```
 
 **Windows (PowerShell)**
 ```powershell
-irm https://github.com/StefanDekanski/pluq/releases/latest/download/pluq-installer.ps1 | iex
+irm https://github.com/stefandekanski/pluq/releases/latest/download/pluq-installer.ps1 | iex
 ```
 
 These download the right binary for your OS + architecture and place it on your `PATH`. Because
@@ -20,7 +20,7 @@ the file arrives via curl/irm, macOS Gatekeeper and Windows SmartScreen do not f
 ## Homebrew (macOS)
 
 ```sh
-brew install StefanDekanski/tap/pluq
+brew install stefandekanski/tap/pluq
 ```
 
 The smoothest macOS path — Homebrew handles placement and avoids Gatekeeper friction entirely.
@@ -28,7 +28,7 @@ The smoothest macOS path — Homebrew handles placement and avoids Gatekeeper fr
 ## Manual download (all platforms / offline / CI)
 
 Grab the archive for your platform from the
-[Releases page](https://github.com/StefanDekanski/pluq/releases/latest):
+[Releases page](https://github.com/stefandekanski/pluq/releases/latest):
 
 | Platform | Asset |
 |----------|-------|

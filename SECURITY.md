@@ -14,7 +14,7 @@ pluq is pre-1.0; only the latest released version receives security fixes.
 **Please do not open a public issue for security problems.**
 
 Report privately via GitHub Security Advisories:
-<https://github.com/StefanDekanski/pluq/security/advisories/new>
+<https://github.com/stefandekanski/pluq/security/advisories/new>
 
 If you cannot use GitHub Advisories, email **stefandekanski@gmail.com** with subject
 `pluq security`.

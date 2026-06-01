@@ -1,6 +1,6 @@
 # pluq
 
-[![CI](https://github.com/StefanDekanski/pluq/actions/workflows/ci.yml/badge.svg)](https://github.com/StefanDekanski/pluq/actions/workflows/ci.yml)
+[![CI](https://github.com/stefandekanski/pluq/actions/workflows/ci.yml/badge.svg)](https://github.com/stefandekanski/pluq/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![MSRV](https://img.shields.io/badge/MSRV-1.88-blue.svg)](https://www.rust-lang.org)
 
@@ -31,20 +31,20 @@ The one-liner is the recommended path on every OS (no Rust toolchain required):
 
 **macOS / Linux**
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/StefanDekanski/pluq/releases/latest/download/pluq-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/stefandekanski/pluq/releases/latest/download/pluq-installer.sh | sh
 ```
 
 **Windows (PowerShell)**
 ```powershell
-irm https://github.com/StefanDekanski/pluq/releases/latest/download/pluq-installer.ps1 | iex
+irm https://github.com/stefandekanski/pluq/releases/latest/download/pluq-installer.ps1 | iex
 ```
 
 **Homebrew (macOS)**
 ```sh
-brew install StefanDekanski/tap/pluq
+brew install stefandekanski/tap/pluq
 ```
 
-Prebuilt binaries for every platform are on the [Releases](https://github.com/StefanDekanski/pluq/releases)
+Prebuilt binaries for every platform are on the [Releases](https://github.com/stefandekanski/pluq/releases)
 page (macOS x64/arm64, Linux x64/arm64, Windows x64) — see [docs/INSTALL.md](docs/INSTALL.md)
 for manual install, Scoop, and the macOS Gatekeeper note.
 
@@ -70,8 +70,8 @@ See [docs/USAGE.md](docs/USAGE.md) for the full command reference and TUI keys, 
 
 pluq is **pre-1.0** and **solo-maintained**. It does one thing — extraction — and aims to do it
 well. Fixes are best-effort; archive creation is explicitly out of scope. Bug reports and ideas
-are welcome via [Issues](https://github.com/StefanDekanski/pluq/issues) and
-[Discussions](https://github.com/StefanDekanski/pluq/discussions).
+are welcome via [Issues](https://github.com/stefandekanski/pluq/issues) and
+[Discussions](https://github.com/stefandekanski/pluq/discussions).
 
 ## Privacy
 

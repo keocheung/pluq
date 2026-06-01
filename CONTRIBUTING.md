@@ -25,7 +25,7 @@ A change that crosses a layer boundary the wrong way will be sent back.
 ## Dev setup
 
 ```bash
-git clone https://github.com/StefanDekanski/pluq
+git clone https://github.com/stefandekanski/pluq
 cd pluq
 cargo build
 cargo test
