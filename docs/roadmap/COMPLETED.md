@@ -143,5 +143,13 @@
   test fixture) + 1 Dropbox share-link with its `rlkey`. Shares
   left live on purpose (still used for local testing via the gitignored
   `dev_links.json`); the public history simply no longer points at them. SHAs
-  rewritten + force-pushed while the repo was still private, so old SHAs never
-  reached a public viewer.
+  rewritten + force-pushed while the repo was still private.
+- [x] **Purged GitHub PR refs.** Force-pushing scrubbed `main` was *necessary but
+  not sufficient*: GitHub retains every PR's head as a read-only server ref
+  (`refs/pull/<N>/head`) that a rewrite + force-push does **not** delete and the
+  owner cannot self-service remove — those still exposed the scrubbed values.
+  Closed by **deleting + recreating** the (private, no-fork, solo) repo from the
+  verified-clean local clone, then re-pushing `main`, re-adding the
+  `HOMEBREW_TAP_TOKEN` secret, and re-filing the one tracked issue.
+  `git ls-remote origin 'refs/pull/*'` now empty. All of this happened while
+  private → no scrubbed SHA ever reached a public viewer.
