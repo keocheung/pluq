@@ -12,3 +12,8 @@ authors = ["Stefan Dekanski <stefandekanski@gmail.com>"]
 [patch.crates-io]
 unrar = { git = "https://github.com/stefandekanski/unrar.rs.git", branch = "master" }
 unrar_sys = { git = "https://github.com/stefandekanski/unrar.rs.git", branch = "master" }
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

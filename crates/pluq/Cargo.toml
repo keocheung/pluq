@@ -12,6 +12,12 @@ readme = "../../README.md"
 keywords = ["archive", "zip", "rar", "extraction", "cli"]
 categories = ["command-line-utilities", "compression", "filesystem"]
 
+[package.metadata.wix]
+upgrade-guid = "D6A827DA-7FCB-4872-A760-1C42E55F8C0C"
+path-guid = "D77BCD17-A83A-4A7B-91A1-2EB681B3937F"
+license = false
+eula = false
+
 [[bin]]
 name = "pluq"
 path = "src/main.rs"
