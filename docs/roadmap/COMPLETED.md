@@ -130,4 +130,18 @@
 - [x] **MSI installer** (Windows) — cargo-dist-native, auto-generated. Native double-click install for GUI-leaning Windows users.
 - [x] GitHub Releases prebuilt binaries (mac x64/arm64, linux x64/arm64, windows x64) — the artifacts the installers download. Also the **fallback** for curl-averse / offline / CI-automation users. Not the recommended human path (manual place-on-`PATH`); just not hidden.
 
-
+### Phase 6.6: Pre-publish security audit (Completed 2026-06-01)
+> Audit-only gate; no engine work. First pass (2026-05-31) reported clean but
+> **missed** real test-fixture share-links — caught on the post-6.5 re-run.
+- [x] **Credential / share-link history sweep.** `git log --all -p` across all
+  history for token formats (`ghp_`/`ya29.`/`AKIA`/`AIza`/`sk-`/private keys),
+  cloud share-links, and home paths. Token-format + home-path axes clean. No
+  committed `*_EMBED` API keys.
+- [x] **Redacted 3 real personal share-references** via `git filter-repo
+  --replace-text` (targeted value-only scrub, not the dropped whole-file
+  `--invert-paths` op): 2 Google-Drive file IDs (one was live in a `main.rs`
+  test fixture) + 1 Dropbox share-link with its `rlkey`. Shares
+  left live on purpose (still used for local testing via the gitignored
+  `dev_links.json`); the public history simply no longer points at them. SHAs
+  rewritten + force-pushed while the repo was still private, so old SHAs never
+  reached a public viewer.
