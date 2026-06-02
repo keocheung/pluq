@@ -20,9 +20,6 @@
 > **Distribution = Path A, binary-only (locked).** No crates.io publish. The `archive*` substrate stays internal, consumed **by path** across current and future products (SaaS, KMP) — it is a private foundation, not a third-party library. Distribution is `cargo-dist` GH-release binaries + Homebrew + `curl | sh` (6.5). `cargo install pluq` is *not* offered (would force publishing the whole family). The `pluq` crates.io name stays reserved (parked `0.0.0`). Revisit only on real Rust-user demand for `cargo install` — that, and only that, would reopen the family-publish question.
 
 - [ ] Flip repo public.
-- [ ] Enable GH Discussions (categories: Q&A, Ideas, Show & Tell) — targets for `pluq feedback`.
-- [ ] Set GitHub repo description (≤150 chars) + topics (`rust`, `cli`, `tui`, `archive`, `zip`, `rar`, `google-drive`, `dropbox`, `extraction`).
-- [ ] Tag `v0.1.0` → triggers `cargo-dist` release (GH Release binaries).
 - [ ] Announce: r/rust, r/commandline, Show HN.
 
 ---

@@ -18,6 +18,7 @@ the entries you extract.
 - **Surgical extraction** — fetches metadata + only the selected entries' byte ranges, not the
   whole archive.
 - **Formats** — ZIP (Deflate, Store, BZip2, LZMA, Zstandard), RAR5, RAR4. Extraction only.
+  See [Format support](#format-support) for how surgical extraction differs per format.
 - **Sources** — local files, HTTP(S) direct URLs, Google Drive, Dropbox. *(OneDrive: planned.)*
 - **TUI-first** — browse, search, multi-select, and extract from a minimalist terminal UI.
   Also scriptable via `pluq get`/`list`/`test`.
@@ -65,6 +66,33 @@ pluq test  archive.zip                 # CRC-verify every entry
 
 See [docs/USAGE.md](docs/USAGE.md) for the full command reference and TUI keys, and
 [docs/AUTH.md](docs/AUTH.md) for accessing private Google Drive / Dropbox files.
+
+## Format support
+
+Surgical extraction needs a **central index** pluq can read up front: list the archive, then
+fetch only the byte ranges for the entries you pick. Every format gets there differently — and
+for remote archives, that difference is what you feel as speed.
+
+| Archive | Listing | Surgical extract |
+|---|---|---|
+| **ZIP** | Instant — reads the central directory at the tail | ✅ |
+| **RAR with Quick Open index** | Instant — reads the QO index, just like ZIP | ✅ |
+| **RAR without Quick Open** | One-time **scan** of the archive's header chain | ✅ (after scan) |
+| **Solid RAR** | Lists | ❌ not supported |
+
+- **ZIP** keeps its table of contents (the *central directory*) at the end of the file. pluq
+  reads that, lists instantly, and pulls only the ranges you asked for.
+- **RAR with Quick Open** carries an equivalent index (added at creation time, e.g.
+  `rar a -qo+ archive.rar files`). pluq reads it directly — listing is instant, same as ZIP.
+- **RAR without Quick Open** has no such index, so pluq has to **scan**: walk the file's header
+  chain to map every entry before it can list. On a remote archive that's a visible one-time
+  step; after it completes, extraction is fully surgical. Local files scan instantly.
+- **Solid RAR** compresses all files as one continuous stream — each entry depends on the bytes
+  of the ones before it, so there's no way to decompress a single file without the whole chain.
+  That defeats surgical extraction: pluq lists a solid archive but refuses to extract from it.
+
+> **Tip:** if you control how the RAR is made, add Quick Open info (`-qo+`) and keep it
+> non-solid (`-s-`) for the fastest, most surgical remote experience.
 
 ## Project status
 

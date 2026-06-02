@@ -153,3 +153,8 @@
   `HOMEBREW_TAP_TOKEN` secret, and re-filing the one tracked issue.
   `git ls-remote origin 'refs/pull/*'` now empty. All of this happened while
   private → no scrubbed SHA ever reached a public viewer.
+
+### Phase 6.7: Launch (In Progress)
+- [x] Enable GH Discussions (categories: Q&A, Ideas, Show & Tell) — targets for `pluq feedback`.
+- [x] Set GitHub repo description (≤150 chars) + topics (`rust`, `cli`, `tui`, `archive`, `zip`, `rar`, `google-drive`, `dropbox`, `extraction`).
+- [x] Tag `v0.1.0` → triggers `cargo-dist` release (GH Release binaries).
