@@ -106,6 +106,10 @@ are welcome via [Issues](https://github.com/stefandekanski/pluq/issues) and
 pluq collects **zero telemetry** — nothing is ever transmitted. `pluq bug-report` and crash
 reports are **local files** you choose whether to share. See [PRIVACY.md](PRIVACY.md).
 
+## Acknowledgements
+
+Built by Stefan Dekanski, with AI pair-programming — Claude Code (Anthropic) and Google Gemini.
+
 ## License
 
 Dual-licensed under either of **MIT** ([LICENSE-MIT](LICENSE-MIT)) or **Apache-2.0**
