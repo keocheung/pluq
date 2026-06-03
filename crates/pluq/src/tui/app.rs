@@ -473,42 +473,117 @@ impl App {
         let node_data: Vec<(String, String, bool, Option<usize>)> = {
             let Some(tree) = &self.entry_tree else { return };
             let path_str = self.current_path.join("/");
-            let children = tree.children_at(&path_str);
             let query = self.filter_query.as_str();
-            let glob_pat = if glob_match::is_glob_query(query) {
-                glob_match::compile_glob(query)
-            } else {
-                None
-            };
-            let lower = query.to_lowercase();
 
-            children
-                .iter()
-                .filter_map(|node| {
-                    let full_path = if path_str.is_empty() {
-                        node.name.clone()
+            fn collect_descendants_recursive(
+                node: &archive::TreeNode,
+                current_full_path: &str,
+                matches_query: &dyn Fn(&str, &str) -> bool,
+                results: &mut Vec<(String, String, bool, Option<usize>)>,
+                path_str: &str,
+            ) {
+                // Search yields files only — matches the CLI, where `get` drops
+                // directories before globbing (main.rs). A directory is never a
+                // result itself; we still recurse into it below to find files inside.
+                if current_full_path != path_str
+                    && node.children.is_empty()
+                    && matches_query(&node.name, current_full_path)
+                {
+                    let relative_name = if path_str.is_empty() {
+                        current_full_path.to_string()
                     } else {
-                        format!("{}/{}", path_str, node.name)
+                        current_full_path
+                            .strip_prefix(path_str)
+                            .unwrap_or(current_full_path)
+                            .trim_start_matches('/')
+                            .to_string()
                     };
+                    results.push((
+                        relative_name,
+                        current_full_path.to_string(),
+                        false,
+                        node.entry_index,
+                    ));
+                }
 
-                    let pass = if query.is_empty() {
-                        true
-                    } else if let Some(p) = &glob_pat {
-                        glob_match::glob_matches(p, &full_path)
+                for child in &node.children {
+                    let child_path = if current_full_path.is_empty() {
+                        child.name.clone()
+                    } else {
+                        format!("{}/{}", current_full_path, child.name)
+                    };
+                    collect_descendants_recursive(
+                        child,
+                        &child_path,
+                        matches_query,
+                        results,
+                        path_str,
+                    );
+                }
+            }
+
+            if query.is_empty() {
+                // Non-recursive hierarchical view.
+                let children = tree.children_at(&path_str);
+                children
+                    .iter()
+                    .map(|node| {
+                        let full_path = if path_str.is_empty() {
+                            node.name.clone()
+                        } else {
+                            format!("{}/{}", path_str, node.name)
+                        };
+                        let is_directory = !node.children.is_empty();
+                        (node.name.clone(), full_path, is_directory, node.entry_index)
+                    })
+                    .collect()
+            } else {
+                // Recursive flat search view.
+                let glob_pat = if glob_match::is_glob_query(query) {
+                    glob_match::compile_glob(query)
+                } else {
+                    None
+                };
+                let lower = query.to_lowercase();
+
+                let matches_query = |node_name: &str, node_full_path: &str| -> bool {
+                    if let Some(p) = &glob_pat {
+                        glob_match::glob_matches(p, node_full_path)
                     } else if glob_match::is_glob_query(query) {
                         false // invalid glob — explicit no match
                     } else {
-                        node.name.to_lowercase().contains(&lower)
-                    };
-
-                    if !pass {
-                        return None;
+                        node_name.to_lowercase().contains(&lower)
                     }
+                };
 
-                    let is_directory = !node.children.is_empty();
-                    Some((node.name.clone(), full_path, is_directory, node.entry_index))
-                })
-                .collect()
+                let start_node = if path_str.is_empty() {
+                    &tree.root
+                } else {
+                    // Find the node corresponding to path_str.
+                    let mut current = &tree.root;
+                    let mut found = true;
+                    for segment in path_str.split('/') {
+                        match current.children.iter().find(|c| c.name == segment) {
+                            Some(child) => current = child,
+                            None => {
+                                found = false;
+                                break;
+                            }
+                        }
+                    }
+                    if found { current } else { &tree.root }
+                };
+
+                let mut results = Vec::new();
+                collect_descendants_recursive(
+                    start_node,
+                    &path_str,
+                    &matches_query,
+                    &mut results,
+                    &path_str,
+                );
+                results
+            }
         };
         // Tree borrow dropped here.
 
@@ -1488,6 +1563,8 @@ impl App {
                         && let Some(p) = glob_match::compile_glob(&self.filter_query)
                     {
                         self.toggle_all_matching(&p);
+                        self.filter_query.clear();
+                        self.rebuild_visible_items(None);
                     }
                     self.is_filtering = false;
                 }
@@ -1737,6 +1814,12 @@ impl App {
                 } else if matches!(self.phase, AppPhase::ConfirmExtract { .. }) {
                     debug!("Esc during ConfirmExtract → Browsing");
                     self.phase = AppPhase::Browsing;
+                } else if matches!(self.phase, AppPhase::Browsing) && !self.filter_query.is_empty()
+                {
+                    debug!("Esc with active filter → clear filter");
+                    self.filter_query.clear();
+                    self.is_filtering = false;
+                    self.rebuild_visible_items(None);
                 } else if matches!(self.phase, AppPhase::Browsing) && !self.current_path.is_empty()
                 {
                     debug!("Esc in subdirectory → parent");
@@ -3519,5 +3602,57 @@ mod auth_tests {
 
         assert!(store.get("gdrive").is_some());
         assert!(!matches!(app.phase, AppPhase::Authenticating { .. }));
+    }
+
+    #[test]
+    fn test_recursive_flat_filtering() {
+        let mut app = App::new_with_source("vhs.zip".into(), None);
+        app.phase = AppPhase::Browsing;
+
+        // Setup entries tree
+        let entry1 = ArchiveEntry::new_test("readme.txt", false);
+        let entry2 = ArchiveEntry::new_test("vhs_0.7.2_Windows_x86_64/vhs.exe", false);
+        let entry3 = ArchiveEntry::new_test("vhs_0.7.2_Windows_x86_64/LICENSE", false);
+        app.entries = vec![entry1, entry2, entry3];
+        app.entry_tree = Some(EntryTree::build(&app.entries));
+
+        // 1. Initially with empty query, we should see readme.txt and vhs_0.7.2... directory
+        app.filter_query = "".into();
+        app.rebuild_visible_items(None);
+        assert_eq!(app.visible_items.len(), 2);
+        assert_eq!(app.visible_items[0].name, "vhs_0.7.2_Windows_x86_64"); // directory first
+        assert!(app.visible_items[0].is_directory);
+        assert_eq!(app.visible_items[1].name, "readme.txt");
+        assert!(!app.visible_items[1].is_directory);
+
+        // 2. Filter by "*.exe" - should recursively find vhs.exe and show its path relative to current folder (root)
+        app.filter_query = "*.exe".into();
+        app.rebuild_visible_items(None);
+        assert_eq!(app.visible_items.len(), 1);
+        assert_eq!(
+            app.visible_items[0].name,
+            "vhs_0.7.2_Windows_x86_64/vhs.exe"
+        );
+        assert!(!app.visible_items[0].is_directory);
+
+        // 3. Navigate into vhs_0.7.2_Windows_x86_64 directory, and filter by "*.exe"
+        app.current_path = vec!["vhs_0.7.2_Windows_x86_64".to_string()];
+        app.filter_query = "*.exe".into();
+        app.rebuild_visible_items(None);
+        assert_eq!(app.visible_items.len(), 1);
+        assert_eq!(app.visible_items[0].name, "vhs.exe");
+        assert!(!app.visible_items[0].is_directory);
+
+        // 4. Search must yield files only (CLI parity): a query that matches a
+        // directory name as well as a file must NOT include the directory itself.
+        // "win" matches the folder "vhs_0.7.2_Windows_x86_64" — only the file
+        // beneath it that also matches should ever surface, never the folder.
+        app.current_path.clear();
+        app.filter_query = "win".into();
+        app.rebuild_visible_items(None);
+        assert!(
+            app.visible_items.iter().all(|item| !item.is_directory),
+            "search results must never contain directories"
+        );
     }
 }

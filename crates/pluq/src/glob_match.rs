@@ -20,11 +20,26 @@ pub fn compile_glob(q: &str) -> Option<glob::Pattern> {
 /// (e.g. `photos/**/*.jpg`). A pattern with no `/` matches only against the
 /// entry's basename (e.g. `*.jpg` matches any jpg anywhere in the tree).
 pub fn glob_matches(pattern: &glob::Pattern, entry_name: &str) -> bool {
-    if pattern.as_str().contains('/') {
-        pattern.matches(entry_name)
+    let options = glob::MatchOptions {
+        case_sensitive: false,
+        require_literal_separator: true,
+        require_literal_leading_dot: false,
+    };
+    let pat_str = pattern.as_str();
+    if pat_str.contains('/') {
+        if pat_str.starts_with('/') {
+            if entry_name.starts_with('/') {
+                pattern.matches_with(entry_name, options)
+            } else {
+                let prefixed = format!("/{}", entry_name);
+                pattern.matches_with(&prefixed, options)
+            }
+        } else {
+            pattern.matches_with(entry_name, options)
+        }
     } else {
         let basename = entry_name.rsplit('/').next().unwrap_or(entry_name);
-        pattern.matches(basename)
+        pattern.matches_with(basename, options)
     }
 }
 
@@ -61,5 +76,18 @@ mod tests {
         assert!(!glob_matches(&p, "docs/img.jpg"));
         // basename-only pattern shouldn't match here
         assert!(!glob_matches(&p, "photos.jpg"));
+
+        // Test root-level matching with **
+        let p2 = glob::Pattern::new("**/*.jpg").unwrap();
+        assert!(glob_matches(&p2, "img.jpg"));
+
+        // Test leading slash matching
+        let p3 = glob::Pattern::new("/*.jpg").unwrap();
+        assert!(glob_matches(&p3, "img.jpg"));
+        assert!(!glob_matches(&p3, "photos/img.jpg"));
+
+        // Test case-insensitivity
+        let p4 = glob::Pattern::new("*.jpg").unwrap();
+        assert!(glob_matches(&p4, "IMG.JPG"));
     }
 }
