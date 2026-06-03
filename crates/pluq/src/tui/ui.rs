@@ -1034,12 +1034,20 @@ fn draw_help_popup(frame: &mut Frame<'_>, area: ratatui::layout::Rect) {
 
     let paragraph = Paragraph::new(help_text).block(block);
 
+    // Size the popup to its content so no line is truncated. Width = widest line
+    // + 2 borders + 1 column of breathing room each side; height = line count +
+    // 2 borders. Clamp to the available area for tiny terminals.
+    let lines: Vec<&str> = help_text.lines().collect();
+    let content_w = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16;
+    let popup_w = (content_w + 4).min(area.width);
+    let popup_h = (lines.len() as u16 + 2).min(area.height);
+
     // Center the popup.
     let popup_area = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(0),
-            Constraint::Length(15),
+            Constraint::Length(popup_h),
             Constraint::Min(0),
         ])
         .split(area)[1];
@@ -1048,7 +1056,7 @@ fn draw_help_popup(frame: &mut Frame<'_>, area: ratatui::layout::Rect) {
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Min(0),
-            Constraint::Length(30),
+            Constraint::Length(popup_w),
             Constraint::Min(0),
         ])
         .split(popup_area)[1];
