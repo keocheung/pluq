@@ -22,10 +22,24 @@ pub async fn authenticate(
     client_secret: Option<&str>,
     timeout_secs: u64,
 ) -> Result<StoredToken, AuthError> {
-    // 1. Bind ephemeral 127.0.0.1:0 HTTP listener.
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let port = listener.local_addr()?.port();
-    let redirect_url = format!("http://127.0.0.1:{}/callback", port);
+    // 1. Bind a FIXED loopback port so the redirect URI can be pre-registered in the
+    //    provider consoles (Dropbox requires an exact redirect_uri match incl. port).
+    //    Overridable via PLUQ_OAUTH_PORT for power users / port conflicts (they must
+    //    register the matching URI themselves). Default 53682 (same as rclone).
+    const DEFAULT_LOOPBACK_PORT: u16 = 53682;
+    let port: u16 = std::env::var("PLUQ_OAUTH_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_LOOPBACK_PORT);
+    let listener = TcpListener::bind(("127.0.0.1", port)).await.map_err(|e| {
+        AuthError::Callback(format!(
+            "could not bind 127.0.0.1:{port} for the OAuth redirect — another auth flow may be \
+             running, or the port is in use. Close it and retry, or set PLUQ_OAUTH_PORT. ({e})"
+        ))
+    })?;
+    // Use `localhost` in the redirect URI (not 127.0.0.1) to match the value registered in the
+    // Google/Dropbox consoles. `localhost` resolves to 127.0.0.1, which the listener above owns.
+    let redirect_url = format!("http://localhost:{}/callback", port);
 
     // 2. Build oauth2::BasicClient
     let mut client = BasicClient::new(ClientId::new(client_id.to_string()))
