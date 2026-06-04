@@ -7,7 +7,9 @@ use clap::{Subcommand, ValueEnum};
 #[derive(Subcommand)]
 pub enum AuthAction {
     /// Run the OAuth browser flow and store the resulting token.
+    #[command(arg_required_else_help = true)]
     Add {
+        /// Cloud provider to authenticate: `gdrive` (Google Drive) or `dropbox`.
         #[arg(value_enum)]
         provider: AuthProvider,
         /// Seconds to wait for the browser callback (default 300).
@@ -15,7 +17,9 @@ pub enum AuthAction {
         timeout: u64,
     },
     /// Remove a stored token.
+    #[command(arg_required_else_help = true)]
     Remove {
+        /// Cloud provider whose token to remove: `gdrive` or `dropbox`.
         #[arg(value_enum)]
         provider: AuthProvider,
     },
@@ -25,7 +29,9 @@ pub enum AuthAction {
 
 #[derive(Debug, Copy, Clone, PartialEq, ValueEnum)]
 pub enum AuthProvider {
+    /// Google Drive
     Gdrive,
+    /// Dropbox
     Dropbox,
 }
 

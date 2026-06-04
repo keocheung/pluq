@@ -774,7 +774,28 @@ mod tests {
     #[test]
     fn test_cli_parsing_auth_invalid_provider() {
         let result = Cli::try_parse_from(["pluq", "auth", "add", "onedrive"]);
-        assert!(result.is_err()); // clap ValueEnum rejects unknown
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("clap ValueEnum must reject unknown provider"),
+        };
+        let msg = err.to_string();
+        // Discoverability: the error must name the valid providers.
+        assert!(msg.contains("gdrive"), "error should list gdrive: {msg}");
+        assert!(msg.contains("dropbox"), "error should list dropbox: {msg}");
+    }
+
+    #[test]
+    fn test_cli_parsing_auth_add_missing_provider_lists_providers() {
+        // Bare `pluq auth add` must not be a dead-end: arg_required_else_help prints the
+        // subcommand help, which enumerates the valid providers.
+        let result = Cli::try_parse_from(["pluq", "auth", "add"]);
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("bare `auth add` must error (no provider)"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("gdrive"), "help should list gdrive: {msg}");
+        assert!(msg.contains("dropbox"), "help should list dropbox: {msg}");
     }
 
     #[test]
