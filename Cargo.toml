@@ -3,6 +3,7 @@ resolver = "2"
 members = ["crates/archive-core", "crates/archive", "crates/pluq", "crates/archive-dev", "crates/archive-gdrive", "crates/archive-dropbox", "crates/archive-source", "crates/archive-auth", "crates/archive-cache"]
 
 [workspace.package]
+version = "0.1.0"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/stefandekanski/pluq"
