@@ -11,7 +11,7 @@ A *source* is the first positional argument to `pluq` and most subcommands. It c
 
 ## TUI
 
-Run `pluq` with no arguments for the home screen, or `pluq <source>` to open an archive directly.
+Run `pluq` with no arguments for the home screen, or `pluq <source>` to open an archive directly. On the home screen, press `c` to add files from cloud providers.
 
 | Key | Action |
 |-----|--------|
@@ -23,6 +23,7 @@ Run `pluq` with no arguments for the home screen, or `pluq <source>` to open an 
 | `Tab` | review & prune the current selection |
 | `g`/`G`, `Home`/`End` | jump to top / bottom |
 | `?` | help overlay (full key list) |
+| `c` | add from cloud (Google Drive / Dropbox picker) — on Home screen |
 | `Esc` | back one level · `q` | quit |
 
 ## Commands

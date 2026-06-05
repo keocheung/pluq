@@ -2,6 +2,7 @@ mod auth;
 mod detect;
 mod error;
 pub mod oauth;
+pub mod picker;
 mod reader;
 
 pub use auth::{DropboxAuth, app_credentials, oauth_client_id, oauth_client_secret};

@@ -19,10 +19,10 @@ the entries you extract.
   whole archive.
 - **Formats** — ZIP (Deflate, Store, BZip2, LZMA, Zstandard), RAR5, RAR4. Extraction only.
   See [Format support](#format-support) for how surgical extraction differs per format.
-- **Sources** — local files, HTTP(S) direct URLs, Google Drive, Dropbox. *(OneDrive: planned.)*
+- **Sources** — local files, HTTP(S) direct URLs, Google Drive, Dropbox. *(OneDrive: planned.)* Cloud files can be added by pressing `c` in the TUI to pick from Google Drive (Picker) or Dropbox (Chooser).
 - **TUI-first** — browse, search, multi-select, and extract from a minimalist terminal UI.
   Also scriptable via `pluq get`/`list`/`test`.
-- **Private files** — OAuth for Google Drive and Dropbox (`pluq auth add`).
+- **Private files** — OAuth for Google Drive and Dropbox (`pluq auth add`). In the TUI, private Google Drive files are picker-only (using the `drive.file` scope).
 - **Safe by default** — anti-bomb resource limits, path-traversal & symlink-escape guards,
   LZMA dictionary cap.
 
@@ -65,7 +65,7 @@ pluq test  archive.zip                 # CRC-verify every entry
 ```
 
 See [docs/USAGE.md](docs/USAGE.md) for the full command reference and TUI keys, and
-[docs/AUTH.md](docs/AUTH.md) for accessing private Google Drive / Dropbox files.
+[docs/AUTH.md](docs/AUTH.md) for accessing private Google Drive / Dropbox files (including details on picking files into Bookmarks via the `c` keybind).
 
 ## Format support
 

@@ -591,6 +591,57 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
                 .style(Style::default().fg(Color::DarkGray));
             frame.render_widget(footer, chunks[4]);
         }
+        AppPhase::CloudProviderModal { selected } => {
+            let selected = *selected;
+            draw_home(frame, app, area);
+            // Dim the backdrop so the modal pops (same as the bookmark overlay / auth prompt).
+            let buffer = frame.buffer_mut();
+            for y in area.top()..area.bottom() {
+                for x in area.left()..area.right() {
+                    let cell = &mut buffer[(x, y)];
+                    cell.set_style(cell.style().fg(Color::DarkGray));
+                }
+            }
+            draw_cloud_provider_modal(frame, area, selected);
+        }
+        AppPhase::Picking { provider } => {
+            let provider_name = match provider {
+                crate::auth_cmd::AuthProvider::Gdrive => "Google Drive",
+                crate::auth_cmd::AuthProvider::Dropbox => "Dropbox",
+            };
+            let chunks = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(area);
+
+            let header = Paragraph::new(format!(" Picking from {provider_name}")).style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            );
+            frame.render_widget(header, chunks[0]);
+
+            let sep = "─".repeat(area.width as usize);
+            let sep_style = Style::default().fg(Color::DarkGray);
+            frame.render_widget(Paragraph::new(sep.clone()).style(sep_style), chunks[1]);
+            frame.render_widget(Paragraph::new(sep).style(sep_style), chunks[3]);
+
+            let content = "  Browser opened. Pick file(s) there; your selection returns here.\n  Picked files are saved to Bookmarks.";
+            frame.render_widget(
+                Paragraph::new(content)
+                    .style(Style::default().fg(Color::White))
+                    .alignment(Alignment::Left),
+                chunks[2],
+            );
+
+            let footer = Paragraph::new("  Esc to cancel  ·  q to quit")
+                .style(Style::default().fg(Color::DarkGray));
+            frame.render_widget(footer, chunks[4]);
+        }
         AppPhase::AuthPrompt { .. } => unreachable!(), // Handled above
     }
 
@@ -909,6 +960,64 @@ fn draw_extraction_strategy_modal(
         .style(hint_style)
         .alignment(Alignment::Center);
     frame.render_widget(hint, inner_chunks[5]);
+}
+
+fn draw_cloud_provider_modal(frame: &mut Frame<'_>, area: Rect, selected: usize) {
+    let modal_width: u16 = 40;
+    let modal_height: u16 = 7; // border + pad + 2 options + pad + hint
+
+    let popup_area = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(modal_height),
+            Constraint::Min(0),
+        ])
+        .split(area)[1];
+    let popup_area = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(modal_width),
+            Constraint::Min(0),
+        ])
+        .split(popup_area)[1];
+
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .title(" Add from cloud ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    let inner_chunks = Layout::vertical([
+        Constraint::Length(1), // top padding
+        Constraint::Length(1), // Google Drive
+        Constraint::Length(1), // Dropbox
+        Constraint::Length(1), // bottom padding
+        Constraint::Length(1), // hint
+    ])
+    .split(inner);
+
+    let highlight = Style::default()
+        .bg(Color::Cyan)
+        .fg(Color::Black)
+        .add_modifier(Modifier::BOLD);
+    let normal = Style::default().fg(Color::White);
+
+    let labels = [" Google Drive", " Dropbox"];
+    for (i, label) in labels.iter().enumerate() {
+        let padded = format!("{:<width$}", label, width = inner.width as usize);
+        let style = if selected == i { highlight } else { normal };
+        frame.render_widget(Paragraph::new(padded).style(style), inner_chunks[i + 1]);
+    }
+
+    let hint = Paragraph::new(" ↑/↓ select · Enter open · Esc cancel")
+        .style(Style::default().fg(Color::DarkGray))
+        .alignment(Alignment::Center);
+    frame.render_widget(hint, inner_chunks[4]);
 }
 
 /// Append `(key, description)` hint pairs to a footer span list: keys in
@@ -1308,6 +1417,7 @@ fn draw_home(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 ("Enter", "open"),
                 ("b", "bookmark"),
                 ("d", "delete"),
+                ("c", "cloud"),
                 ("Tab", "cycle"),
                 ("q", "quit"),
             ]),
@@ -1315,10 +1425,11 @@ fn draw_home(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 ("Enter", "open"),
                 ("r", "rename"),
                 ("d", "delete"),
+                ("c", "cloud"),
                 ("Tab", "cycle"),
                 ("q", "quit"),
             ]),
-            _ => hint_line(&[("Tab", "cycle"), ("q", "quit")]),
+            _ => hint_line(&[("c", "cloud"), ("Tab", "cycle"), ("q", "quit")]),
         }
     };
     frame.render_widget(Paragraph::new(footer_line), chunks[4]);

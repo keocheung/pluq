@@ -23,6 +23,13 @@ pluq auth remove gdrive   # delete a stored token
 Tokens are stored as JSON in your platform's app data directory, written atomically with
 owner-only (`0600`) permissions on Unix. pluq refreshes expired access tokens automatically.
 
+### Adding cloud files via picker (TUI)
+
+Within the TUI, you can pick files from your cloud storage rather than copying and pasting links:
+- **Google Drive private files are picker-only.** pluq uses the **`drive.file`** scope, which grants access only to files you **pick** (or that pluq created). In the TUI, press **`c`** on the Home screen → choose **Google Drive** → a browser **Google Picker** opens → the files you pick are added to **Bookmarks**. Pasting a raw private Drive file-id/URL will *not* open it (only public links work via the API-key path).
+- **Dropbox supports paste *or* pick.** You can paste a shared link, or press **`c`** → **Dropbox** to use the **Dropbox Chooser** in the browser.
+- The first time you pick from Google Drive, pluq runs the one-time `auth add gdrive` browser consent automatically if you haven't signed in yet.
+
 ## Terms-of-service scope
 
 pluq is a download/extraction client. **You are responsible for honoring each provider's Terms

@@ -698,10 +698,7 @@ mod tests {
             .await;
 
         let (_dir, store) = temp_store();
-        let config = mock_config(
-            &token_ep,
-            &["https://www.googleapis.com/auth/drive.readonly"],
-        );
+        let config = mock_config(&token_ep, &["https://www.googleapis.com/auth/drive.file"]);
 
         let reader = GoogleDriveReadAt::new_with_base_url(
             "file123".to_string(),

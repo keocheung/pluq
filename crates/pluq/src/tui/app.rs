@@ -39,6 +39,12 @@ pub enum AppMessage {
         result: Result<archive_auth::StoredToken, String>,
         source: String,
     },
+    /// Cloud file picker completed. `Ok` carries the picked files (empty = user cancelled);
+    /// `Err` is a display string.
+    PickComplete {
+        provider: crate::auth_cmd::AuthProvider,
+        result: Result<Vec<archive_auth::PickedFile>, String>,
+    },
 }
 
 /// Shared atomics for high-frequency progress updates.
@@ -215,6 +221,15 @@ impl HomeFocus {
     }
 }
 
+/// What to do after an OAuth flow succeeds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostAuth {
+    /// Retry opening the source that triggered the prompt (the private-file flow).
+    OpenSource,
+    /// Proceed into the cloud file picker (the add-from-cloud flow).
+    Pick,
+}
+
 /// Current phase of the application.
 pub enum AppPhase {
     Home, // NEW — owns no data; home state lives on `App`
@@ -273,6 +288,16 @@ pub enum AppPhase {
     Authenticating {
         provider: crate::auth_cmd::AuthProvider,
         source: String,
+        /// What to do once the token is saved.
+        then: PostAuth,
+    },
+    /// "Add from cloud" — provider chooser modal. `selected`: 0 = Google Drive, 1 = Dropbox.
+    CloudProviderModal {
+        selected: usize,
+    },
+    /// Browser file picker is in-flight for `provider`.
+    Picking {
+        provider: crate::auth_cmd::AuthProvider,
     },
     Error(String),
 }
@@ -892,6 +917,10 @@ impl App {
                 if self.auth_task.is_none() {
                     return; // Task was cancelled.
                 }
+                let then = match &self.phase {
+                    AppPhase::Authenticating { then, .. } => *then,
+                    _ => PostAuth::OpenSource,
+                };
                 self.auth_task = None;
                 let store = match &self.token_store {
                     Some(s) => s.clone(),
@@ -914,9 +943,16 @@ impl App {
                             self.phase = AppPhase::Home;
                             return;
                         }
-                        info!(?provider, "OAuth token saved → retrying archive open");
-                        // Retry the open through the normal home submit path.
-                        self.submit_home_source(source, tx);
+                        match then {
+                            PostAuth::OpenSource => {
+                                info!(?provider, "OAuth token saved → retrying archive open");
+                                self.submit_home_source(source, tx);
+                            }
+                            PostAuth::Pick => {
+                                info!(?provider, "OAuth token saved → starting picker");
+                                self.start_pick(provider, tx);
+                            }
+                        }
                     }
                     Err(msg) => {
                         error!(error = %msg, "OAuth flow failed");
@@ -924,6 +960,39 @@ impl App {
                         self.phase = AppPhase::Home;
                     }
                 }
+            }
+            AppMessage::PickComplete { provider, result } => {
+                if self.auth_task.is_none() {
+                    return; // Task was cancelled.
+                }
+                self.auth_task = None;
+                match result {
+                    Ok(picked) => {
+                        if picked.is_empty() {
+                            self.status_message = Some("No files picked.".into());
+                        } else {
+                            let prov = match provider {
+                                crate::auth_cmd::AuthProvider::Gdrive => {
+                                    crate::home::provider::Provider::GDrive
+                                }
+                                crate::auth_cmd::AuthProvider::Dropbox => {
+                                    crate::home::provider::Provider::Dropbox
+                                }
+                            };
+                            let added = self.add_picked_to_bookmarks(picked, prov);
+                            self.status_message = Some(if added == 0 {
+                                "All picked files were already bookmarked.".into()
+                            } else {
+                                format!("Added {added} file(s) to Bookmarks.")
+                            });
+                        }
+                    }
+                    Err(msg) => {
+                        error!(error = %msg, "cloud picker failed");
+                        self.home_input_error = Some(format!("Picker failed: {msg}"));
+                    }
+                }
+                self.phase = AppPhase::Home;
             }
         }
     }
@@ -1039,12 +1108,14 @@ impl App {
         &mut self,
         provider: crate::auth_cmd::AuthProvider,
         source: String,
+        then: PostAuth,
         tx: &mpsc::UnboundedSender<AppMessage>,
     ) {
-        info!(?provider, "starting OAuth browser flow");
+        info!(?provider, ?then, "starting OAuth browser flow");
         self.phase = AppPhase::Authenticating {
             provider,
             source: source.clone(),
+            then,
         };
         let tx_auth = tx.clone();
         let source_for_task = source.clone();
@@ -1095,6 +1166,112 @@ impl App {
         info!("OAuth flow cancelled by user");
         self.home_input_error = Some("Authentication cancelled.".to_string());
         self.phase = AppPhase::Home;
+    }
+
+    /// Decide how to start a cloud pick for `provider`. Dropbox needs no stored token (the Chooser
+    /// authenticates in the browser). Google Drive needs a token; in A5a, if none is stored we guide
+    /// the user to `auth add` (A5b upgrades this to launch OAuth then pick).
+    fn begin_cloud_pick(
+        &mut self,
+        provider: crate::auth_cmd::AuthProvider,
+        tx: &mpsc::UnboundedSender<AppMessage>,
+    ) {
+        match provider {
+            crate::auth_cmd::AuthProvider::Dropbox => self.start_pick(provider, tx),
+            crate::auth_cmd::AuthProvider::Gdrive => {
+                let has_token = self
+                    .token_store
+                    .as_ref()
+                    .and_then(|s| s.get("gdrive"))
+                    .is_some();
+                if has_token {
+                    self.start_pick(provider, tx);
+                } else {
+                    // No token yet → run the visible OAuth flow, then pick.
+                    self.start_auth_flow(provider, String::new(), PostAuth::Pick, tx);
+                }
+            }
+        }
+    }
+
+    /// Spawn the provider's `pick_files` task and enter the `Picking` phase. Reuses `auth_task` as
+    /// the cancel handle (auth and pick never run concurrently).
+    fn start_pick(
+        &mut self,
+        provider: crate::auth_cmd::AuthProvider,
+        tx: &mpsc::UnboundedSender<AppMessage>,
+    ) {
+        info!(?provider, "starting cloud file picker");
+        self.phase = AppPhase::Picking { provider };
+        let tx_pick = tx.clone();
+        let store = self.token_store.clone();
+        let handle = tokio::spawn(async move {
+            let result = match provider {
+                crate::auth_cmd::AuthProvider::Gdrive => match store {
+                    Some(s) => archive_gdrive::picker::pick_files(s, 300)
+                        .await
+                        .map_err(|e| e.to_string()),
+                    None => Err("Token store unavailable.".to_string()),
+                },
+                crate::auth_cmd::AuthProvider::Dropbox => archive_dropbox::picker::pick_files(300)
+                    .await
+                    .map_err(|e| e.to_string()),
+            };
+            let _ = tx_pick.send(AppMessage::PickComplete { provider, result });
+        });
+        self.auth_task = Some(handle);
+    }
+
+    fn cancel_pick(&mut self) {
+        if let Some(h) = self.auth_task.take() {
+            h.abort();
+        }
+        info!("cloud picker cancelled by user");
+        self.status_message = Some("Picker cancelled.".into());
+        self.phase = AppPhase::Home;
+    }
+
+    /// Bulk-add picked files to Bookmarks. Skips sources already bookmarked; auto-uniquifies names.
+    /// Returns how many were actually added. Saves once if anything changed.
+    fn add_picked_to_bookmarks(
+        &mut self,
+        picked: Vec<archive_auth::PickedFile>,
+        provider: crate::home::provider::Provider,
+    ) -> usize {
+        let mut added = 0usize;
+        for f in picked {
+            if self.home_bookmarks.has_source(&f.source) {
+                continue;
+            }
+            let name = self.unique_bookmark_name(&f.name);
+            self.home_bookmarks
+                .add(crate::home::bookmarks::BookmarkEntry {
+                    name,
+                    source: f.source,
+                    provider,
+                    size: f.size,
+                    last_opened: Utc::now(),
+                });
+            added += 1;
+        }
+        if added > 0 {
+            self.home_bookmarks.save();
+        }
+        added
+    }
+
+    /// A bookmark name not currently in use: `base`, else `base (2)`, `base (3)`, …
+    fn unique_bookmark_name(&self, base: &str) -> String {
+        if !self.home_bookmarks.has_name(base) {
+            return base.to_string();
+        }
+        for n in 2..1000 {
+            let candidate = format!("{base} ({n})");
+            if !self.home_bookmarks.has_name(&candidate) {
+                return candidate;
+            }
+        }
+        format!("{base} ({})", Utc::now().timestamp())
     }
 
     /// Formats an ArchiveError for display in the Home screen error row.
@@ -1404,6 +1581,12 @@ impl App {
                 }
             }
 
+            // Add from cloud — open the provider chooser. Gated off PluqInput so `c` still types
+            // into the path/url field when that field is focused.
+            KeyCode::Char('c') if self.home_focus != HomeFocus::PluqInput => {
+                self.phase = AppPhase::CloudProviderModal { selected: 0 };
+            }
+
             // Enter
             KeyCode::Enter => match self.home_focus {
                 HomeFocus::PluqInput => {
@@ -1513,7 +1696,7 @@ impl App {
                 KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
                     let p = *provider;
                     let s = source.clone();
-                    self.start_auth_flow(p, s, tx);
+                    self.start_auth_flow(p, s, PostAuth::OpenSource, tx);
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                     self.cancel_auth_prompt();
@@ -1526,6 +1709,48 @@ impl App {
         if let AppPhase::Authenticating { .. } = &self.phase {
             if matches!(key.code, KeyCode::Esc) {
                 self.cancel_auth_in_flight();
+            } else if matches!(key.code, KeyCode::Char('q')) {
+                self.should_quit = true;
+            }
+            return;
+        }
+
+        if let AppPhase::CloudProviderModal { selected } = &self.phase {
+            let selected = *selected;
+            match key.code {
+                KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::Char('k')
+                | KeyCode::Char('j')
+                | KeyCode::Tab => {
+                    self.phase = AppPhase::CloudProviderModal {
+                        selected: if selected == 0 { 1 } else { 0 },
+                    };
+                }
+                KeyCode::Enter => {
+                    let provider = if selected == 0 {
+                        crate::auth_cmd::AuthProvider::Gdrive
+                    } else {
+                        crate::auth_cmd::AuthProvider::Dropbox
+                    };
+                    self.begin_cloud_pick(provider, tx);
+                }
+                KeyCode::Esc => {
+                    // Esc = back (close the modal); never quits — TUI_STYLE_GUIDE §6.6.
+                    self.phase = AppPhase::Home;
+                }
+                KeyCode::Char('q') => {
+                    // q = global quit, from any screen — TUI_STYLE_GUIDE §6.6.
+                    self.should_quit = true;
+                }
+                _ => {}
+            }
+            return;
+        }
+
+        if let AppPhase::Picking { .. } = &self.phase {
+            if matches!(key.code, KeyCode::Esc) {
+                self.cancel_pick();
             } else if matches!(key.code, KeyCode::Char('q')) {
                 self.should_quit = true;
             }
@@ -3580,6 +3805,7 @@ mod auth_tests {
         app.phase = AppPhase::Authenticating {
             provider: crate::auth_cmd::AuthProvider::Gdrive,
             source: "gdrive".into(),
+            then: PostAuth::OpenSource,
         };
         let handle = tokio::spawn(async move {});
         app.auth_task = Some(handle);

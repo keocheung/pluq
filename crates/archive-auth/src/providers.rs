@@ -13,7 +13,7 @@ pub const GDRIVE_CONFIG: ProviderOAuthConfig = ProviderOAuthConfig {
     name: "gdrive",
     auth_url: "https://accounts.google.com/o/oauth2/v2/auth",
     token_url: "https://oauth2.googleapis.com/token",
-    scopes: &["https://www.googleapis.com/auth/drive.readonly"],
+    scopes: &["https://www.googleapis.com/auth/drive.file"],
     extra_auth_params: &[
         ("access_type", "offline"), // request refresh_token
         ("prompt", "consent"),      // force consent to guarantee refresh_token on re-auth
