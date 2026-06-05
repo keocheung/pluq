@@ -600,8 +600,13 @@ fn init_logging(debug_flag: bool) -> tracing_appender::non_blocking::WorkerGuard
     tracing_subscriber::fmt()
         .with_writer(non_blocking)
         .with_env_filter(
-            tracing_subscriber::EnvFilter::builder()
-                .parse_lossy(format!("archive_core={level},archive={level},pluq={level}")),
+            // Cover every workspace crate so `--debug` captures the cloud/auth/source paths
+            // too (the provider readers log under their own targets, e.g. `archive_dropbox`).
+            tracing_subscriber::EnvFilter::builder().parse_lossy(format!(
+                "archive_core={level},archive={level},archive_cache={level},\
+                 archive_gdrive={level},archive_dropbox={level},archive_source={level},\
+                 archive_auth={level},pluq={level}"
+            )),
         )
         .with_ansi(false)
         .with_target(true)
