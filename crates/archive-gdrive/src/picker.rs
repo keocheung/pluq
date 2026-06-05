@@ -32,7 +32,15 @@ const PICKER_PAGE: &str = r#"<!DOCTYPE html>
     });
   }
   function createPicker() {
+    // Restrict to the user's own files under My Drive, matching what they see in the
+    // regular Drive UI — the default DOCS view also surfaces orphaned / other-app files
+    // (the "com.xxx" app folders) that aren't in My Drive. Levers if this needs tuning:
+    //   .setOwnedByMe(false) — also show "Shared with me" archives
+    //   .setMimeTypes('application/zip,application/x-rar-compressed,application/vnd.rar')
+    //       — hard archive-only filter (risky: Drive stores some .rar as octet-stream)
     var view = new google.picker.DocsView(google.picker.ViewId.DOCS)
+      .setParent('root')
+      .setOwnedByMe(true)
       .setIncludeFolders(true)
       .setSelectFolderEnabled(false);
     var picker = new google.picker.PickerBuilder()
