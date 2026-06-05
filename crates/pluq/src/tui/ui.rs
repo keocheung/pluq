@@ -151,8 +151,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             frame.render_widget(Paragraph::new(found_text), content_chunks[5]);
 
             // Footer
-            let footer =
-                Paragraph::new("  Press q to cancel").style(Style::default().fg(Color::DarkGray));
+            let footer = Paragraph::new("  Esc to cancel  ·  q to quit")
+                .style(Style::default().fg(Color::DarkGray));
             frame.render_widget(footer, chunks[4]);
         }
         AppPhase::Browsing => {

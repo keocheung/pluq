@@ -719,11 +719,14 @@ impl App {
                         debug!("spawning scan task");
                         let tx_scan = tx.clone();
                         let shared = self.progress.clone();
+                        // Plumb the shared cancel flag so Esc during Scanning actually stops the
+                        // scan (the loops poll `should_cancel()`). Reset it first, mirroring the
+                        // extraction spawn.
+                        self.cancel_flag.store(false, Ordering::SeqCst);
+                        let cancel = self.cancel_flag.clone();
                         tokio::spawn(async move {
-                            let progress = Arc::new(Mutex::new(TuiProgressReporter::new(
-                                shared,
-                                Arc::new(AtomicBool::new(false)),
-                            )));
+                            let progress =
+                                Arc::new(Mutex::new(TuiProgressReporter::new(shared, cancel)));
                             let result = pending.scan(progress).await;
                             let _ = tx_scan.send(AppMessage::ScanComplete(result));
                         });
@@ -772,6 +775,19 @@ impl App {
                 self.phase = AppPhase::Browsing;
             }
             AppMessage::ScanComplete(Err(e)) => {
+                // Esc-cancelled scan: there's no open archive to fall back to, so go Home (when we
+                // came from Home) or quit (direct CLI invocation). Don't show the Error screen.
+                if matches!(e, ArchiveError::Cancelled) {
+                    if self.launched_from_home {
+                        info!("scan cancelled → Home");
+                        self.return_to_home();
+                        self.status_message = Some("Scan cancelled.".to_string());
+                    } else {
+                        info!("scan cancelled → quit");
+                        self.should_quit = true;
+                    }
+                    return;
+                }
                 error!(error = %e, "scan failed → Error");
                 self.phase = AppPhase::Error(e.to_string());
             }
@@ -2021,9 +2037,12 @@ impl App {
             KeyCode::Char('q') if !matches!(self.phase, AppPhase::Home) => {
                 if matches!(
                     self.phase,
-                    AppPhase::Extracting { .. } | AppPhase::ExtractingBatch { .. }
+                    AppPhase::Scanning { .. }
+                        | AppPhase::Extracting { .. }
+                        | AppPhase::ExtractingBatch { .. }
                 ) {
-                    // Signal cancel so the background task cleans up the partial file(s).
+                    // Signal cancel so the background task stops promptly / cleans up partial
+                    // file(s) before the app exits.
                     self.cancel_flag.store(true, Ordering::SeqCst);
                 }
                 self.should_quit = true;
@@ -2031,9 +2050,11 @@ impl App {
             KeyCode::Esc => {
                 if matches!(
                     self.phase,
-                    AppPhase::Extracting { .. } | AppPhase::ExtractingBatch { .. }
+                    AppPhase::Scanning { .. }
+                        | AppPhase::Extracting { .. }
+                        | AppPhase::ExtractingBatch { .. }
                 ) {
-                    debug!("Esc during extraction → cancelling");
+                    debug!("Esc during scan/extraction → cancelling");
                     self.cancel_flag.store(true, Ordering::SeqCst);
                     self.status_message = Some("Cancelling...".to_string());
                 } else if matches!(self.phase, AppPhase::ConfirmExtract { .. }) {
