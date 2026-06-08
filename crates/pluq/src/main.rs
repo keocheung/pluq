@@ -598,7 +598,7 @@ fn init_logging(debug_flag: bool) -> tracing_appender::non_blocking::WorkerGuard
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
     tracing_subscriber::fmt()
-        .with_writer(non_blocking)
+        .with_writer(redact::RedactMakeWriter::new(non_blocking))
         .with_env_filter(
             // Cover every workspace crate so `--debug` captures the cloud/auth/source paths
             // too (the provider readers log under their own targets, e.g. `archive_dropbox`).
