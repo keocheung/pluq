@@ -22,6 +22,12 @@ pub enum ProviderError {
     InvalidCredentials { provider: &'static str },
     /// Provider-specific quota exceeded.
     QuotaExceeded { provider: &'static str },
+    /// Network connect/read timed out. Transient — retry.
+    Timeout { provider: &'static str },
+    /// Provider server problem (5xx, range-not-honored, other API error).
+    /// NOT a credentials issue — must never trigger an auth/sign-in prompt.
+    /// Transient — retry.
+    Unavailable { provider: &'static str },
 }
 
 impl std::fmt::Display for ProviderError {
@@ -48,6 +54,12 @@ impl std::fmt::Display for ProviderError {
             }
             Self::QuotaExceeded { provider } => {
                 write!(f, "{provider}: quota exceeded")
+            }
+            Self::Timeout { provider } => {
+                write!(f, "{provider}: connection timed out")
+            }
+            Self::Unavailable { provider } => {
+                write!(f, "{provider}: temporary server problem")
             }
         }
     }
@@ -105,10 +117,15 @@ fn classify_gdrive(e: &GDriveError) -> ProviderError {
         GDriveError::QuotaExceeded => ProviderError::QuotaExceeded {
             provider: "Google Drive",
         },
+        GDriveError::Timeout => ProviderError::Timeout {
+            provider: "Google Drive",
+        },
         GDriveError::InvalidUrl { .. } => ProviderError::InvalidCredentials {
             provider: "Google Drive",
         },
-        GDriveError::Api { .. } => ProviderError::InvalidCredentials {
+        // A generic API/transport error (5xx, range-not-honored, unexpected status)
+        // is NOT an auth problem — must not trigger a sign-in prompt.
+        GDriveError::Api { .. } => ProviderError::Unavailable {
             provider: "Google Drive",
         },
         GDriveError::TokenRefreshFailed { .. } => ProviderError::InvalidCredentials {
@@ -137,12 +154,19 @@ fn classify_dropbox(e: &DropboxError) -> ProviderError {
         DropboxError::QuotaExceeded => ProviderError::QuotaExceeded {
             provider: "Dropbox",
         },
+        DropboxError::Timeout => ProviderError::Timeout {
+            provider: "Dropbox",
+        },
         DropboxError::InvalidUrl { .. } => ProviderError::InvalidCredentials {
             provider: "Dropbox",
         },
-        DropboxError::Api { .. } => ProviderError::InvalidCredentials {
-            provider: "Dropbox",
-        },
+        // Range-not-honored (load-balanced 200 backend) and generic API/transport
+        // errors are NOT auth problems — must not trigger a sign-in prompt.
+        DropboxError::RangeNotHonored { .. } | DropboxError::Api { .. } => {
+            ProviderError::Unavailable {
+                provider: "Dropbox",
+            }
+        }
         DropboxError::TokenRefreshFailed { .. } => ProviderError::InvalidCredentials {
             provider: "Dropbox",
         },
@@ -205,6 +229,69 @@ mod tests {
         } else {
             panic!("expected RateLimited");
         }
+    }
+
+    #[test]
+    fn classify_dropbox_range_not_honored_is_unavailable_not_auth() {
+        let pe = classify_transport(&DropboxError::RangeNotHonored { attempts: 6 }).unwrap();
+        assert!(
+            matches!(
+                pe,
+                ProviderError::Unavailable {
+                    provider: "Dropbox"
+                }
+            ),
+            "RangeNotHonored must be Unavailable (non-auth), got {pe:?}"
+        );
+    }
+
+    #[test]
+    fn classify_generic_api_is_unavailable_not_auth() {
+        // A generic API error must NOT route to InvalidCredentials (no sign-in prompt).
+        let dbx = classify_transport(&DropboxError::Api {
+            status: 200,
+            detail: String::new(),
+        })
+        .unwrap();
+        assert!(matches!(
+            dbx,
+            ProviderError::Unavailable {
+                provider: "Dropbox"
+            }
+        ));
+        let gdr = classify_transport(&GDriveError::Api {
+            status: 500,
+            detail: String::new(),
+        })
+        .unwrap();
+        assert!(matches!(
+            gdr,
+            ProviderError::Unavailable {
+                provider: "Google Drive"
+            }
+        ));
+    }
+
+    #[test]
+    fn classify_dropbox_timeout() {
+        let pe = classify_transport(&DropboxError::Timeout).unwrap();
+        assert!(matches!(
+            pe,
+            ProviderError::Timeout {
+                provider: "Dropbox"
+            }
+        ));
+    }
+
+    #[test]
+    fn classify_gdrive_timeout() {
+        let pe = classify_transport(&GDriveError::Timeout).unwrap();
+        assert!(matches!(
+            pe,
+            ProviderError::Timeout {
+                provider: "Google Drive"
+            }
+        ));
     }
 
     #[test]

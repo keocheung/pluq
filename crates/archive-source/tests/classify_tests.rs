@@ -99,7 +99,10 @@ fn classify_gdrive_invalid_url() {
 }
 
 #[test]
-fn classify_gdrive_api_error() {
+fn classify_gdrive_api_error_is_unavailable_not_auth() {
+    // A generic API/server error (e.g. 500) is a transport problem, NOT a
+    // credentials problem — it must not classify as InvalidCredentials (which
+    // would wrongly trigger a sign-in prompt at the product layer).
     let err = GDriveError::Api {
         status: 500,
         detail: "internal server error".to_string(),
@@ -107,7 +110,7 @@ fn classify_gdrive_api_error() {
     let result = classify_transport(&err);
     assert!(matches!(
         result,
-        Some(ProviderError::InvalidCredentials {
+        Some(ProviderError::Unavailable {
             provider: "Google Drive"
         })
     ));

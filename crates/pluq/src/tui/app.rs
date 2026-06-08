@@ -1316,6 +1316,12 @@ impl App {
                 Some(ProviderError::QuotaExceeded { provider }) => {
                     format!("{provider}: quota exceeded.")
                 }
+                Some(ProviderError::Timeout { provider }) => {
+                    format!("{provider}: connection timed out — retry.")
+                }
+                Some(ProviderError::Unavailable { provider }) => {
+                    format!("{provider}: server had trouble serving the file — please retry.")
+                }
                 None => e.to_string(),
             },
             _ => e.to_string(),

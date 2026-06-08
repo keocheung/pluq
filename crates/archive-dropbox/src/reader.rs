@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use archive_core::fingerprint::HttpResponseMetadata;
 use archive_core::io::{ReadAt, ReadError};
 use bytes::Bytes;
@@ -5,7 +7,34 @@ use futures_util::TryStreamExt;
 use reqwest::Client;
 use tokio::io::AsyncRead;
 use tokio::sync::OnceCell;
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, trace, warn};
+
+/// Bound the initial TCP+TLS connect so a stalled cold connection to a Dropbox
+/// host fails fast instead of hanging indefinitely.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Bound the gap between successive reads (resets on progress), so a fully
+/// stalled transfer aborts without killing a slow-but-progressing download.
+const READ_TIMEOUT: Duration = Duration::from_secs(60);
+/// Total per-request timeout for the small, latency-sensitive structural reads
+/// (metadata + bounded `read_range`: magic bytes, ZIP EOCD/central directory).
+///
+/// `read_timeout` only bounds *body* reads; it does NOT bound the wait for the
+/// server's first response. The cold first access to the tail of a large shared
+/// link can stall server-side with the connection alive and no response sent —
+/// which neither `connect_timeout` (connection reused) nor `read_timeout` catches.
+/// A total timeout does. Deliberately NOT applied to `read_stream`, whose
+/// extraction transfers legitimately run far longer than this.
+const STRUCTURAL_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// `get_shared_link_file` is load-balanced across two backends: one honors `Range`
+/// (→206), one ignores it and streams the whole file as a browser attachment
+/// (→200). The choice is per-request and effectively stateless, so a 200 is
+/// retryable — a fresh hit usually lands on the Range backend. Measured ~38% land
+/// on the 200 backend (archive-dev range probe), so 6 tries ≈ 99.7% success.
+const MAX_RANGE_ATTEMPTS: u32 = 6;
+/// Tiny politeness delay between range-retry attempts. The flip is not time-based
+/// (no warm-up), so this is just to avoid a tight hammer, not a backoff.
+const RANGE_RETRY_DELAY: Duration = Duration::from_millis(150);
 
 use crate::auth::DropboxAuth;
 use crate::error::DropboxError;
@@ -40,6 +69,8 @@ impl DropboxReadAt {
     fn build(shared_url: String, auth: DropboxAuth, api_base: &str, content_base: &str) -> Self {
         let client = Client::builder()
             .user_agent("pluq")
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(READ_TIMEOUT)
             .build()
             .expect("failed to create HTTP client");
         Self {
@@ -160,14 +191,12 @@ impl DropboxReadAt {
             None
         };
 
-        let req = self.apply_auth(self.client.post(&url)).await.json(&body);
-        let resp = req.send().await.map_err(|e| {
-            error!(error = %e, "Dropbox metadata request failed");
-            transport_error(DropboxError::Api {
-                status: 0,
-                detail: format!("metadata request failed: {e}"),
-            })
-        })?;
+        let req = self
+            .apply_auth(self.client.post(&url))
+            .await
+            .json(&body)
+            .timeout(STRUCTURAL_TIMEOUT);
+        let resp = send_with_retry(req, "metadata request").await?;
 
         let status = resp.status();
 
@@ -180,14 +209,10 @@ impl DropboxReadAt {
                     .post(&url)
                     .bearer_auth(&new_access)
                     .json(&body)
+                    .timeout(STRUCTURAL_TIMEOUT)
                     .send()
                     .await
-                    .map_err(|e| {
-                        transport_error(DropboxError::Api {
-                            status: 0,
-                            detail: format!("metadata retry failed: {e}"),
-                        })
-                    })?;
+                    .map_err(|e| transport_error(map_send_error(&e, "metadata retry")))?;
                 return self.parse_metadata_response(resp2).await;
             }
             // AppCredentials path: 401 means invalid credentials, no retry.
@@ -244,10 +269,14 @@ impl DropboxReadAt {
 
     // ── Content requests ────────────────────────────────────────────────────
 
+    /// `request_timeout` bounds the whole request (incl. waiting for the first
+    /// response). Pass `Some` for bounded `read_range` fetches; pass `None` for
+    /// `read_stream`, whose transfer legitimately outlasts any total timeout.
     async fn send_content_request(
         &self,
         offset: u64,
         len: u64,
+        request_timeout: Option<Duration>,
     ) -> Result<reqwest::Response, ReadError> {
         trace!(
             offset = offset,
@@ -268,53 +297,89 @@ impl DropboxReadAt {
             None
         };
 
-        let req = self
-            .apply_auth(self.client.post(&url))
-            .await
-            .header("Dropbox-API-Arg", &api_arg)
-            .header("Range", format!("bytes={offset}-{range_end}"));
-
-        let resp = req.send().await.map_err(|e| {
-            error!(error = %e, "Dropbox content request failed");
-            transport_error(DropboxError::Api {
-                status: 0,
-                detail: format!("content request failed: {e}"),
-            })
-        })?;
-
-        let status = resp.status();
-        if status == reqwest::StatusCode::PARTIAL_CONTENT {
-            return Ok(resp);
-        }
-
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            if let (DropboxAuth::OAuth { .. }, Some(seen)) = (&self.auth, seen_access) {
-                let new_access = self.refresh_oauth(&seen).await?;
-                // Retry once with fresh token. Preserve all required headers.
-                let resp2 = self
-                    .client
-                    .post(&url)
-                    .bearer_auth(&new_access)
-                    .header("Dropbox-API-Arg", &api_arg)
-                    .header("Range", format!("bytes={offset}-{range_end}"))
-                    .send()
-                    .await
-                    .map_err(|e| {
-                        transport_error(DropboxError::Api {
-                            status: 0,
-                            detail: format!("content retry failed: {e}"),
-                        })
-                    })?;
-                return self.check_content_response(resp2, offset, len).await;
+        // Retry loop for the 200/206 backend flip (see MAX_RANGE_ATTEMPTS). Only a
+        // bare 200 (Range ignored) loops; every other outcome returns immediately.
+        for attempt in 1..=MAX_RANGE_ATTEMPTS {
+            let mut req = self
+                .apply_auth(self.client.post(&url))
+                .await
+                .header("Dropbox-API-Arg", &api_arg)
+                .header("Range", format!("bytes={offset}-{range_end}"));
+            if let Some(t) = request_timeout {
+                req = req.timeout(t);
             }
-            // AppCredentials path: surface 401 as InvalidCredentials.
-            let body = resp.text().await.unwrap_or_default();
-            let err = classify_api_error(status.as_u16(), &body, &self.shared_url);
-            error!(status = status.as_u16(), error = ?err, "Dropbox content API error");
-            return Err(transport_error(err));
+
+            let resp = send_with_retry(req, "content request").await?;
+            let status = resp.status();
+            debug!(
+                status = status.as_u16(),
+                headers = %diag_headers(resp.headers()),
+                offset,
+                len,
+                attempt,
+                "Dropbox content response"
+            );
+
+            if status == reqwest::StatusCode::PARTIAL_CONTENT {
+                return Ok(resp);
+            }
+
+            // 200 = the non-Range backend served the whole file as an attachment.
+            // It's a per-request coin flip, so retry — a fresh hit usually gets 206.
+            if status == reqwest::StatusCode::OK {
+                if attempt < MAX_RANGE_ATTEMPTS {
+                    warn!(
+                        offset,
+                        len,
+                        attempt,
+                        "Dropbox served 200 (Range-ignored backend) — retrying for 206"
+                    );
+                    tokio::time::sleep(RANGE_RETRY_DELAY).await;
+                    continue;
+                }
+                error!(
+                    offset,
+                    len,
+                    attempts = MAX_RANGE_ATTEMPTS,
+                    "Dropbox kept returning 200 — Range never honored after retries"
+                );
+                return Err(transport_error(DropboxError::RangeNotHonored {
+                    attempts: MAX_RANGE_ATTEMPTS,
+                }));
+            }
+
+            if status == reqwest::StatusCode::UNAUTHORIZED {
+                if let (DropboxAuth::OAuth { .. }, Some(seen)) = (&self.auth, seen_access.clone()) {
+                    let new_access = self.refresh_oauth(&seen).await?;
+                    // Retry once with fresh token. Preserve all required headers.
+                    let mut retry_req = self
+                        .client
+                        .post(&url)
+                        .bearer_auth(&new_access)
+                        .header("Dropbox-API-Arg", &api_arg)
+                        .header("Range", format!("bytes={offset}-{range_end}"));
+                    if let Some(t) = request_timeout {
+                        retry_req = retry_req.timeout(t);
+                    }
+                    let resp2 = retry_req
+                        .send()
+                        .await
+                        .map_err(|e| transport_error(map_send_error(&e, "content retry")))?;
+                    return self.check_content_response(resp2, offset, len).await;
+                }
+                // AppCredentials path: surface 401 as InvalidCredentials.
+                let body = read_body_snippet(resp).await;
+                let err = classify_api_error(status.as_u16(), &body, &self.shared_url);
+                error!(status = status.as_u16(), error = ?err, "Dropbox content API error");
+                return Err(transport_error(err));
+            }
+
+            // Other statuses (416, 5xx, …) — terminal.
+            return self.check_content_response(resp, offset, len).await;
         }
 
-        self.check_content_response(resp, offset, len).await
+        // Unreachable: the final attempt's 200 branch returns above.
+        unreachable!("send_content_request loop always returns")
     }
 
     async fn check_content_response(
@@ -333,9 +398,26 @@ impl DropboxReadAt {
             let size = self.ensure_metadata().await.map(|m| m.size).unwrap_or(0);
             return Err(ReadError::OutOfBounds { offset, len, size });
         }
-        let body = resp.text().await.unwrap_or_default();
+        // A 200 to a Range request means the server ignored Range and is sending the
+        // FULL body (here, potentially the whole multi-GB file). Do NOT read it — log
+        // the headers (which reveal the full content-length / missing content-range)
+        // and bail. This is the architecture's `RangeNotSupported` condition; the
+        // earlier 60s stall was this branch reading the entire file via `.text()`.
+        if status == reqwest::StatusCode::OK {
+            error!(
+                status = 200,
+                headers = %diag_headers(resp.headers()),
+                offset,
+                len,
+                "Dropbox returned 200 to a Range request — Range not honored (full body not read)"
+            );
+            return Err(transport_error(DropboxError::RangeNotHonored {
+                attempts: 1,
+            }));
+        }
+        let body = read_body_snippet(resp).await;
         let err = classify_api_error(status.as_u16(), &body, &self.shared_url);
-        error!(status = status.as_u16(), error = ?err, "Dropbox content API error");
+        error!(status = status.as_u16(), body = %body, error = ?err, "Dropbox content API error");
         Err(transport_error(err))
     }
 }
@@ -349,7 +431,11 @@ impl ReadAt for DropboxReadAt {
         if len == 0 {
             return Ok(Bytes::new());
         }
-        let resp = self.send_content_request(offset, len).await?;
+        // Bounded structural/random-access read — cap the whole request so a stalled
+        // cold tail-range fetch fails fast and retries instead of hanging forever.
+        let resp = self
+            .send_content_request(offset, len, Some(STRUCTURAL_TIMEOUT))
+            .await?;
         resp.bytes().await.map_err(|e| {
             error!(error = %e, "Failed to read Dropbox response body");
             transport_error(DropboxError::Api {
@@ -367,7 +453,9 @@ impl ReadAt for DropboxReadAt {
         if len == 0 {
             return Ok(Box::new(tokio::io::empty()));
         }
-        let resp = self.send_content_request(offset, len).await?;
+        // No total timeout: a large extraction stream legitimately outlasts any
+        // fixed deadline. The client's connect/read timeouts still bound stalls.
+        let resp = self.send_content_request(offset, len, None).await?;
         let stream = resp.bytes_stream().map_err(|e| {
             error!(error = %e, "Dropbox stream error");
             std::io::Error::other(transport_error(DropboxError::Api {
@@ -381,6 +469,95 @@ impl ReadAt for DropboxReadAt {
 
 fn transport_error(e: DropboxError) -> ReadError {
     ReadError::Transport(Box::new(e))
+}
+
+/// Render the response headers most useful for diagnosing range/transport issues.
+/// Allowlist only — never dumps `authorization` or other sensitive headers.
+fn diag_headers(headers: &reqwest::header::HeaderMap) -> String {
+    const KEYS: &[&str] = &[
+        "content-range",
+        "content-length",
+        "accept-ranges",
+        "content-type",
+        "retry-after",
+        "location",
+        "x-dropbox-request-id",
+    ];
+    KEYS.iter()
+        .filter_map(|k| {
+            headers
+                .get(*k)
+                .map(|v| format!("{k}={}", v.to_str().unwrap_or("<binary>")))
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Read up to 8 KiB of a response body for diagnostics, discarding the rest.
+/// Bounded so a stray full-file `200` response never pulls gigabytes through the
+/// logging/error path (the root of the earlier 60-second stall).
+async fn read_body_snippet(mut resp: reqwest::Response) -> String {
+    const MAX: usize = 8 * 1024;
+    let mut buf: Vec<u8> = Vec::new();
+    while let Ok(Some(chunk)) = resp.chunk().await {
+        buf.extend_from_slice(&chunk);
+        if buf.len() >= MAX {
+            break;
+        }
+    }
+    buf.truncate(MAX);
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// True if a send error is a transient connect/timeout worth one retry.
+fn is_transient(e: &reqwest::Error) -> bool {
+    e.is_timeout() || e.is_connect()
+}
+
+/// Map a reqwest send error to a `DropboxError`, flagging transient connect/read
+/// timeouts as [`DropboxError::Timeout`] so upper layers show a retry hint instead
+/// of a misleading "credentials invalid" message (the old `Api { status: 0 }` path).
+fn map_send_error(e: &reqwest::Error, ctx: &str) -> DropboxError {
+    if is_transient(e) {
+        DropboxError::Timeout
+    } else {
+        DropboxError::Api {
+            status: 0,
+            detail: format!("{ctx}: {e}"),
+        }
+    }
+}
+
+/// Send `req`, retrying once on a transient connect/timeout failure.
+///
+/// The first connection to a Dropbox host (a separate DNS+TCP+TLS handshake) can
+/// stall on a cold network; the client's `connect_timeout` bounds that stall, and
+/// this retries the send once so a transient cold-connect self-heals instead of
+/// surfacing an error. The builder is cloned before the first send (the bodies here
+/// are replayable); a non-cloneable body simply skips the retry.
+async fn send_with_retry(
+    req: reqwest::RequestBuilder,
+    ctx: &'static str,
+) -> Result<reqwest::Response, ReadError> {
+    let retry = req.try_clone();
+    match req.send().await {
+        Ok(resp) => Ok(resp),
+        Err(first) if is_transient(&first) && retry.is_some() => {
+            warn!(error = %first, ctx, "Dropbox transient transport failure — retrying once");
+            retry
+                .expect("retry builder present (just checked is_some)")
+                .send()
+                .await
+                .map_err(|e| {
+                    error!(error = %e, ctx, "Dropbox request failed after retry");
+                    transport_error(map_send_error(&e, ctx))
+                })
+        }
+        Err(e) => {
+            error!(error = %e, ctx, "Dropbox request failed");
+            Err(transport_error(map_send_error(&e, ctx)))
+        }
+    }
 }
 
 fn classify_api_error(status: u16, body: &str, shared_url: &str) -> DropboxError {
@@ -570,6 +747,79 @@ mod tests {
         );
         let bytes = reader.read_range(0, 10).await.unwrap();
         assert_eq!(bytes.as_ref(), &[42u8; 10]);
+    }
+
+    #[tokio::test]
+    async fn content_200_range_ignored_retries_until_206() {
+        // Simulate the load-balanced backend flip: the first hit lands on the
+        // non-Range backend (200, whole file), the retry lands on the Range
+        // backend (206). read_range must transparently retry and succeed.
+        let api = MockServer::start().await;
+        let content = MockServer::start().await;
+
+        // First call → 200 (Range ignored). `up_to_n_times(1)` + last-registered
+        // priority means only the first request hits this mock.
+        Mock::given(method("POST"))
+            .and(path("/2/sharing/get_shared_link_file"))
+            .respond_with(
+                ResponseTemplate::new(206).set_body_raw(vec![7u8; 10], "application/octet-stream"),
+            )
+            .mount(&content)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/2/sharing/get_shared_link_file"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(b"WHOLEFILE".to_vec(), "application/octet-stream"),
+            )
+            .up_to_n_times(1)
+            .mount(&content)
+            .await;
+
+        let reader = DropboxReadAt::new_with_base_urls(
+            "https://www.dropbox.com/s/abc/x.zip".to_string(),
+            app_creds(),
+            &api.uri(),
+            &content.uri(),
+        );
+        let bytes = reader.read_range(0, 10).await.unwrap();
+        assert_eq!(bytes.as_ref(), &[7u8; 10]);
+    }
+
+    #[tokio::test]
+    async fn content_persistent_200_maps_to_range_not_honored_not_auth() {
+        // Every hit lands on the 200 backend → after the retry budget, a clean
+        // RangeNotHonored (transport), NOT an auth/credentials error.
+        let api = MockServer::start().await;
+        let content = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/2/sharing/get_shared_link_file"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(b"WHOLEFILE".to_vec(), "application/octet-stream"),
+            )
+            .mount(&content)
+            .await;
+
+        let reader = DropboxReadAt::new_with_base_urls(
+            "https://www.dropbox.com/s/abc/x.zip".to_string(),
+            app_creds(),
+            &api.uri(),
+            &content.uri(),
+        );
+        let err = reader.read_range(0, 10).await.unwrap_err();
+        let ReadError::Transport(e) = err else {
+            panic!("expected Transport, got {err:?}");
+        };
+        assert!(
+            matches!(
+                e.downcast_ref::<DropboxError>(),
+                Some(DropboxError::RangeNotHonored { .. })
+            ),
+            "expected RangeNotHonored, got {:?}",
+            e.downcast_ref::<DropboxError>()
+        );
     }
 
     #[tokio::test]

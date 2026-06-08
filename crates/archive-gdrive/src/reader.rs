@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use archive_core::fingerprint::HttpResponseMetadata;
 use archive_core::io::{ReadAt, ReadError};
 use bytes::Bytes;
@@ -5,7 +7,24 @@ use futures_util::TryStreamExt;
 use reqwest::Client;
 use tokio::io::AsyncRead;
 use tokio::sync::OnceCell;
-use tracing::{debug, info, trace};
+use tracing::{debug, error, info, trace, warn};
+
+/// Bound the initial TCP+TLS connect so a stalled cold connection to a Google
+/// host fails fast instead of hanging indefinitely.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Bound the gap between successive reads (resets on progress), so a fully
+/// stalled transfer aborts without killing a slow-but-progressing download.
+const READ_TIMEOUT: Duration = Duration::from_secs(60);
+/// Total per-request timeout for the small, latency-sensitive structural reads
+/// (metadata + bounded `read_range`: magic bytes, ZIP EOCD/central directory).
+///
+/// `read_timeout` only bounds *body* reads; it does NOT bound the wait for the
+/// server's first response. A cold range fetch can stall server-side with the
+/// connection alive and no response sent — which neither `connect_timeout`
+/// (connection reused) nor `read_timeout` catches. A total timeout does.
+/// Deliberately NOT applied to `read_stream`, whose extraction transfers
+/// legitimately run far longer than this.
+const STRUCTURAL_TIMEOUT: Duration = Duration::from_secs(60);
 
 use crate::auth::GDriveAuth;
 use crate::error::GDriveError;
@@ -36,6 +55,8 @@ impl GoogleDriveReadAt {
     fn build(file_id: String, auth: GDriveAuth, base_url: &str) -> Self {
         let client = Client::builder()
             .user_agent("pluq")
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(READ_TIMEOUT)
             .build()
             .expect("failed to create HTTP client");
         Self {
@@ -165,13 +186,11 @@ impl GoogleDriveReadAt {
             None
         };
 
-        let req = self.apply_auth(self.client.get(&url)).await;
-        let resp = req.send().await.map_err(|e| {
-            transport_error(GDriveError::Api {
-                status: 0,
-                detail: format!("metadata request failed: {e}"),
-            })
-        })?;
+        let req = self
+            .apply_auth(self.client.get(&url))
+            .await
+            .timeout(STRUCTURAL_TIMEOUT);
+        let resp = send_with_retry(req, "metadata request").await?;
 
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
@@ -183,14 +202,10 @@ impl GoogleDriveReadAt {
                     .client
                     .get(&url2)
                     .bearer_auth(&new_access)
+                    .timeout(STRUCTURAL_TIMEOUT)
                     .send()
                     .await
-                    .map_err(|e| {
-                        transport_error(GDriveError::Api {
-                            status: 0,
-                            detail: format!("metadata retry failed: {e}"),
-                        })
-                    })?;
+                    .map_err(|e| transport_error(map_send_error(&e, "metadata retry")))?;
                 return self.parse_metadata_response(resp2).await;
             }
             // ApiKey path: 401 means invalid key, no retry.
@@ -246,10 +261,14 @@ impl GoogleDriveReadAt {
 
     // ── Content requests ────────────────────────────────────────────────────
 
+    /// `request_timeout` bounds the whole request (incl. waiting for the first
+    /// response). Pass `Some` for bounded `read_range` fetches; pass `None` for
+    /// `read_stream`, whose transfer legitimately outlasts any total timeout.
     async fn send_content_request(
         &self,
         offset: u64,
         len: u64,
+        request_timeout: Option<Duration>,
     ) -> Result<reqwest::Response, ReadError> {
         trace!(offset, len, "requesting Google Drive file content range");
         let range_end = offset + len - 1;
@@ -266,19 +285,24 @@ impl GoogleDriveReadAt {
             None
         };
 
-        let req = self
+        let mut req = self
             .apply_auth(self.client.get(&url))
             .await
             .header("Range", format!("bytes={offset}-{range_end}"));
+        if let Some(t) = request_timeout {
+            req = req.timeout(t);
+        }
 
-        let resp = req.send().await.map_err(|e| {
-            transport_error(GDriveError::Api {
-                status: 0,
-                detail: format!("content request failed: {e}"),
-            })
-        })?;
+        let resp = send_with_retry(req, "content request").await?;
 
         let status = resp.status();
+        debug!(
+            status = status.as_u16(),
+            headers = %diag_headers(resp.headers()),
+            offset,
+            len,
+            "Google Drive content response"
+        );
         if status == reqwest::StatusCode::PARTIAL_CONTENT {
             return Ok(resp);
         }
@@ -288,19 +312,18 @@ impl GoogleDriveReadAt {
                 let new_access = self.refresh_oauth(&seen).await?;
                 // Retry once with fresh token.
                 let url2 = self.authed_url(&path);
-                let resp2 = self
+                let mut retry_req = self
                     .client
                     .get(&url2)
                     .bearer_auth(&new_access)
-                    .header("Range", format!("bytes={offset}-{range_end}"))
+                    .header("Range", format!("bytes={offset}-{range_end}"));
+                if let Some(t) = request_timeout {
+                    retry_req = retry_req.timeout(t);
+                }
+                let resp2 = retry_req
                     .send()
                     .await
-                    .map_err(|e| {
-                        transport_error(GDriveError::Api {
-                            status: 0,
-                            detail: format!("content retry failed: {e}"),
-                        })
-                    })?;
+                    .map_err(|e| transport_error(map_send_error(&e, "content retry")))?;
                 return self.check_content_response(resp2, offset, len).await;
             }
             // ApiKey path: surface 401 error directly.
@@ -331,11 +354,122 @@ impl GoogleDriveReadAt {
             let size = self.ensure_metadata().await.map(|m| m.size).unwrap_or(0);
             return Err(ReadError::OutOfBounds { offset, len, size });
         }
+        // A 200 to a Range request means the server ignored Range and is sending the
+        // FULL body. Log the headers (full content-length / missing content-range) and
+        // bail without reading it. Architecture's `RangeNotSupported` condition.
+        if status == reqwest::StatusCode::OK {
+            error!(
+                status = 200,
+                headers = %diag_headers(resp.headers()),
+                offset,
+                len,
+                "Google Drive returned 200 to a Range request — Range not honored (full body not read)"
+            );
+            return Err(transport_error(GDriveError::Api {
+                status: 200,
+                detail: "server returned 200 OK to a Range request (Range not honored)".into(),
+            }));
+        }
+        let body = read_body_snippet(resp).await;
+        error!(
+            status = status.as_u16(),
+            body = %body,
+            "Google Drive content API error (unexpected status)"
+        );
         Err(transport_error(GDriveError::Api {
             status: status.as_u16(),
-            detail: format!("unexpected status {status} for content request"),
+            detail: format!("unexpected status {status} for content request: {body}"),
         }))
     }
+}
+
+/// True if a send error is a transient connect/timeout worth one retry.
+fn is_transient(e: &reqwest::Error) -> bool {
+    e.is_timeout() || e.is_connect()
+}
+
+/// Map a reqwest send error to a `GDriveError`, flagging transient connect/read
+/// timeouts as [`GDriveError::Timeout`] so upper layers show a retry hint instead
+/// of a misleading "credentials invalid" message (the old `Api { status: 0 }` path).
+fn map_send_error(e: &reqwest::Error, ctx: &str) -> GDriveError {
+    if is_transient(e) {
+        GDriveError::Timeout
+    } else {
+        GDriveError::Api {
+            status: 0,
+            detail: format!("{ctx}: {e}"),
+        }
+    }
+}
+
+/// Send `req`, retrying once on a transient connect/timeout failure.
+///
+/// The first connection to a Google host (a separate DNS+TCP+TLS handshake) can
+/// stall on a cold network; the client's `connect_timeout` bounds that stall, and
+/// this retries the send once so a transient cold-connect self-heals instead of
+/// surfacing an error. The builder is cloned before the first send (the bodies here
+/// are replayable); a non-cloneable body simply skips the retry.
+async fn send_with_retry(
+    req: reqwest::RequestBuilder,
+    ctx: &'static str,
+) -> Result<reqwest::Response, ReadError> {
+    let retry = req.try_clone();
+    match req.send().await {
+        Ok(resp) => Ok(resp),
+        Err(first) if is_transient(&first) && retry.is_some() => {
+            warn!(error = %first, ctx, "Google Drive transient transport failure — retrying once");
+            retry
+                .expect("retry builder present (just checked is_some)")
+                .send()
+                .await
+                .map_err(|e| {
+                    error!(error = %e, ctx, "Google Drive request failed after retry");
+                    transport_error(map_send_error(&e, ctx))
+                })
+        }
+        Err(e) => {
+            error!(error = %e, ctx, "Google Drive request failed");
+            Err(transport_error(map_send_error(&e, ctx)))
+        }
+    }
+}
+
+/// Render the response headers most useful for diagnosing range/transport issues.
+/// Allowlist only — never dumps `authorization` or other sensitive headers.
+fn diag_headers(headers: &reqwest::header::HeaderMap) -> String {
+    const KEYS: &[&str] = &[
+        "content-range",
+        "content-length",
+        "accept-ranges",
+        "content-type",
+        "retry-after",
+        "location",
+        "x-goog-generation",
+    ];
+    KEYS.iter()
+        .filter_map(|k| {
+            headers
+                .get(*k)
+                .map(|v| format!("{k}={}", v.to_str().unwrap_or("<binary>")))
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Read up to 8 KiB of a response body for diagnostics, discarding the rest.
+/// Bounded so a stray full-file `200` response never pulls gigabytes through the
+/// logging/error path.
+async fn read_body_snippet(mut resp: reqwest::Response) -> String {
+    const MAX: usize = 8 * 1024;
+    let mut buf: Vec<u8> = Vec::new();
+    while let Ok(Some(chunk)) = resp.chunk().await {
+        buf.extend_from_slice(&chunk);
+        if buf.len() >= MAX {
+            break;
+        }
+    }
+    buf.truncate(MAX);
+    String::from_utf8_lossy(&buf).into_owned()
 }
 
 /// Wrap a `GDriveError` in `ReadError::Transport` for tunneling through the layer stack.
@@ -390,7 +524,11 @@ impl ReadAt for GoogleDriveReadAt {
         if len == 0 {
             return Ok(Bytes::new());
         }
-        let resp = self.send_content_request(offset, len).await?;
+        // Bounded structural/random-access read — cap the whole request so a stalled
+        // cold range fetch fails fast and retries instead of hanging forever.
+        let resp = self
+            .send_content_request(offset, len, Some(STRUCTURAL_TIMEOUT))
+            .await?;
         resp.bytes().await.map_err(|e| {
             transport_error(GDriveError::Api {
                 status: 0,
@@ -407,7 +545,9 @@ impl ReadAt for GoogleDriveReadAt {
         if len == 0 {
             return Ok(Box::new(tokio::io::empty()));
         }
-        let resp = self.send_content_request(offset, len).await?;
+        // No total timeout: a large extraction stream legitimately outlasts any
+        // fixed deadline. The client's connect/read timeouts still bound stalls.
+        let resp = self.send_content_request(offset, len, None).await?;
         let stream = resp.bytes_stream().map_err(|e| {
             std::io::Error::other(transport_error(GDriveError::Api {
                 status: 0,

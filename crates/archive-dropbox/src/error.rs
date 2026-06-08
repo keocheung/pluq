@@ -28,6 +28,14 @@ pub enum DropboxError {
     #[error("Dropbox: OAuth token refresh failed — {reason}")]
     TokenRefreshFailed { reason: String },
 
+    #[error("Dropbox: network connection timed out — check your connection and retry")]
+    Timeout,
+
+    #[error(
+        "Dropbox: server ignored the byte-range request after {attempts} tries (load-balanced backend) — please retry"
+    )]
+    RangeNotHonored { attempts: u32 },
+
     #[error("Dropbox API error: {detail}")]
     Api { status: u16, detail: String },
 }

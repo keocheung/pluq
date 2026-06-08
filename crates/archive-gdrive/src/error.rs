@@ -26,4 +26,7 @@ pub enum GDriveError {
 
     #[error("Google Drive: OAuth token refresh failed — {reason}")]
     TokenRefreshFailed { reason: String },
+
+    #[error("Google Drive: network connection timed out — check your connection and retry")]
+    Timeout,
 }
