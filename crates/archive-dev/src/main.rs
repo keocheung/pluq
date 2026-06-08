@@ -1,19 +1,24 @@
 use reqwest::blocking::Client;
 use serde_json::json;
+use std::collections::BTreeSet;
 use std::io::{self, Read, Write};
+use std::net::ToSocketAddrs;
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 fn main() {
     println!("=== 🎯 pluq: Dev Scratchpad ===\n");
     println!("1. Google Drive Test Launcher (TUI)");
     println!("2. Dropbox Test Launcher (TUI)");
     println!("3. Dropbox API PoC (Manual)");
+    println!("4. Dropbox Range Probe (200/206 flip — full header dump)");
 
-    let choice = prompt("Select an option (1/2/3): ");
+    let choice = prompt("Select an option (1/2/3/4): ");
     match choice.trim() {
         "1" => run_gdrive_launcher(),
         "2" => run_dropbox_launcher(),
         "3" => run_dropbox_poc(),
+        "4" => run_dropbox_range_probe(),
         _ => println!("❌ Invalid choice"),
     }
 }
@@ -371,6 +376,263 @@ fn run_dropbox_poc() {
         let mut err_body = String::new();
         dl_resp.read_to_string(&mut err_body).ok();
         println!("❌ Download Error: {}", err_body);
+    }
+}
+
+// ── Dropbox Range Warm-up Probe ───────────────────────────────────────────────
+// Dirty empirical test: does a COLD tail-Range request to a Dropbox shared link
+// return 200 (Range ignored) and later flip to 206 (Range honored)? Hammers the
+// exact production request (get_shared_link_file + Range over the ZIP-EOCD tail)
+// and prints status + content-range + elapsed. NEVER reads the body, so a 200
+// full-file response does not download gigabytes. NOT production code.
+
+struct ProbeResult {
+    status: u16,
+    http_version: String,
+    took: f64,
+    /// Every response header, sorted (never the body).
+    headers: Vec<(String, String)>,
+}
+
+/// Look up a header value in a captured header list.
+fn hval<'a>(headers: &'a [(String, String)], key: &str) -> &'a str {
+    headers
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.as_str())
+        .unwrap_or("-")
+}
+
+fn run_dropbox_range_probe() {
+    println!("=== 🎯 pluq: Dropbox Range Probe (full header dump) ===\n");
+    println!("Hammers the EXACT production tail-Range request and dumps every response");
+    println!("header, so we can see WHY the same request flip-flops 200/206. Tallies the");
+    println!("split + diffs the header keys. The response body is never downloaded.\n");
+
+    // 1. Pick URL (same dev_links.json the other launchers use).
+    let dev_links = std::fs::read_to_string(".workspace/dev_links.json")
+        .or_else(|_| std::fs::read_to_string("dev_links.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+    let personal = dev_links
+        .as_ref()
+        .and_then(|v| v.get("dropbox_zip"))
+        .and_then(|v| v.as_str());
+    let public = dev_links
+        .as_ref()
+        .and_then(|v| v.get("dropbox_public_zip"))
+        .and_then(|v| v.as_str());
+    if let Some(u) = personal {
+        println!("1. Personal: {u}");
+    }
+    if let Some(u) = public {
+        println!("2. Public:   {u}");
+    }
+    println!("3. Custom URL");
+    let url = match prompt("Select a link option (1/2/3): ").trim() {
+        "1" => personal.map(String::from).unwrap_or_default(),
+        "2" => public.map(String::from).unwrap_or_default(),
+        _ => prompt("🔗 Enter Dropbox Shared Link: ").trim().to_string(),
+    };
+    if url.is_empty() {
+        println!("❌ URL required.");
+        return;
+    }
+
+    // 2. Credentials (env → .env).
+    let (key, secret) = match dropbox_creds() {
+        Some(c) => c,
+        None => {
+            println!("❌ Need PLUQ_DROPBOX_APP_KEY + PLUQ_DROPBOX_APP_SECRET (env or .env).");
+            return;
+        }
+    };
+
+    let attempts: u32 = prompt("Attempts (default 16): ")
+        .trim()
+        .parse()
+        .unwrap_or(16);
+    let interval: u64 = prompt("Interval seconds (default 2): ")
+        .trim()
+        .parse()
+        .unwrap_or(2);
+
+    let client = Client::builder()
+        .user_agent("pluq-dev-probe")
+        .timeout(Duration::from_secs(45))
+        .build()
+        .expect("client build");
+
+    // 3. Metadata → size (so we know the tail offset). This DOES read the small JSON body.
+    let meta: serde_json::Value = client
+        .post("https://api.dropboxapi.com/2/sharing/get_shared_link_metadata")
+        .basic_auth(&key, Some(&secret))
+        .json(&json!({ "url": url }))
+        .send()
+        .expect("metadata send")
+        .json()
+        .expect("metadata json");
+    let size = meta.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+    if size == 0 {
+        println!("❌ metadata error / not a file: {meta}");
+        return;
+    }
+    let name = meta.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+    let tag = meta.get(".tag").and_then(|v| v.as_str()).unwrap_or("?");
+    println!("\n✅ {name}  size={size}  .tag={tag}");
+
+    const LEN: u64 = 65557; // identical to the ZIP-EOCD tail read in production
+    let tail_off = size.saturating_sub(LEN);
+
+    // One range probe of the EXACT production request. Reads status + headers only.
+    let probe = |off: u64| -> ProbeResult {
+        let range_end = off + LEN - 1;
+        let t0 = Instant::now();
+        let res = client
+            .post("https://content.dropboxapi.com/2/sharing/get_shared_link_file")
+            .basic_auth(&key, Some(&secret))
+            .header("Dropbox-API-Arg", json!({ "url": url }).to_string())
+            .header("Range", format!("bytes={off}-{range_end}"))
+            .send();
+        let took = t0.elapsed().as_secs_f64();
+        match res {
+            Ok(r) => {
+                let mut headers: Vec<(String, String)> = r
+                    .headers()
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            k.as_str().to_string(),
+                            v.to_str().unwrap_or("<binary>").to_string(),
+                        )
+                    })
+                    .collect();
+                headers.sort();
+                let out = ProbeResult {
+                    status: r.status().as_u16(),
+                    http_version: format!("{:?}", r.version()),
+                    took,
+                    headers,
+                };
+                drop(r); // never read the body — a 200 here is the whole file
+                out
+            }
+            Err(e) => ProbeResult {
+                status: 0,
+                http_version: format!("SEND-ERR: {e}"),
+                took,
+                headers: Vec::new(),
+            },
+        }
+    };
+
+    // How many edge IPs does the content host resolve to? (multiple = load-balanced)
+    match ("content.dropboxapi.com", 443).to_socket_addrs() {
+        Ok(addrs) => {
+            let ips: BTreeSet<String> = addrs.map(|a| a.ip().to_string()).collect();
+            println!(
+                "\ncontent.dropboxapi.com → {} edge IP(s): {ips:?}",
+                ips.len()
+            );
+        }
+        Err(e) => println!("\n(could not resolve content.dropboxapi.com: {e})"),
+    }
+
+    // Baseline: the HEAD range, full headers.
+    let h = probe(0);
+    println!(
+        "\n── HEAD off=0  status={} {} took={:.2}s ──",
+        h.status, h.http_version, h.took
+    );
+    for (k, v) in &h.headers {
+        println!("        {k}: {v}");
+    }
+
+    println!("\nHammering TAIL (off={tail_off}) {attempts}× every {interval}s — FULL HEADERS:\n");
+
+    let start = Instant::now();
+    let (mut n200, mut n206, mut nother) = (0u32, 0u32, 0u32);
+    let mut keys_200: BTreeSet<String> = BTreeSet::new();
+    let mut keys_206: BTreeSet<String> = BTreeSet::new();
+    for i in 1..=attempts {
+        let p = probe(tail_off);
+        let t = start.elapsed().as_secs_f64();
+        let marker = match p.status {
+            206 => "✅206",
+            200 => "🟡200",
+            _ => "❓",
+        };
+        println!(
+            "── [t+{t:>6.1}s] #{i:<2} {marker} status={} {} took={:.2}s  content-range={}  rid={} ──",
+            p.status,
+            p.http_version,
+            p.took,
+            hval(&p.headers, "content-range"),
+            hval(&p.headers, "x-dropbox-request-id")
+        );
+        for (k, v) in &p.headers {
+            println!("        {k}: {v}");
+        }
+        println!();
+        match p.status {
+            206 => {
+                n206 += 1;
+                keys_206.extend(p.headers.iter().map(|(k, _)| k.clone()));
+            }
+            200 => {
+                n200 += 1;
+                keys_200.extend(p.headers.iter().map(|(k, _)| k.clone()));
+            }
+            _ => nother += 1,
+        }
+        if i < attempts {
+            std::thread::sleep(Duration::from_secs(interval));
+        }
+    }
+
+    println!("=== TALLY ===");
+    println!("206 (Range honored): {n206}");
+    println!("200 (Range ignored): {n200}");
+    if nother > 0 {
+        println!("other / send-error : {nother}");
+    }
+    let total = n200 + n206 + nother;
+    if total > 0 {
+        println!(
+            "→ {:.0}% of identical requests ignored Range (200).",
+            100.0 * f64::from(n200) / f64::from(total)
+        );
+    }
+
+    let only_206: Vec<String> = keys_206.difference(&keys_200).cloned().collect();
+    let only_200: Vec<String> = keys_200.difference(&keys_206).cloned().collect();
+    println!("\n=== HEADER-KEY DIFF (the tell) ===");
+    println!("present ONLY on 206 responses: {only_206:?}");
+    println!("present ONLY on 200 responses: {only_200:?}");
+    println!(
+        "(eyeball values above — server / via / x-dropbox-* / age / x-cache / etag —\n to see whether 200 vs 206 splits by backend, cache state, or HTTP version)"
+    );
+}
+
+/// Dropbox app creds from env, falling back to `.env`. Dev-only.
+fn dropbox_creds() -> Option<(String, String)> {
+    let mut key = std::env::var("PLUQ_DROPBOX_APP_KEY").ok();
+    let mut secret = std::env::var("PLUQ_DROPBOX_APP_SECRET").ok();
+    if (key.is_none() || secret.is_none())
+        && let Ok(content) = std::fs::read_to_string(".env")
+    {
+        for line in content.lines() {
+            if let Some(v) = line.strip_prefix("PLUQ_DROPBOX_APP_KEY=") {
+                key = Some(v.trim().trim_matches('"').to_string());
+            }
+            if let Some(v) = line.strip_prefix("PLUQ_DROPBOX_APP_SECRET=") {
+                secret = Some(v.trim().trim_matches('"').to_string());
+            }
+        }
+    }
+    match (key, secret) {
+        (Some(k), Some(s)) if !k.is_empty() && !s.is_empty() => Some((k, s)),
+        _ => None,
     }
 }
 
