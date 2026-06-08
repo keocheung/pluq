@@ -3,6 +3,7 @@ use archive_core::ProgressReporter;
 use archive_core::{ArchiveFingerprint, ReadAt};
 use archive_source::{ResolvedSource, SourceConfig};
 use std::sync::{Arc, Mutex};
+use tracing::{debug, info};
 
 pub(crate) fn from_cache(
     cache: crate::ArchiveCache,
@@ -111,16 +112,57 @@ pub async fn open(
         .map_err(|e| archive::translate_core_error(archive_core::CoreError::from(e)))?;
 
     let fingerprint = resolved.fingerprint();
+    debug!(
+        source,
+        size = fingerprint.source_size,
+        etag = ?fingerprint.etag,
+        last_modified = ?fingerprint.last_modified,
+        "resolved source fingerprint"
+    );
 
+    // Disk cache (Layer 3 state): a valid hit returns the stored entry list with
+    // NO archive parse — i.e. no central-directory/EOCD reads from the source.
+    // `--clean-cache` wipes this dir, forcing the full parse below. Logging the
+    // hit/miss/invalid decision here makes that difference visible in the log.
     if let Some(cache_path) = crate::cache_path_for(source) {
-        if let Ok(cache) = crate::ArchiveCache::load(&cache_path) {
-            if cache.is_valid(&fingerprint) {
-                let archive = from_cache(cache, resolved, archive_config);
-                return Ok(Opened::Ready(archive));
+        match crate::ArchiveCache::load(&cache_path) {
+            Ok(cache) => match cache.invalidity_reason(&fingerprint) {
+                None => {
+                    info!(
+                        source,
+                        cache_path = %cache_path.display(),
+                        entries = cache.entries.len(),
+                        "archive cache HIT — using stored entries, skipping source parse"
+                    );
+                    let archive = from_cache(cache, resolved, archive_config);
+                    return Ok(Opened::Ready(archive));
+                }
+                Some(reason) => {
+                    info!(
+                        source,
+                        cache_path = %cache_path.display(),
+                        reason,
+                        "archive cache INVALID — re-parsing from source (fingerprint mismatch)"
+                    );
+                }
+            },
+            Err(e) => {
+                debug!(
+                    source,
+                    cache_path = %cache_path.display(),
+                    error = %e,
+                    "archive cache MISS — absent/unreadable, parsing from source"
+                );
             }
         }
+    } else {
+        debug!(source, "no cache path for source — parsing from source");
     }
 
+    info!(
+        source,
+        "opening archive via uncached parse (reading central directory from the source)"
+    );
     let opened = archive::Archive::open_reader_uncached(resolved, &archive_config).await?;
 
     match opened {

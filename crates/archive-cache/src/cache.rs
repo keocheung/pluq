@@ -48,27 +48,38 @@ impl ArchiveCache {
     /// Then checks ETag (most authoritative), Last-Modified, mtime, and finally
     /// source size.
     pub fn is_valid(&self, current: &ArchiveFingerprint) -> bool {
+        self.invalidity_reason(current).is_none()
+    }
+
+    /// Returns `Some(reason)` if this cache is **not** valid for `current`, else
+    /// `None`. The reason is a static string for logging/diagnostics — it names
+    /// which fingerprint signal rejected the cache (schema, source, etag,
+    /// last-modified, mtime, or size). Never shown to users.
+    ///
+    /// Same precedence as [`is_valid`]: schema first, then source, then ETag
+    /// (decisive when both present), then Last-Modified, mtime, and size.
+    pub fn invalidity_reason(&self, current: &ArchiveFingerprint) -> Option<&'static str> {
         // Version check first: stale schema → immediate rejection.
         if self.schema_version != SCHEMA_VERSION {
-            return false;
+            return Some("schema version");
         }
         if self.fingerprint.source != current.source {
-            return false;
+            return Some("source string");
         }
         // ETag is the most authoritative signal — if both sides have one, use it.
         if let (Some(cached), Some(live)) = (&self.fingerprint.etag, &current.etag) {
-            return cached == live;
+            return (cached != live).then_some("etag");
         }
         // Fall back through weaker signals.
         if let (Some(cached), Some(live)) =
             (&self.fingerprint.last_modified, &current.last_modified)
         {
-            return cached == live;
+            return (cached != live).then_some("last-modified");
         }
         if let (Some(cached), Some(live)) = (self.fingerprint.mtime, current.mtime) {
-            return cached == live;
+            return (cached != live).then_some("mtime");
         }
-        self.fingerprint.source_size == current.source_size
+        (self.fingerprint.source_size != current.source_size).then_some("source size")
     }
 
     /// Serialize to pretty-printed JSON and write to `path`.

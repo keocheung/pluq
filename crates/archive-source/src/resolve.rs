@@ -44,6 +44,10 @@ pub fn resolve(input: &str, config: &SourceConfig) -> Result<ResolvedSource, Sou
         info!(url = %input, "generic HTTP URL detected");
         let client = reqwest::Client::builder()
             .user_agent("pluq")
+            // Bound a stalled cold connection / mid-transfer stall so a generic HTTP
+            // source fails fast instead of hanging indefinitely (mirrors the cloud readers).
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .read_timeout(std::time::Duration::from_secs(60))
             .build()
             .expect("failed to create HTTP client");
         let reader = CachingReadAt::new(HttpReadAt::new(input, client));
@@ -59,15 +63,23 @@ pub fn resolve(input: &str, config: &SourceConfig) -> Result<ResolvedSource, Sou
 }
 
 pub(crate) fn resolve_gdrive_auth(config: &SourceConfig) -> Result<GDriveAuth, SourceError> {
-    if config
+    let token_in_store = config
         .token_store
         .as_ref()
         .and_then(|s| s.get("gdrive"))
-        .is_some()
-        && archive_gdrive::oauth_client_id().is_none()
-    {
+        .is_some();
+    let oauth_client_id_set = archive_gdrive::oauth_client_id().is_some();
+    let api_key_set = archive_gdrive::api_key().is_some();
+    info!(
+        token_in_store,
+        oauth_client_id_set, // PLUQ_GDRIVE_CLIENT_ID (env or embedded)
+        api_key_set,         // PLUQ_GDRIVE_KEY (env or embedded)
+        "Google Drive credential resolution"
+    );
+
+    if token_in_store && !oauth_client_id_set {
         warn!(
-            "Google Drive: OAuth token found but no client ID configured — falling back to API key. Refresh will not work."
+            "Google Drive: stored OAuth token present but PLUQ_GDRIVE_CLIENT_ID is unset — OAuth unusable (no refresh), falling back to API key"
         );
     }
 
@@ -99,15 +111,26 @@ pub(crate) fn resolve_gdrive_auth(config: &SourceConfig) -> Result<GDriveAuth, S
 }
 
 pub(crate) fn resolve_dropbox_auth(config: &SourceConfig) -> Result<DropboxAuth, SourceError> {
-    if config
+    // Log what credential material is actually visible to this process — presence
+    // only, never values. This is the first place to look when "creds are set" but
+    // the wrong path is taken (e.g. APP_KEY/SECRET present but CLIENT_ID absent).
+    let token_in_store = config
         .token_store
         .as_ref()
         .and_then(|s| s.get("dropbox"))
-        .is_some()
-        && archive_dropbox::oauth_client_id().is_none()
-    {
+        .is_some();
+    let oauth_client_id_set = archive_dropbox::oauth_client_id().is_some();
+    let app_credentials_set = archive_dropbox::app_credentials().is_some();
+    info!(
+        token_in_store,
+        oauth_client_id_set, // PLUQ_DROPBOX_CLIENT_ID (env or embedded)
+        app_credentials_set, // PLUQ_DROPBOX_APP_KEY + PLUQ_DROPBOX_APP_SECRET (env or embedded)
+        "Dropbox credential resolution"
+    );
+
+    if token_in_store && !oauth_client_id_set {
         warn!(
-            "Dropbox: OAuth token found but no client ID configured — falling back to app credentials. Refresh will not work."
+            "Dropbox: stored OAuth token present but PLUQ_DROPBOX_CLIENT_ID is unset — OAuth unusable (no refresh), falling back to app credentials"
         );
     }
 
@@ -116,7 +139,7 @@ pub(crate) fn resolve_dropbox_auth(config: &SourceConfig) -> Result<DropboxAuth,
         && let Some(client_id) = archive_dropbox::oauth_client_id()
     {
         let client_secret = archive_dropbox::oauth_client_secret();
-        info!("Dropbox: using OAuth credentials");
+        info!("Dropbox: using OAuth credentials (token + client ID present)");
         return Ok(DropboxAuth::oauth(
             token,
             Arc::clone(store),
@@ -126,7 +149,7 @@ pub(crate) fn resolve_dropbox_auth(config: &SourceConfig) -> Result<DropboxAuth,
     }
 
     if let Some((key, secret)) = archive_dropbox::app_credentials() {
-        info!("Dropbox: using app credentials (no OAuth token found)");
+        info!("Dropbox: using app credentials (APP_KEY/APP_SECRET)");
         return Ok(DropboxAuth::app_credentials(key, secret));
     }
 
