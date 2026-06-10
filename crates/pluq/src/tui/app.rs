@@ -9,7 +9,7 @@ use crate::glob_match;
 use crate::home::complete::{complete_path, looks_like_url};
 use archive::{
     Archive, ArchiveConfig, ArchiveEntry, ArchiveError, BatchResult, EntryTree, ProgressReporter,
-    ScanInfo,
+    ReadAt, ScanInfo,
 };
 use archive_cache::Opened;
 use archive_source::{ResolvedSource, SourceConfig, resolve};
@@ -48,6 +48,9 @@ pub enum AppMessage {
     /// The real display name for `source` resolved (network for cloud providers).
     /// Reconciles the optimistic provisional name recorded at open time.
     HomeNameResolved { source: String, name: String },
+    /// The archive's total byte size (Content-Length) for `source`, resolved
+    /// async via the reader. Sets the file size shown in Recents and bookmarks.
+    ArchiveSizeResolved { source: String, size: u64 },
 }
 
 /// Shared atomics for high-frequency progress updates.
@@ -396,6 +399,10 @@ pub struct App {
     /// Display name derived from `ResolvedSource::suggested_name()` during Home resolve.
     /// Consumed by `record_recent_on_open` in Step 6.
     pub home_pending_name: Option<String>,
+    /// Resolved archive file size (Content-Length) for the current source, set
+    /// async after open. Drives the file size shown in Recents/bookmarks. `None`
+    /// until it lands (or for a non-Home `pluq <url>` launch, which records no recent).
+    pub archive_file_size: Option<u64>,
 
     // NEW — Bookmark state. Only meaningful while `phase == Home` or an overlay is active.
     pub home_bookmarks: crate::home::bookmarks::BookmarkList,
@@ -483,6 +490,7 @@ impl App {
             home_input_error: None,
             home_pending_provider: None,
             home_pending_name: None,
+            archive_file_size: None,
             home_bookmarks: crate::home::bookmarks::BookmarkList::default(),
             home_bookmarks_selected: 0,
             launched_from_home: false,
@@ -706,7 +714,6 @@ impl App {
                         self.entry_tree = Some(EntryTree::build(&self.entries));
                         self.current_path.clear();
                         self.rebuild_visible_items(None);
-                        self.backfill_recent_size();
                         self.phase = AppPhase::Browsing;
                     }
                     Opened::NeedsScan(pending) => {
@@ -786,7 +793,6 @@ impl App {
                 self.entry_tree = Some(EntryTree::build(&self.entries));
                 self.current_path.clear();
                 self.rebuild_visible_items(None);
-                self.backfill_recent_size();
                 self.phase = AppPhase::Browsing;
             }
             AppMessage::ScanComplete(Err(e)) => {
@@ -814,6 +820,16 @@ impl App {
                     self.home_pending_name = Some(name.clone());
                 }
                 if self.home_recent.update_name(&source, &name) {
+                    self.home_recent.save();
+                }
+            }
+            AppMessage::ArchiveSizeResolved { source, size } => {
+                // Reconcile the archive's real file size into the current view and
+                // any recorded recent entry for this source.
+                if self.source == source {
+                    self.archive_file_size = Some(size);
+                }
+                if size > 0 && self.home_recent.update_size(&source, size) {
                     self.home_recent.save();
                 }
             }
@@ -1066,8 +1082,11 @@ impl App {
             .clone()
             .unwrap_or_else(|| source.clone());
 
-        // Archive size isn't known until the source is scanned; store 0 as a placeholder.
-        let size = 0u64;
+        // Use the resolved file size if it already landed (ArchiveSizeResolved can
+        // arrive before open completes, since size() is a quick HEAD); otherwise 0
+        // as a placeholder — the later ArchiveSizeResolved fills it in. Must NOT
+        // hardcode 0 here, or it clobbers an already-resolved size back to zero.
+        let size = self.archive_file_size.unwrap_or(0);
 
         self.home_recent.push(crate::home::recent::RecentEntry {
             name,
@@ -1084,17 +1103,6 @@ impl App {
     /// archive is listed yet.
     fn current_archive_size(&self) -> u64 {
         self.entries.iter().map(|e| e.uncompressed_size).sum()
-    }
-
-    /// Backfill the Recent entry's size once the archive is listed. Size is
-    /// recorded as 0 at open time (the contents aren't known until the central
-    /// directory is read or the scan finishes), so fill it in here. No-op when
-    /// nothing was recorded (e.g. a direct `pluq <url>` launch, not from Home).
-    fn backfill_recent_size(&mut self) {
-        let size = self.current_archive_size();
-        if size > 0 && self.home_recent.update_size(&self.source, size) {
-            self.home_recent.save();
-        }
     }
 
     /// Best human-readable name for the current source. Prefers the resolved
@@ -1131,15 +1139,24 @@ impl App {
                 self.phase = AppPhase::Opening;
                 self.home_pending_provider = Some(provider);
                 self.home_pending_name = Some(provisional);
+                self.archive_file_size = None;
 
-                // Resolve the real display name (a small network fetch for cloud
-                // providers like Google Drive) off the critical path.
-                let tx_name = tx.clone();
-                let name_source = source.clone();
+                // Resolve display metadata (file size + real name) off the critical
+                // path. Both are small network fetches for cloud providers.
+                let tx_meta = tx.clone();
+                let meta_source = source.clone();
                 tokio::spawn(async move {
+                    // File size (Content-Length) for the Recents/bookmark display.
+                    if let Ok(size) = reader.size().await {
+                        let _ = tx_meta.send(AppMessage::ArchiveSizeResolved {
+                            source: meta_source.clone(),
+                            size,
+                        });
+                    }
+                    // Real display name (network for cloud providers like Drive).
                     if let Some(name) = reader.resolved_name().await {
-                        let _ = tx_name.send(AppMessage::HomeNameResolved {
-                            source: name_source,
+                        let _ = tx_meta.send(AppMessage::HomeNameResolved {
+                            source: meta_source,
                             name,
                         });
                     }
@@ -1172,6 +1189,7 @@ impl App {
         self.phase = AppPhase::Home;
         self.source.clear();
         self.archive = None;
+        self.archive_file_size = None;
         self.entries.clear();
         self.entry_tree = None;
         self.visible_items.clear();
@@ -2108,8 +2126,11 @@ impl App {
                         .home_pending_name
                         .clone()
                         .unwrap_or_else(|| self.source.clone());
-                    // Archive is listed here, so the real size is known.
-                    let size = self.current_archive_size();
+                    // Prefer the resolved archive file size (Content-Length);
+                    // fall back to the uncompressed total if it hasn't landed yet.
+                    let size = self
+                        .archive_file_size
+                        .unwrap_or_else(|| self.current_archive_size());
                     self.bookmark_overlay = Some(BookmarkOverlay {
                         mode: OverlayMode::Save {
                             source: self.source.clone(),
