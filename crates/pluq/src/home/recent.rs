@@ -98,6 +98,33 @@ impl RecentList {
         }
     }
 
+    /// Update the display name of the entry matching `source` (dedupe key).
+    /// Returns `true` only if an entry was found and its name actually changed,
+    /// so the caller can avoid a redundant save.
+    pub fn update_name(&mut self, source: &str, name: &str) -> bool {
+        if let Some(e) = self.entries.iter_mut().find(|e| e.source == source)
+            && e.name != name
+        {
+            e.name = name.to_string();
+            return true;
+        }
+        false
+    }
+
+    /// Backfill the size of the entry matching `source` (dedupe key). Size is
+    /// recorded as 0 at open time — before the archive is listed — then filled
+    /// in once the contents are known. Returns `true` only if an entry was found
+    /// and its size actually changed, so the caller can avoid a redundant save.
+    pub fn update_size(&mut self, source: &str, size: u64) -> bool {
+        if let Some(e) = self.entries.iter_mut().find(|e| e.source == source)
+            && e.size != size
+        {
+            e.size = size;
+            return true;
+        }
+        false
+    }
+
     pub fn entries(&self) -> &[RecentEntry] {
         &self.entries
     }
@@ -203,6 +230,50 @@ mod tests {
         assert_eq!(list.entries().len(), MAX_RECENT);
         assert_eq!(list.entries()[0].source, format!("s{}", MAX_RECENT + 4));
         assert_eq!(list.entries()[MAX_RECENT - 1].source, "s5");
+    }
+
+    #[test]
+    fn test_update_name() {
+        let mut list = RecentList::default();
+        list.push(make_entry("file-id-garbage", "gdrive://abc"));
+        list.push(make_entry("other", "s_other"));
+
+        // Real name lands → entry for that source is renamed, returns true.
+        assert!(list.update_name("gdrive://abc", "Holiday Photos.zip"));
+        let e = list
+            .entries()
+            .iter()
+            .find(|e| e.source == "gdrive://abc")
+            .unwrap();
+        assert_eq!(e.name, "Holiday Photos.zip");
+
+        // Same name again → no change, returns false (caller skips save).
+        assert!(!list.update_name("gdrive://abc", "Holiday Photos.zip"));
+
+        // Unknown source → no-op, returns false.
+        assert!(!list.update_name("s_missing", "whatever"));
+    }
+
+    #[test]
+    fn test_update_size() {
+        let mut list = RecentList::default();
+        list.push(make_entry("a", "gdrive://abc")); // size 100 from make_entry
+        list.push(make_entry("other", "s_other"));
+
+        // Real size lands → entry for that source is updated, returns true.
+        assert!(list.update_size("gdrive://abc", 4242));
+        let e = list
+            .entries()
+            .iter()
+            .find(|e| e.source == "gdrive://abc")
+            .unwrap();
+        assert_eq!(e.size, 4242);
+
+        // Same size again → no change, returns false (caller skips save).
+        assert!(!list.update_size("gdrive://abc", 4242));
+
+        // Unknown source → no-op, returns false.
+        assert!(!list.update_size("s_missing", 999));
     }
 
     #[test]

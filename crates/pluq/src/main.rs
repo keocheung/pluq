@@ -367,12 +367,14 @@ async fn run_subcommand(
                 archive.entries_clean()
             };
 
-            let output_dir = output.unwrap_or_else(|| {
-                reader
-                    .suggested_name()
+            let output_dir = match output {
+                Some(dir) => dir,
+                None => reader
+                    .resolved_name()
+                    .await
                     .map(PathBuf::from)
-                    .unwrap_or_else(|| PathBuf::from("."))
-            });
+                    .unwrap_or_else(|| PathBuf::from(".")),
+            };
 
             tokio::fs::create_dir_all(&output_dir).await?;
 

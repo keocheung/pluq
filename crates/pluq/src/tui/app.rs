@@ -45,6 +45,9 @@ pub enum AppMessage {
         provider: crate::auth_cmd::AuthProvider,
         result: Result<Vec<archive_auth::PickedFile>, String>,
     },
+    /// The real display name for `source` resolved (network for cloud providers).
+    /// Reconciles the optimistic provisional name recorded at open time.
+    HomeNameResolved { source: String, name: String },
 }
 
 /// Shared atomics for high-frequency progress updates.
@@ -228,6 +231,22 @@ pub enum PostAuth {
     OpenSource,
     /// Proceed into the cloud file picker (the add-from-cloud flow).
     Pick,
+}
+
+/// Minimum time a progress UI (scan / extract) stays on screen. Work that
+/// finishes faster is held at 100% for the remainder, so an "instant" op still
+/// registers as something that happened instead of flickering past. 400ms is the
+/// Doherty threshold — long enough to perceive, short enough to not feel like a
+/// wait on repeat-heavy extracts. One const — tune here.
+const MIN_PROGRESS_VISIBLE: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// Hold until the operation started at `started` has been on screen for at least
+/// [`MIN_PROGRESS_VISIBLE`]. No-op when the work already took longer. Call only on
+/// the success path — cancels and errors should surface immediately.
+async fn hold_progress_floor(started: Instant) {
+    if let Some(remaining) = MIN_PROGRESS_VISIBLE.checked_sub(started.elapsed()) {
+        tokio::time::sleep(remaining).await;
+    }
 }
 
 /// Current phase of the application.
@@ -698,6 +717,7 @@ impl App {
                         self.entry_tree = Some(EntryTree::build(&self.entries));
                         self.current_path.clear();
                         self.rebuild_visible_items(None);
+                        self.backfill_recent_size();
                         self.phase = AppPhase::Browsing;
                     }
                     Opened::NeedsScan(pending) => {
@@ -725,9 +745,13 @@ impl App {
                         self.cancel_flag.store(false, Ordering::SeqCst);
                         let cancel = self.cancel_flag.clone();
                         tokio::spawn(async move {
+                            let started = Instant::now();
                             let progress =
                                 Arc::new(Mutex::new(TuiProgressReporter::new(shared, cancel)));
                             let result = pending.scan(progress).await;
+                            if result.is_ok() {
+                                hold_progress_floor(started).await;
+                            }
                             let _ = tx_scan.send(AppMessage::ScanComplete(result));
                         });
                     }
@@ -772,6 +796,7 @@ impl App {
                 self.entry_tree = Some(EntryTree::build(&self.entries));
                 self.current_path.clear();
                 self.rebuild_visible_items(None);
+                self.backfill_recent_size();
                 self.phase = AppPhase::Browsing;
             }
             AppMessage::ScanComplete(Err(e)) => {
@@ -790,6 +815,17 @@ impl App {
                 }
                 error!(error = %e, "scan failed → Error");
                 self.phase = AppPhase::Error(e.to_string());
+            }
+            AppMessage::HomeNameResolved { source, name } => {
+                // Reconcile the optimistic provisional name with the resolved one.
+                // Update both the pending name (if this open is still in flight)
+                // and any already-recorded recent entry for this source.
+                if self.source == source {
+                    self.home_pending_name = Some(name.clone());
+                }
+                if self.home_recent.update_name(&source, &name) {
+                    self.home_recent.save();
+                }
             }
             AppMessage::ExtractionComplete(Ok(bytes)) => {
                 let name = if let AppPhase::Extracting { ref entry_name, .. } = self.phase {
@@ -1033,9 +1069,11 @@ impl App {
             .home_pending_provider
             .take()
             .unwrap_or(crate::home::provider::Provider::Local);
+        // Clone, don't take: the resolved display name must survive into Browsing
+        // so the breadcrumb (and a later `b` bookmark) can show it, not the raw URL.
         let name = self
             .home_pending_name
-            .take()
+            .clone()
             .unwrap_or_else(|| source.clone());
 
         // Archive size isn't known until the source is scanned; store 0 as a placeholder.
@@ -1051,6 +1089,37 @@ impl App {
         self.home_recent.save();
     }
 
+    /// Total uncompressed size of the currently open archive (sum of entry
+    /// sizes — the same notion of "size" the browse footer shows). 0 when no
+    /// archive is listed yet.
+    fn current_archive_size(&self) -> u64 {
+        self.entries.iter().map(|e| e.uncompressed_size).sum()
+    }
+
+    /// Backfill the Recent entry's size once the archive is listed. Size is
+    /// recorded as 0 at open time (the contents aren't known until the central
+    /// directory is read or the scan finishes), so fill it in here. No-op when
+    /// nothing was recorded (e.g. a direct `pluq <url>` launch, not from Home).
+    fn backfill_recent_size(&mut self) {
+        let size = self.current_archive_size();
+        if size > 0 && self.home_recent.update_size(&self.source, size) {
+            self.home_recent.save();
+        }
+    }
+
+    /// Best human-readable name for the current source. Prefers the resolved
+    /// name (`home_pending_name`, which the async resolver upgrades from the
+    /// URL-derived provisional to the real cloud name), then the decoded
+    /// basename, then the raw source. One place, so the breadcrumb, bookmarks,
+    /// and recents all show the same "good" name for every provider.
+    pub fn display_name(&self) -> String {
+        self.home_pending_name
+            .clone()
+            .filter(|s| !s.is_empty())
+            .or_else(|| archive_source::suggest_name_from_str(&self.source))
+            .unwrap_or_else(|| self.source.clone())
+    }
+
     /// Common logic for opening an archive from Home (Pluq Input or Recent).
     fn submit_home_source(&mut self, source: String, tx: &mpsc::UnboundedSender<AppMessage>) {
         let mut config = SourceConfig::new();
@@ -1061,13 +1130,30 @@ impl App {
         match resolve(&source, &config) {
             Ok(reader) => {
                 let provider = crate::home::provider::Provider::from_resolved(&reader);
-                let name = reader.suggested_name().unwrap_or_else(|| source.clone());
+                // Optimistic provisional name (sync, URL/path-derived). Final for
+                // local/http/dropbox; for cloud providers the real name lands via
+                // the async task below and reconciles through HomeNameResolved.
+                let provisional = archive_source::suggest_name_from_str(&source)
+                    .unwrap_or_else(|| source.clone());
 
                 self.home_input_error = None;
                 self.source = source.clone();
                 self.phase = AppPhase::Opening;
                 self.home_pending_provider = Some(provider);
-                self.home_pending_name = Some(name);
+                self.home_pending_name = Some(provisional);
+
+                // Resolve the real display name (a small network fetch for cloud
+                // providers like Google Drive) off the critical path.
+                let tx_name = tx.clone();
+                let name_source = source.clone();
+                tokio::spawn(async move {
+                    if let Some(name) = reader.resolved_name().await {
+                        let _ = tx_name.send(AppMessage::HomeNameResolved {
+                            source: name_source,
+                            name,
+                        });
+                    }
+                });
 
                 let tx_open = tx.clone();
                 let source_for_task = source.clone();
@@ -1117,7 +1203,10 @@ impl App {
         self.home_pending_provider = None;
         self.home_pending_name = None;
         self.home_focus = HomeFocus::PluqInput;
-        // Intentionally keep `launched_from_home = true`.
+        // From here on the session is home-rooted: a URL-launched session that
+        // Esc'd back to Home behaves like one that started at Home (recents
+        // recording, auth routing, Esc fallback).
+        self.launched_from_home = true;
     }
 
     fn start_auth_flow(
@@ -2028,12 +2117,13 @@ impl App {
                         .home_pending_name
                         .clone()
                         .unwrap_or_else(|| self.source.clone());
-                    // MVP keeps size=0 for Recent; bookmarks inherit the same placeholder.
+                    // Archive is listed here, so the real size is known.
+                    let size = self.current_archive_size();
                     self.bookmark_overlay = Some(BookmarkOverlay {
                         mode: OverlayMode::Save {
                             source: self.source.clone(),
                             provider,
-                            size: 0,
+                            size,
                         },
                         input: name,
                         state: OverlayState::Editing,
@@ -2082,11 +2172,11 @@ impl App {
                     self.is_filtering = false;
                     self.rebuild_visible_items(target.as_deref());
                 } else if matches!(self.phase, AppPhase::Browsing) && self.current_path.is_empty() {
-                    if self.launched_from_home {
-                        self.return_to_home();
-                    }
-                    // else: dead-end, no-op (§6.6)
-                } else if matches!(self.phase, AppPhase::Error(_)) && self.launched_from_home {
+                    // Esc at the browse root always drops to Home — even when launched
+                    // directly via `pluq <url>`. `return_to_home` marks the session
+                    // home-rooted, so Home is the fallback from here on.
+                    self.return_to_home();
+                } else if matches!(self.phase, AppPhase::Error(_)) {
                     self.return_to_home();
                 } else {
                     // At root — Esc is a no-op. Only `q` quits.
@@ -2353,6 +2443,7 @@ impl App {
 
         debug!(output = %output_path.display(), "spawning extraction task");
         tokio::spawn(async move {
+            let started = Instant::now();
             if let Some(parent) = output_path.parent() {
                 let _ = tokio::fs::create_dir_all(parent).await;
             }
@@ -2364,6 +2455,9 @@ impl App {
                     if matches!(&result, Err(ArchiveError::Cancelled)) {
                         drop(file);
                         let _ = tokio::fs::remove_file(&output_path).await;
+                    }
+                    if result.is_ok() {
+                        hold_progress_floor(started).await;
                     }
                     let _ = tx_extract.send(AppMessage::ExtractionComplete(result));
                 }
@@ -2428,6 +2522,7 @@ impl App {
         )));
 
         tokio::spawn(async move {
+            let started = Instant::now();
             tokio::fs::create_dir_all(&output_dir).await.ok();
 
             let entry_refs: Vec<&ArchiveEntry> = selected_entries.iter().collect();
@@ -2474,6 +2569,9 @@ impl App {
                 Err(_) => {}
             }
 
+            if result.is_ok() {
+                hold_progress_floor(started).await;
+            }
             let _ = tx_extract.send(AppMessage::BatchExtractionComplete(result));
         });
     }
@@ -2973,15 +3071,19 @@ mod home_tests {
     }
 
     #[test]
-    fn test_esc_noop_from_browsing_root_not_launched_from_home() {
+    fn test_esc_from_browsing_root_url_launch_returns_home() {
+        // Even a direct `pluq <url>` launch (not started at Home) drops to Home
+        // on Esc at the browse root, and the session becomes home-rooted.
         let mut app = App::new_with_source("test.zip".into(), None);
+        assert!(!app.launched_from_home);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         app.phase = AppPhase::Browsing;
         app.current_path = vec![];
 
         app.handle_key(make_key(KeyCode::Esc), &tx);
-        assert!(matches!(app.phase, AppPhase::Browsing));
+        assert!(matches!(app.phase, AppPhase::Home));
+        assert!(app.launched_from_home);
         assert!(!app.should_quit);
     }
 

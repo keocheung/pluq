@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use archive_core::fingerprint::HttpResponseMetadata;
@@ -31,7 +32,16 @@ use crate::error::GDriveError;
 
 pub struct GoogleDriveReadAt {
     file_id: String,
+    /// Primary auth. OAuth when a token is stored (reaches picker-granted files),
+    /// otherwise the public API key.
     auth: GDriveAuth,
+    /// Optional secondary auth, tried when `auth` reports the file as not found.
+    /// Set to the public API key when the primary is OAuth, so a pasted public
+    /// link (which `drive.file` OAuth cannot see) still opens. See `current_auth`.
+    fallback: Option<GDriveAuth>,
+    /// Latched once the fallback auth wins, so later content reads use it directly
+    /// instead of re-failing on the primary every range.
+    use_fallback: AtomicBool,
     client: Client,
     /// Base URL for API requests. Production: `https://www.googleapis.com`.
     api_base_url: String,
@@ -40,7 +50,6 @@ pub struct GoogleDriveReadAt {
 }
 
 struct GDriveMetadata {
-    #[allow(dead_code)] // stored for future display/error context
     name: String,
     size: u64,
     modified_time: Option<String>,
@@ -49,10 +58,25 @@ struct GDriveMetadata {
 
 impl GoogleDriveReadAt {
     pub fn new(file_id: String, auth: GDriveAuth) -> Self {
-        Self::build(file_id, auth, "https://www.googleapis.com")
+        Self::build(file_id, auth, None, "https://www.googleapis.com")
     }
 
-    fn build(file_id: String, auth: GDriveAuth, base_url: &str) -> Self {
+    /// Construct with a `fallback` auth tried on a file-not-found from the primary
+    /// (e.g. OAuth primary + public API-key fallback so pasted public links open).
+    pub fn new_with_fallback(
+        file_id: String,
+        auth: GDriveAuth,
+        fallback: Option<GDriveAuth>,
+    ) -> Self {
+        Self::build(file_id, auth, fallback, "https://www.googleapis.com")
+    }
+
+    fn build(
+        file_id: String,
+        auth: GDriveAuth,
+        fallback: Option<GDriveAuth>,
+        base_url: &str,
+    ) -> Self {
         let client = Client::builder()
             .user_agent("pluq")
             .connect_timeout(CONNECT_TIMEOUT)
@@ -62,6 +86,8 @@ impl GoogleDriveReadAt {
         Self {
             file_id,
             auth,
+            fallback,
+            use_fallback: AtomicBool::new(false),
             client,
             api_base_url: base_url.to_string(),
             metadata: OnceCell::new(),
@@ -70,7 +96,28 @@ impl GoogleDriveReadAt {
 
     #[cfg(test)]
     pub(crate) fn new_with_base_url(file_id: String, auth: GDriveAuth, base_url: &str) -> Self {
-        Self::build(file_id, auth, base_url)
+        Self::build(file_id, auth, None, base_url)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_base_url_and_fallback(
+        file_id: String,
+        auth: GDriveAuth,
+        fallback: Option<GDriveAuth>,
+        base_url: &str,
+    ) -> Self {
+        Self::build(file_id, auth, fallback, base_url)
+    }
+
+    /// The auth to use right now: the latched fallback once it has won, else the
+    /// primary. All request builders go through this so a single latch flip
+    /// (the 404 handler in `fetch_metadata`) redirects every later request.
+    fn current_auth(&self) -> &GDriveAuth {
+        if self.use_fallback.load(Ordering::SeqCst) {
+            self.fallback.as_ref().unwrap_or(&self.auth)
+        } else {
+            &self.auth
+        }
     }
 
     /// Build a URL with auth credentials applied.
@@ -78,7 +125,7 @@ impl GoogleDriveReadAt {
     /// For ApiKey: appends `?key=K` (or `&key=K`) to the path_and_query.
     /// For OAuth: returns the plain URL (auth header is applied separately).
     fn authed_url(&self, path_and_query: &str) -> String {
-        match &self.auth {
+        match self.current_auth() {
             GDriveAuth::ApiKey(k) => {
                 let sep = if path_and_query.contains('?') {
                     '&'
@@ -101,9 +148,18 @@ impl GoogleDriveReadAt {
         })
     }
 
+    /// The file's display name from Drive metadata.
+    ///
+    /// Fetches metadata on first call (one small `files.get?fields=name,...`)
+    /// and caches it; later calls are free. Returns `None` if the fetch fails —
+    /// the caller falls back to a URL-derived name.
+    pub async fn name(&self) -> Option<String> {
+        self.ensure_metadata().await.ok().map(|m| m.name.clone())
+    }
+
     /// Apply the Authorization header for OAuth, no-op for ApiKey.
     async fn apply_auth(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        match &self.auth {
+        match self.current_auth() {
             GDriveAuth::ApiKey(_) => builder,
             GDriveAuth::OAuth { token, .. } => {
                 let access = token.read().await.access_token.clone();
@@ -123,7 +179,7 @@ impl GoogleDriveReadAt {
             client_id,
             client_secret,
             config,
-        } = &self.auth
+        } = self.current_auth()
         else {
             // Should never be called on ApiKey path.
             return Err(transport_error(GDriveError::InvalidApiKey));
@@ -179,7 +235,7 @@ impl GoogleDriveReadAt {
         // Capture the current access token before the request so that if another
         // task refreshes it while we await, our `seen_access` still points to the
         // stale token and the thundering-herd guard in refresh_oauth can fire.
-        let seen_access = if let GDriveAuth::OAuth { token, .. } = &self.auth {
+        let seen_access = if let GDriveAuth::OAuth { token, .. } = self.current_auth() {
             let t = token.read().await;
             Some(t.access_token.clone())
         } else {
@@ -194,7 +250,7 @@ impl GoogleDriveReadAt {
 
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
-            if let (GDriveAuth::OAuth { .. }, Some(seen)) = (&self.auth, seen_access) {
+            if let (GDriveAuth::OAuth { .. }, Some(seen)) = (self.current_auth(), seen_access) {
                 let new_access = self.refresh_oauth(&seen).await?;
                 // Retry once with fresh token.
                 let url2 = self.authed_url(&path);
@@ -215,6 +271,28 @@ impl GoogleDriveReadAt {
                 &body,
                 &self.file_id,
             )));
+        }
+
+        // `drive.file` OAuth returns 404 for a file the app was never granted —
+        // e.g. a *pasted* public link. Retry once with the fallback auth (public
+        // API key), mirroring the 401-refresh retry above. Detection is on the
+        // raw HTTP status, pre-box, per the transport-tunnel error pattern.
+        if status == reqwest::StatusCode::NOT_FOUND
+            && self.fallback.is_some()
+            && !self.use_fallback.load(Ordering::SeqCst)
+        {
+            info!(
+                file_id = %self.file_id,
+                "primary auth: file not found — retrying with fallback auth (public API key)"
+            );
+            self.use_fallback.store(true, Ordering::SeqCst);
+            let url2 = self.authed_url(&path);
+            let req2 = self
+                .apply_auth(self.client.get(&url2))
+                .await
+                .timeout(STRUCTURAL_TIMEOUT);
+            let resp2 = send_with_retry(req2, "metadata fallback request").await?;
+            return self.parse_metadata_response(resp2).await;
         }
 
         self.parse_metadata_response(resp).await
@@ -278,7 +356,7 @@ impl GoogleDriveReadAt {
         // Capture the current access token before the request so that if another
         // task refreshes it while we await, our `seen_access` still points to the
         // stale token and the thundering-herd guard in refresh_oauth can fire.
-        let seen_access = if let GDriveAuth::OAuth { token, .. } = &self.auth {
+        let seen_access = if let GDriveAuth::OAuth { token, .. } = self.current_auth() {
             let t = token.read().await;
             Some(t.access_token.clone())
         } else {
@@ -308,7 +386,7 @@ impl GoogleDriveReadAt {
         }
 
         if status == reqwest::StatusCode::UNAUTHORIZED {
-            if let (GDriveAuth::OAuth { .. }, Some(seen)) = (&self.auth, seen_access) {
+            if let (GDriveAuth::OAuth { .. }, Some(seen)) = (self.current_auth(), seen_access) {
                 let new_access = self.refresh_oauth(&seen).await?;
                 // Retry once with fresh token.
                 let url2 = self.authed_url(&path);
@@ -567,7 +645,7 @@ mod tests {
     use tokio::io::AsyncReadExt;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
-        matchers::{header, method, path},
+        matchers::{header, method, path, query_param},
     };
 
     use super::*;
@@ -668,6 +746,73 @@ mod tests {
         );
         let bytes = reader.read_range(0, 10).await.unwrap();
         assert_eq!(bytes.as_ref(), b"0123456789");
+    }
+
+    // ── Auth fallback (primary not-found → secondary) ────────────────────
+    //
+    // Mirrors the real case: OAuth (`drive.file`) 404s a pasted public link, the
+    // public API key reads it. Modelled here with two distinguishable API keys
+    // so the latch mechanism is tested without OAuth plumbing.
+
+    #[tokio::test]
+    async fn primary_not_found_falls_back_to_secondary_auth() {
+        let server = MockServer::start().await;
+        // Primary key → 404 file-not-found.
+        Mock::given(method("GET"))
+            .and(query_param("key", "bad_key"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "error": {
+                    "code": 404,
+                    "message": "File not found.",
+                    "errors": [{"reason": "notFound"}]
+                }
+            })))
+            .mount(&server)
+            .await;
+        // Fallback key → 200 metadata.
+        Mock::given(method("GET"))
+            .and(query_param("key", "good_key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "name": "public.rar",
+                "size": "4242"
+            })))
+            .mount(&server)
+            .await;
+
+        let reader = GoogleDriveReadAt::new_with_base_url_and_fallback(
+            "file_id".to_string(),
+            GDriveAuth::ApiKey("bad_key".to_string()),
+            Some(GDriveAuth::ApiKey("good_key".to_string())),
+            &server.uri(),
+        );
+
+        // Primary 404 → fallback succeeds.
+        assert_eq!(reader.size().await.unwrap(), 4242);
+        // Latched: the cached name came from the fallback request.
+        assert_eq!(reader.name().await.as_deref(), Some("public.rar"));
+    }
+
+    #[tokio::test]
+    async fn not_found_without_fallback_surfaces_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                "error": {
+                    "code": 404,
+                    "message": "File not found.",
+                    "errors": [{"reason": "notFound"}]
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let reader = GoogleDriveReadAt::new_with_base_url_and_fallback(
+            "file_id".to_string(),
+            GDriveAuth::ApiKey("only_key".to_string()),
+            None,
+            &server.uri(),
+        );
+        assert!(reader.size().await.is_err());
     }
 
     #[tokio::test]

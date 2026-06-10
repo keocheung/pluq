@@ -673,14 +673,9 @@ fn draw_browsing(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     .split(area);
 
     // Build breadcrumb: " archive.zip / photos / vacation /"
-    let filename = app
-        .source
-        .rsplit('/')
-        .next()
-        .or_else(|| app.source.rsplit('\\').next())
-        .unwrap_or(&app.source);
-    let filename = filename.split('?').next().unwrap_or(filename);
-
+    // Root = the resolved/decoded display name, never the raw percent-encoded
+    // URL or cloud file id (see App::display_name).
+    let filename = app.display_name();
     let mut breadcrumb = format!(" {}", filename);
     for segment in &app.current_path {
         breadcrumb.push_str(" / ");

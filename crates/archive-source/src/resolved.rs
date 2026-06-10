@@ -26,12 +26,25 @@ pub enum ResolvedSource {
 }
 
 impl ResolvedSource {
-    /// Suggest a folder name for extraction based on the source metadata.
-    pub fn suggested_name(&self) -> Option<String> {
+    /// Resolve a human-friendly display / extraction name for this source.
+    ///
+    /// This is the single naming-policy point for every provider. Each provider
+    /// contributes only its own name *source*: cloud providers return the real
+    /// file name from their metadata (a network call for Google Drive),
+    /// everything else derives it from the URL/path via
+    /// [`suggest_name_from_str`](crate::suggest_name_from_str), which
+    /// percent-decodes URLs. A future provider plugs in by adding one arm here
+    /// (and, if it needs the network, a small `name()` accessor on its reader).
+    pub async fn resolved_name(&self) -> Option<String> {
         match self {
             Self::Local(_, path) => crate::suggest_name_from_str(path),
             Self::Http(_, url) => crate::suggest_name_from_str(url),
-            Self::GDrive(_, url, _) => crate::suggest_name_from_str(url),
+            Self::GDrive(r, url, _) => r
+                .inner()
+                .name()
+                .await
+                .filter(|s| !s.is_empty())
+                .or_else(|| crate::suggest_name_from_str(url)),
             Self::Dropbox(_, url) => crate::suggest_name_from_str(url),
         }
     }

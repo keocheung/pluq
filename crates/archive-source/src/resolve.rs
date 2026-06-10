@@ -26,8 +26,12 @@ pub fn resolve(input: &str, config: &SourceConfig) -> Result<ResolvedSource, Sou
                 reason: "could not extract Google Drive file ID".into(),
             })?;
 
-        let auth = resolve_gdrive_auth(config)?;
-        let reader = CachingReadAt::new(GoogleDriveReadAt::new(file_id.clone(), auth));
+        let (auth, fallback) = resolve_gdrive_auth(config)?;
+        let reader = CachingReadAt::new(GoogleDriveReadAt::new_with_fallback(
+            file_id.clone(),
+            auth,
+            fallback,
+        ));
         return Ok(ResolvedSource::GDrive(reader, input.to_string(), file_id));
     }
 
@@ -62,7 +66,9 @@ pub fn resolve(input: &str, config: &SourceConfig) -> Result<ResolvedSource, Sou
     ))
 }
 
-pub(crate) fn resolve_gdrive_auth(config: &SourceConfig) -> Result<GDriveAuth, SourceError> {
+pub(crate) fn resolve_gdrive_auth(
+    config: &SourceConfig,
+) -> Result<(GDriveAuth, Option<GDriveAuth>), SourceError> {
     let token_in_store = config
         .token_store
         .as_ref()
@@ -83,25 +89,28 @@ pub(crate) fn resolve_gdrive_auth(config: &SourceConfig) -> Result<GDriveAuth, S
         );
     }
 
-    // Prefer OAuth when both a stored token and a client ID exist.
+    // Prefer OAuth when both a stored token and a client ID exist — it reaches
+    // picker-granted private files. Pair it with the public API key as a
+    // fallback so a *pasted* public link (which `drive.file` OAuth cannot see,
+    // → 404) still opens. The reader latches whichever auth works.
     if let Some(store) = &config.token_store
         && let Some(token) = store.get("gdrive")
         && let Some(client_id) = archive_gdrive::oauth_client_id()
     {
         let client_secret = archive_gdrive::oauth_client_secret();
-        info!("Google Drive: using OAuth credentials");
-        return Ok(GDriveAuth::oauth(
-            token,
-            Arc::clone(store),
-            client_id,
-            client_secret,
-        ));
+        let fallback = archive_gdrive::api_key().map(GDriveAuth::ApiKey);
+        info!(
+            api_key_fallback = fallback.is_some(),
+            "Google Drive: using OAuth credentials (public-link API-key fallback)"
+        );
+        let primary = GDriveAuth::oauth(token, Arc::clone(store), client_id, client_secret);
+        return Ok((primary, fallback));
     }
 
-    // Fallback to API key.
+    // API key only (no OAuth token in store).
     if let Some(key) = archive_gdrive::api_key() {
         info!("Google Drive: using API key (no OAuth token found)");
-        return Ok(GDriveAuth::ApiKey(key));
+        return Ok((GDriveAuth::ApiKey(key), None));
     }
 
     Err(SourceError::NoCredentials {
@@ -261,11 +270,47 @@ mod tests {
             std::env::remove_var("PLUQ_GDRIVE_KEY");
         }
 
-        let auth = resolve_gdrive_auth(&config).unwrap();
+        let (auth, fallback) = resolve_gdrive_auth(&config).unwrap();
         assert!(matches!(auth, GDriveAuth::OAuth { .. }));
+        assert!(fallback.is_none(), "no API key set → no fallback");
 
         unsafe {
             std::env::remove_var("PLUQ_GDRIVE_CLIENT_ID");
+        }
+    }
+
+    #[test]
+    fn gdrive_oauth_with_api_key_present_sets_apikey_fallback() {
+        let dir = tempdir().unwrap();
+        let store = archive_auth::TokenStore::load_from(dir.path().join("tokens.json")).unwrap();
+        store
+            .save(
+                "gdrive",
+                archive_auth::StoredToken {
+                    access_token: "test_access".into(),
+                    refresh_token: Some("test_refresh".into()),
+                    expires_at: Some(1234567890),
+                    scopes: vec![],
+                },
+            )
+            .unwrap();
+
+        let config = SourceConfig::new().with_token_store(Arc::new(store));
+        let _guard = ENV_MUTEX.lock().unwrap();
+        unsafe {
+            std::env::set_var("PLUQ_GDRIVE_CLIENT_ID", "test-client-id");
+            std::env::set_var("PLUQ_GDRIVE_KEY", "test-key");
+        }
+
+        // OAuth primary (picker-granted files) + public API-key fallback (pasted
+        // public links the OAuth scope can't see).
+        let (auth, fallback) = resolve_gdrive_auth(&config).unwrap();
+        assert!(matches!(auth, GDriveAuth::OAuth { .. }));
+        assert!(matches!(fallback, Some(GDriveAuth::ApiKey(k)) if k == "test-key"));
+
+        unsafe {
+            std::env::remove_var("PLUQ_GDRIVE_CLIENT_ID");
+            std::env::remove_var("PLUQ_GDRIVE_KEY");
         }
     }
 
@@ -277,8 +322,9 @@ mod tests {
             std::env::set_var("PLUQ_GDRIVE_KEY", "test-key");
             std::env::remove_var("PLUQ_GDRIVE_CLIENT_ID");
         }
-        let auth = resolve_gdrive_auth(&config).unwrap();
+        let (auth, fallback) = resolve_gdrive_auth(&config).unwrap();
         assert!(matches!(auth, GDriveAuth::ApiKey(k) if k == "test-key"));
+        assert!(fallback.is_none(), "API-key-only path has no fallback");
         unsafe {
             std::env::remove_var("PLUQ_GDRIVE_KEY");
         }
@@ -307,8 +353,9 @@ mod tests {
             std::env::remove_var("PLUQ_GDRIVE_CLIENT_ID");
         }
 
-        let auth = resolve_gdrive_auth(&config).unwrap();
+        let (auth, fallback) = resolve_gdrive_auth(&config).unwrap();
         assert!(matches!(auth, GDriveAuth::ApiKey(k) if k == "test-key"));
+        assert!(fallback.is_none(), "API-key-only path has no fallback");
 
         unsafe {
             std::env::remove_var("PLUQ_GDRIVE_KEY");

@@ -63,22 +63,26 @@ fn local_path_returns_none_for_http() {
     assert!(source.local_path().is_none());
 }
 
-#[test]
-fn test_suggested_name() {
+#[tokio::test]
+async fn test_resolved_name() {
     let config = SourceConfig::new();
 
-    // Local path
+    // Local path (pure, no network)
     let res = resolve("my_archive.zip", &config).unwrap();
-    assert_eq!(res.suggested_name().unwrap(), "my_archive");
+    assert_eq!(res.resolved_name().await.unwrap(), "my_archive");
 
-    // HTTP URL
+    // HTTP URL (pure, no network)
     let res = resolve("https://example.com/data.rar?v=1", &config).unwrap();
-    assert_eq!(res.suggested_name().unwrap(), "data");
+    assert_eq!(res.resolved_name().await.unwrap(), "data");
+}
 
-    // GDrive "view" link (mocking key to test logic)
-    unsafe {
-        std::env::set_var("PLUQ_GDRIVE_KEY", "dummy");
-    }
-    let res = resolve("https://drive.google.com/file/d/ABC-123/view", &config).unwrap();
-    assert_eq!(res.suggested_name().unwrap(), "ABC-123");
+// A Google Drive "view" link with no fetched metadata falls back to the file
+// ID via pure URL parsing — exercised here without touching the network.
+#[test]
+fn test_gdrive_name_fallback_is_file_id() {
+    assert_eq!(
+        archive_source::suggest_name_from_str("https://drive.google.com/file/d/ABC-123/view")
+            .unwrap(),
+        "ABC-123"
+    );
 }

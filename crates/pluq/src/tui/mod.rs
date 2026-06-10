@@ -35,14 +35,30 @@ pub async fn run_with_source(
     info!(source = %source, "TUI starting in Browse mode");
     let app = app::App::new_with_source(source.clone(), token_store.clone());
 
-    let config = crate::source_config(token_store);
-
     run_app(
         app,
         Some(
             move |tx: tokio::sync::mpsc::UnboundedSender<app::AppMessage>| {
+                // Resolve the real display name off the critical path so a later
+                // `b` (bookmark) pre-fills the friendly name — same as the Home flow.
+                let name_source = source.clone();
+                let name_token_store = token_store.clone();
+                let tx_name = tx.clone();
+                tokio::spawn(async move {
+                    let config = crate::source_config(name_token_store);
+                    if let Ok(reader) = archive_source::resolve(&name_source, &config)
+                        && let Some(name) = reader.resolved_name().await
+                    {
+                        let _ = tx_name.send(app::AppMessage::HomeNameResolved {
+                            source: name_source,
+                            name,
+                        });
+                    }
+                });
+
                 debug!("spawning Archive::open task");
                 tokio::spawn(async move {
+                    let config = crate::source_config(token_store);
                     let result =
                         archive_cache::open(&source, &config, archive::ArchiveConfig::default())
                             .await;
