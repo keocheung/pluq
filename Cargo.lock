@@ -264,6 +264,7 @@ dependencies = [
  "archive-dropbox",
  "archive-gdrive",
  "bytes",
+ "percent-encoding",
  "reqwest 0.13.2",
  "tempfile",
  "tokio",

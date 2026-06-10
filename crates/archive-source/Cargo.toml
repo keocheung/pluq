@@ -11,6 +11,7 @@ archive-gdrive = { path = "../archive-gdrive" }
 archive-dropbox = { path = "../archive-dropbox" }
 archive-auth = { path = "../archive-auth" }
 bytes = "1"
+percent-encoding = "2"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 tokio = { version = "1", features = ["io-util"] }
 tracing = "0.1"
