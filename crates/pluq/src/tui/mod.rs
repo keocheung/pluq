@@ -38,7 +38,7 @@ pub async fn run_with_source(
     run_app(
         app,
         Some(
-            move |tx: tokio::sync::mpsc::UnboundedSender<app::AppMessage>| {
+            move |tx: tokio::sync::mpsc::UnboundedSender<app::AppMessage>| -> Option<tokio::task::JoinHandle<()>> {
                 // Resolve the real display name off the critical path so a later
                 // `b` (bookmark) pre-fills the friendly name — same as the Home flow.
                 let name_source = source.clone();
@@ -57,13 +57,15 @@ pub async fn run_with_source(
                 });
 
                 debug!("spawning Archive::open task");
-                tokio::spawn(async move {
+                // Return the open-task handle so run_app can store it on the app,
+                // letting Esc during "Opening archive…" abort a stalled open.
+                Some(tokio::spawn(async move {
                     let config = crate::source_config(token_store);
                     let result =
                         archive_cache::open(&source, &config, archive::ArchiveConfig::default())
                             .await;
                     let _ = tx.send(app::AppMessage::ArchiveOpened(result));
-                });
+                }))
             },
         ),
     )
@@ -77,14 +79,20 @@ pub async fn run_home(
     let app = app::App::new_home(token_store);
     run_app(
         app,
-        None::<fn(tokio::sync::mpsc::UnboundedSender<app::AppMessage>)>,
+        None::<
+            fn(
+                tokio::sync::mpsc::UnboundedSender<app::AppMessage>,
+            ) -> Option<tokio::task::JoinHandle<()>>,
+        >,
     )
     .await
 }
 
 async fn run_app<F>(mut app: app::App, setup: Option<F>) -> Result<(), Box<dyn std::error::Error>>
 where
-    F: FnOnce(tokio::sync::mpsc::UnboundedSender<app::AppMessage>),
+    F: FnOnce(
+        tokio::sync::mpsc::UnboundedSender<app::AppMessage>,
+    ) -> Option<tokio::task::JoinHandle<()>>,
 {
     // Install panic hook that restores terminal before printing panic info.
     let original_hook = std::panic::take_hook();
@@ -98,7 +106,7 @@ where
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
     if let Some(setup_fn) = setup {
-        setup_fn(tx.clone());
+        app.open_task = setup_fn(tx.clone());
     }
 
     // Dedicated event reader task (ratatui recommended pattern).

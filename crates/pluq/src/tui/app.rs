@@ -412,6 +412,11 @@ pub struct App {
 
     /// Handle to the running OAuth background task.
     pub auth_task: Option<tokio::task::JoinHandle<()>>,
+
+    /// Handle to the running archive-open task. Held so Esc during `Opening` can
+    /// abort a stalled open (e.g. a hung network read) and return Home, instead
+    /// of trapping the user on the "Opening archive…" screen.
+    pub open_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl App {
@@ -484,6 +489,7 @@ impl App {
             bookmark_overlay: None,
             token_store: None,
             auth_task: None,
+            open_task: None,
         }
     }
 
@@ -682,30 +688,13 @@ impl App {
         });
     }
 
-    /// Select all files matching the given glob pattern across the whole archive.
-    pub fn toggle_all_matching(&mut self, pattern: &glob::Pattern) {
-        let mut count = 0;
-        for entry in &self.entries {
-            if !entry.is_directory
-                && glob_match::glob_matches(pattern, &entry.name)
-                && self.toggled.insert(entry.name.clone())
-            {
-                count += 1;
-            }
-        }
-        if count > 0 {
-            self.status_message = Some(format!("Selected {} matching files", count));
-        } else {
-            self.status_message = Some("No new files matched".to_string());
-        }
-    }
-
     pub fn handle_message(&mut self, msg: AppMessage, tx: &mpsc::UnboundedSender<AppMessage>) {
         // Sync latest progress from shared atomics before processing state transitions.
         self.poll_progress();
 
         match msg {
             AppMessage::ArchiveOpened(Ok(opened)) => {
+                self.open_task = None; // open finished — nothing left to cancel
                 self.record_recent_on_open(&opened);
 
                 match opened {
@@ -758,6 +747,7 @@ impl App {
                 }
             }
             AppMessage::ArchiveOpened(Err(e)) => {
+                self.open_task = None; // open finished — nothing left to cancel
                 // Try to route to AuthPrompt first.
                 if self.token_store.is_some()
                     && self.launched_from_home
@@ -1159,11 +1149,11 @@ impl App {
                 let source_for_task = source.clone();
                 let archive_config = self.archive_config.clone();
                 let source_config = crate::source_config(self.token_store.clone());
-                tokio::spawn(async move {
+                self.open_task = Some(tokio::spawn(async move {
                     let result =
                         archive_cache::open(&source_for_task, &source_config, archive_config).await;
                     let _ = tx_open.send(AppMessage::ArchiveOpened(result));
-                });
+                }));
             }
             Err(e) => {
                 self.home_input_error = Some(format!("{e}"));
@@ -1174,6 +1164,9 @@ impl App {
     /// Reset all archive-scoped state and return to the Home Screen.
     fn return_to_home(&mut self) {
         if let Some(h) = self.auth_task.take() {
+            h.abort();
+        }
+        if let Some(h) = self.open_task.take() {
             h.abort();
         }
         self.phase = AppPhase::Home;
@@ -1894,15 +1887,13 @@ impl App {
                     self.rebuild_visible_items(None);
                 }
                 KeyCode::Enter => {
-                    if !self.filter_query.is_empty()
-                        && glob_match::is_glob_query(&self.filter_query)
-                        && let Some(p) = glob_match::compile_glob(&self.filter_query)
-                    {
-                        self.toggle_all_matching(&p);
-                        self.filter_query.clear();
-                        self.rebuild_visible_items(None);
-                    }
+                    // Accept the filter: keep the narrowed listing in place, leave
+                    // text-input mode, and drop focus onto the first filtered file.
+                    // Selection is the user's call from here — `a` grabs the whole
+                    // filtered set, Space toggles individual files.
                     self.is_filtering = false;
+                    self.selected = 0;
+                    self.table_state.select(Some(0));
                 }
                 KeyCode::Esc => {
                     self.is_filtering = false;
@@ -2153,6 +2144,14 @@ impl App {
                     debug!("Esc during scan/extraction → cancelling");
                     self.cancel_flag.store(true, Ordering::SeqCst);
                     self.status_message = Some("Cancelling...".to_string());
+                } else if matches!(self.phase, AppPhase::Opening) {
+                    // The open ("Opening archive…" / "Please wait…") is a single
+                    // async task with no cooperative cancel point — a stalled
+                    // network read would otherwise trap the user here. Abort the
+                    // task (via return_to_home) and drop back to Home.
+                    debug!("Esc during Opening → abort open + Home");
+                    self.return_to_home();
+                    self.status_message = Some("Open cancelled.".to_string());
                 } else if matches!(self.phase, AppPhase::ConfirmExtract { .. }) {
                     debug!("Esc during ConfirmExtract → Browsing");
                     self.phase = AppPhase::Browsing;
