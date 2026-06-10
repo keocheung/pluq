@@ -1,0 +1,45 @@
+# Custom build-setup steps injected by cargo-dist into the `build-local-artifacts`
+# job (right after checkout, before `dist build`). Referenced from dist-workspace.toml
+# as `github-build-setup = "build-setup.yml"`. Survives `dist generate` regeneration.
+#
+# Purpose (GO_LIVE_CHECKLIST §C): export the 7 embedded-credential secrets into
+# $GITHUB_ENV so the compile-time `option_env!("PLUQ_*_EMBED")` calls in the provider
+# crates bake them into the released binaries (rclone-style zero-config creds).
+#
+# Names are LITERAL — they must match the `option_env!` strings exactly:
+#   archive-gdrive/src/auth.rs   : PLUQ_GDRIVE_KEY_EMBED, _CLIENT_ID_EMBED, _CLIENT_SECRET_EMBED
+#   archive-dropbox/src/auth.rs  : PLUQ_DROPBOX_APP_KEY_EMBED, _APP_SECRET_EMBED, _CLIENT_ID_EMBED, _CLIENT_SECRET_EMBED
+# (Dropbox: APP_KEY==CLIENT_ID and APP_SECRET==CLIENT_SECRET — one app, two name pairs.)
+#
+# Store the values as GitHub repo secrets (Settings → Secrets and variables → Actions).
+# The `-n` guard means a MISSING secret is left unset (so option_env! => None => runtime
+# fallback / BYO), never baked as an empty string (which would read as Some("") and break
+# the "is a cred configured?" check).
+- name: Bake embedded credentials for option_env! (compile-time)
+  shell: bash
+  env:
+    PLUQ_GDRIVE_KEY_EMBED: ${{ secrets.PLUQ_GDRIVE_KEY_EMBED }}
+    PLUQ_GDRIVE_CLIENT_ID_EMBED: ${{ secrets.PLUQ_GDRIVE_CLIENT_ID_EMBED }}
+    PLUQ_GDRIVE_CLIENT_SECRET_EMBED: ${{ secrets.PLUQ_GDRIVE_CLIENT_SECRET_EMBED }}
+    PLUQ_DROPBOX_APP_KEY_EMBED: ${{ secrets.PLUQ_DROPBOX_APP_KEY_EMBED }}
+    PLUQ_DROPBOX_APP_SECRET_EMBED: ${{ secrets.PLUQ_DROPBOX_APP_SECRET_EMBED }}
+    PLUQ_DROPBOX_CLIENT_ID_EMBED: ${{ secrets.PLUQ_DROPBOX_CLIENT_ID_EMBED }}
+    PLUQ_DROPBOX_CLIENT_SECRET_EMBED: ${{ secrets.PLUQ_DROPBOX_CLIENT_SECRET_EMBED }}
+  run: |
+    bake() {
+      # $1 = var name; value comes from the same-named env var set above
+      local val="${!1}"
+      if [ -n "$val" ]; then
+        echo "$1=$val" >> "$GITHUB_ENV"
+        echo "baked $1 (len ${#val})"
+      else
+        echo "::warning::$1 not set as a repo secret — binary will fall back to BYO env at runtime"
+      fi
+    }
+    bake PLUQ_GDRIVE_KEY_EMBED
+    bake PLUQ_GDRIVE_CLIENT_ID_EMBED
+    bake PLUQ_GDRIVE_CLIENT_SECRET_EMBED
+    bake PLUQ_DROPBOX_APP_KEY_EMBED
+    bake PLUQ_DROPBOX_APP_SECRET_EMBED
+    bake PLUQ_DROPBOX_CLIENT_ID_EMBED
+    bake PLUQ_DROPBOX_CLIENT_SECRET_EMBED

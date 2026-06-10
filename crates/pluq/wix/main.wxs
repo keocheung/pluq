@@ -69,7 +69,7 @@
 
         <Package Id='*'
             Keywords='Installer'
-            Description='Surgical archive extraction from local and cloud storage — snipe one file out of a huge ZIP/RAR without downloading the whole thing.'
+            Description='Snipe one file out of a huge cloud ZIP/RAR without downloading the whole archive'
             Manufacturer='Stefan Dekanski'
             InstallerVersion='450'
             Languages='1033'

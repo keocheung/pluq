@@ -127,6 +127,34 @@ jobs:
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           fi
+      - name: "Bake embedded credentials for option_env! (compile-time)"
+        run: |
+          bake() {
+            # $1 = var name; value comes from the same-named env var set above
+            local val="${!1}"
+            if [ -n "$val" ]; then
+              echo "$1=$val" >> "$GITHUB_ENV"
+              echo "baked $1 (len ${#val})"
+            else
+              echo "::warning::$1 not set as a repo secret — binary will fall back to BYO env at runtime"
+            fi
+          }
+          bake PLUQ_GDRIVE_KEY_EMBED
+          bake PLUQ_GDRIVE_CLIENT_ID_EMBED
+          bake PLUQ_GDRIVE_CLIENT_SECRET_EMBED
+          bake PLUQ_DROPBOX_APP_KEY_EMBED
+          bake PLUQ_DROPBOX_APP_SECRET_EMBED
+          bake PLUQ_DROPBOX_CLIENT_ID_EMBED
+          bake PLUQ_DROPBOX_CLIENT_SECRET_EMBED
+        shell: "bash"
+        env:
+          "PLUQ_DROPBOX_APP_KEY_EMBED": "${{ secrets.PLUQ_DROPBOX_APP_KEY_EMBED }}"
+          "PLUQ_DROPBOX_APP_SECRET_EMBED": "${{ secrets.PLUQ_DROPBOX_APP_SECRET_EMBED }}"
+          "PLUQ_DROPBOX_CLIENT_ID_EMBED": "${{ secrets.PLUQ_DROPBOX_CLIENT_ID_EMBED }}"
+          "PLUQ_DROPBOX_CLIENT_SECRET_EMBED": "${{ secrets.PLUQ_DROPBOX_CLIENT_SECRET_EMBED }}"
+          "PLUQ_GDRIVE_CLIENT_ID_EMBED": "${{ secrets.PLUQ_GDRIVE_CLIENT_ID_EMBED }}"
+          "PLUQ_GDRIVE_CLIENT_SECRET_EMBED": "${{ secrets.PLUQ_GDRIVE_CLIENT_SECRET_EMBED }}"
+          "PLUQ_GDRIVE_KEY_EMBED": "${{ secrets.PLUQ_GDRIVE_KEY_EMBED }}"
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest

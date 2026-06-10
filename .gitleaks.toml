@@ -1,0 +1,16 @@
+# gitleaks config — extends the default ruleset, allowlists known test fixtures.
+# Run: gitleaks detect --source . (scans full git history)
+title = "pluq gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = """
+Redaction unit-test fixtures. crates/pluq/src/redact.rs is the log-secret scrubber;
+its tests contain FAKE tokens (e.g. access_token=abcdef123456) purely to assert they
+get redacted. Not real credentials. Allowlisted by path so history scans stay clean.
+"""
+paths = [
+  '''crates/pluq/src/redact\.rs''',
+]
