@@ -21,4 +21,5 @@ install-path = "CARGO_HOME"
 install-updater = false
 # Custom steps injected into build-local-artifacts before `dist build` — bakes the
 # embedded-credential repo secrets into the binary via option_env! (GO_LIVE_CHECKLIST §C).
-github-build-setup = "build-setup.yml"
+# Lives one dir above workflows/ so GitHub doesn't run it as a standalone workflow.
+github-build-setup = "../build-setup.yml"
