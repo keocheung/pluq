@@ -39,7 +39,7 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/stefandekanski/pluq/rel
 
 **Windows (PowerShell)**
 ```powershell
-irm https://github.com/stefandekanski/pluq/releases/latest/download/pluq-installer.ps1 | iex
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/stefandekanski/pluq/releases/latest/download/pluq-installer.ps1 | iex"
 ```
 
 **Homebrew (macOS)**
@@ -52,6 +52,20 @@ page (macOS x64/arm64, Linux x64/arm64, Windows x64) — see [docs/INSTALL.md](d
 for manual install, Scoop, and the macOS Gatekeeper note.
 
 > pluq is distributed as a prebuilt binary. `cargo install pluq` is **not** offered.
+
+### Uninstall
+
+```sh
+rm ~/.cargo/bin/pluq      # script install (macOS / Linux)
+brew uninstall pluq       # Homebrew
+```
+
+```powershell
+Remove-Item $env:USERPROFILE\.cargo\bin\pluq.exe   # script install (Windows)
+```
+
+MSI installs uninstall via Windows **Settings → Apps**. To also remove cached data and saved
+OAuth tokens, see [docs/INSTALL.md](docs/INSTALL.md#uninstall).
 
 ## Quickstart
 

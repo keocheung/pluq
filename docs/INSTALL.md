@@ -11,7 +11,7 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/stefandekanski/pluq/rel
 
 **Windows (PowerShell)**
 ```powershell
-irm https://github.com/stefandekanski/pluq/releases/latest/download/pluq-installer.ps1 | iex
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/stefandekanski/pluq/releases/latest/download/pluq-installer.ps1 | iex"
 ```
 
 These download the right binary for your OS + architecture and place it on your `PATH`. Because
@@ -67,3 +67,47 @@ pluq completions fish > ~/.config/fish/completions/pluq.fish              # fish
 ```
 
 `powershell` and `elvish` are also supported.
+
+## Uninstall
+
+pluq is a single binary — uninstalling means removing it, plus an optional data cleanup.
+
+**Script install (macOS / Linux)**
+```sh
+rm ~/.cargo/bin/pluq
+```
+
+**Script install (Windows PowerShell)**
+```powershell
+Remove-Item $env:USERPROFILE\.cargo\bin\pluq.exe
+```
+
+**Homebrew**
+```sh
+brew uninstall pluq
+brew untap stefandekanski/tap   # optional: also remove the tap
+```
+
+**MSI** — Windows **Settings → Apps → Installed apps → pluq → Uninstall**.
+
+**Manual install** — delete `pluq` (or `pluq.exe`) from wherever you placed it.
+
+### Remove stored data (optional)
+
+pluq keeps OAuth tokens, bookmarks, an archive-metadata cache, and logs per user. Deleting
+them is only needed if you want a clean slate:
+
+| OS | Paths |
+|----|-------|
+| Linux | `~/.config/pluq` (tokens, bookmarks, install receipt) · `~/.cache/pluq` (cache) · `~/.local/state/pluq` (logs) |
+| macOS | `~/Library/Application Support/com.pluq.pluq` (tokens) · `~/Library/Application Support/pluq` (bookmarks) · `~/Library/Caches/pluq` and `~/Library/Caches/com.pluq.pluq` (cache, logs) · `~/.config/pluq` (install receipt) |
+| Windows | `%APPDATA%\pluq` (tokens, bookmarks) · `%LOCALAPPDATA%\pluq` (cache, logs, install receipt) |
+
+Notes:
+
+- Deleting `tokens.json` removes pluq's local copies of your OAuth tokens. To also revoke
+  pluq's access entirely, use your
+  [Google account permissions](https://myaccount.google.com/permissions) /
+  [Dropbox connected apps](https://www.dropbox.com/account/connected_apps) page.
+- The script installers add `~/.cargo/bin` (or `%USERPROFILE%\.cargo\bin`) to `PATH`. That
+  entry is shared with the Rust toolchain and is harmless to leave in place.
