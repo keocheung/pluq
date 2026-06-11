@@ -56,7 +56,7 @@ impl ArchiveCache {
     /// which fingerprint signal rejected the cache (schema, source, etag,
     /// last-modified, mtime, or size). Never shown to users.
     ///
-    /// Same precedence as [`is_valid`]: schema first, then source, then ETag
+    /// Same precedence as [`Self::is_valid`]: schema first, then source, then ETag
     /// (decisive when both present), then Last-Modified, mtime, and size.
     pub fn invalidity_reason(&self, current: &ArchiveFingerprint) -> Option<&'static str> {
         // Version check first: stale schema → immediate rejection.
