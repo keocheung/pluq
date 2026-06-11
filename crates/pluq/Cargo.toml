@@ -15,7 +15,9 @@ categories = ["command-line-utilities", "compression", "filesystem"]
 [package.metadata.wix]
 upgrade-guid = "D6A827DA-7FCB-4872-A760-1C42E55F8C0C"
 path-guid = "D77BCD17-A83A-4A7B-91A1-2EB681B3937F"
-license = false
+# Sidecar in the MSI: UnRAR license clause 2 requires the verbatim text to ship
+# with every binary distribution (tar/zip get it via cargo-dist auto-include).
+license = "../../LICENSE-THIRD-PARTY.md"
 eula = false
 
 [[bin]]
