@@ -6,14 +6,6 @@
 
 > Release plumbing only — no engine work remains (Phases 1–5 are in [`COMPLETED.md`](./roadmap/COMPLETED.md)). Sub-phases are an explicit **dependency chain** so nothing needs retro-fixing (Stefan's standing preference): freeze names/versions → restructure repo → write URL-bound docs & features → wire distribution → audit history → flip public. The crate name `pluq` is locked, so the repo URL (`github.com/<owner>/pluq`) is predictable — URL-bound items carry no placeholder-swap risk.
 
-### 6.3 — OSS docs & scaffolding (mostly complete)
-> Core docs + scaffolding landed 2026-05-30 (6.2 restructure + the doc bundle — see [`COMPLETED.md`](./roadmap/COMPLETED.md)). One item remains:
-
-- [ ] **Demo asciicast/GIF** (`vhs` or `asciinema`) — TUI sniping one file from a cloud ZIP. Hero asset for README + Show HN. **Off-chain / parallel:** independent of 6.4–6.6, needs only a running binary + a real cloud archive + a recording session (manual, not headless). Must land **before the 6.7 flip-public**, but gates nothing in the chain — record whenever convenient. Highest-leverage showoff item — the demo is the pitch.
-
-
-
-
 ### 6.7 — Launch
 > Irreversible / outward-facing. Do only after every gate above is green.
 >

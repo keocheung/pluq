@@ -103,7 +103,7 @@
 - [x] **Root `CLAUDE.md` + `GEMINI.md`** reduced to redirect stubs (→ `AGENTS.md` + `CONTEXT.md`).
 - [x] **`CONTEXT.md`** trimmed to architecture-only; the agent-process section moved to `AGENTS.md`.
 
-### Phase 6.3: OSS docs & scaffolding (Completed 2026-05-30 — demo GIF + FUNDING.yml deferred, still in ROADMAP)
+### Phase 6.3: OSS docs & scaffolding (Completed 2026-06-10)
 - [x] **`AGENTS.md`** — vendor-neutral working conventions (absorbs the trimmed `CONTEXT.md` process bits).
 - [x] **`README.md`** — pitch, install matrix, quickstart, badges (CI/license/MSRV), maintenance-status; OneDrive marked planned-only.
 - [x] **`LICENSE-MIT` + `LICENSE-APACHE`** (dual-license) + `Cargo.toml` package metadata (repository/homepage/description/keywords/categories).
@@ -112,6 +112,7 @@
 - [x] **`CHANGELOG.md` + `cliff.toml`** (git-cliff; placeholder until release-time generation in 6.7).
 - [x] **`.github/`** — `ISSUE_TEMPLATE/` (bug + feature + config) + `PULL_REQUEST_TEMPLATE.md` + `dependabot.yml` (cargo + github-actions).
 - [x] **`docs/INSTALL.md`, `docs/USAGE.md`, `docs/AUTH.md`** — incl. macOS Gatekeeper note, ToS scope statement, and the embedded-keys decision (rclone-model: embed app-level creds, per-user token stays local, `PLUQ_*` BYO override).
+- [x] **Demo asciicast/GIF** (`vhs`) — polished tape timings and re-rendered high-quality hero GIFs (`hero.gif` and `rar-scan.gif`) demonstrating TUI remote ZIP extraction and cold scan progress visualization.
 
 ### Phase 6.4: feedback / bug-report / privacy (Completed 2026-05-31)
 > New deps: `webbrowser`, `os_info` (`human-panic` was already present). Shared repo URL consts live in `main.rs`; they 404 until the repo goes public in 6.7.

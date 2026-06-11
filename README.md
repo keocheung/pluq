@@ -11,7 +11,9 @@ Google Drive, or Dropbox — browse it in a fast terminal UI, and pull out exact
 want. It reads only the bytes it needs: the central directory to list, and just the ranges for
 the entries you extract.
 
-<!-- DEMO: hero asciicast/GIF goes here — deferred (manual recording task). -->
+![pluq TUI: paste a URL to Electron's 1.86 GB debug-symbol zip, browse the listing, filter to one file, and extract it in seconds](docs/demo/hero.gif)
+
+*One file out of Electron's 1.86 GB symbol bundle: paste the URL, filter, extract — ~17 MB fetched, not 1.86 GB.*
 
 ## Features
 
@@ -90,6 +92,11 @@ for remote archives, that difference is what you feel as speed.
 - **Solid RAR** compresses all files as one continuous stream — each entry depends on the bytes
   of the ones before it, so there's no way to decompress a single file without the whole chain.
   That defeats surgical extraction: pluq lists a solid archive but refuses to extract from it.
+
+![pluq TUI: a RAR without Quick Open is scanned once (visible progress bar), then 517 label files are glob-filtered and extracted surgically](docs/demo/rar-scan.gif)
+
+*A 1034-file RAR with no Quick Open index: one scan of the 36 MB header chain, then `*.txt` filters
+to the 517 label files — extracted for ~46 KB fetched; the ~35 MB of images never leave the server.*
 
 > **Tip:** if you control how the RAR is made, add Quick Open info (`-qo+`) and keep it
 > non-solid (`-s-`) for the fastest, most surgical remote experience.
