@@ -40,6 +40,8 @@ source's ToS and the owner's wishes govern, not pluq.
 ## Environment variables
 
 `PLUQ_LOG` sets log level (`error`/`warn`/`info`/`debug`/`trace`).
+`PLUQ_OAUTH_PORT` overrides the loopback port used for the OAuth redirect and the TUI picker
+pages (default `53682`).
 
 Provider credentials may be supplied at **runtime** via the variables below. Each also has a
 compile-time `*_EMBED` twin (read via `option_env!`) that bakes a default into the binary at
@@ -72,6 +74,51 @@ by design — the OAuth flow is secured by PKCE, not by hiding them. This is the
 ### Bring your own (optional)
 
 The built-in app credentials share a quota across all pluq users. If you hit rate limits, or you
-prefer to use your own provider app, set the `PLUQ_*` variables above (e.g. in a `.env`) — they
-override the built-in defaults. Then run `pluq auth add <provider>` as usual. Per-provider app
-setup steps: TODO (follow-up doc).
+prefer to use your own provider app, set the `PLUQ_*` variables above (e.g. in a `.env` or your
+shell profile) — they override the built-in defaults. Then run `pluq auth add <provider>` as
+usual. If you switch credentials later, `pluq auth remove <provider>` + re-add, so the stored
+token matches the new app.
+
+#### Google Drive
+
+1. In the [Google Cloud Console](https://console.cloud.google.com/), create (or pick) a project
+   and enable the **Google Drive API** — plus the **Google Picker API** if you want the TUI's
+   `c` picker.
+2. **API key** (public links + Picker): *APIs & Services → Credentials → Create credentials →
+   API key*. Optionally restrict it to the two APIs above. → `PLUQ_GDRIVE_KEY`
+3. **OAuth client** (private files): *Create credentials → OAuth client ID → application type
+   **Desktop app*** → `PLUQ_GDRIVE_CLIENT_ID` + `PLUQ_GDRIVE_CLIENT_SECRET`. Google issues
+   Desktop-app clients a secret and requires it even in the PKCE flow; for an installed app it
+   is not treated as confidential. No redirect URI to register — Desktop-app clients accept
+   loopback redirects on any port automatically.
+4. Configure the **OAuth consent screen**. pluq requests only the non-sensitive
+   **`drive.file`** scope (access to files you pick — never your whole Drive), so no Google
+   verification review is needed: publish the app to **In production**. If you leave it in
+   *Testing*, Google expires refresh tokens after 7 days and you'll re-consent weekly.
+
+> The API key and the OAuth client must belong to the **same project**: the Picker derives the
+> project number from the client ID and rejects a developer key from a different project.
+
+#### Dropbox
+
+1. In the [Dropbox App Console](https://www.dropbox.com/developers/apps), create an app:
+   **Scoped access** → **Full Dropbox** (an *App folder* app can't read your existing files).
+2. *Permissions* tab: check **`files.content.read`** and **`sharing.read`**, then submit.
+   Scope changes only affect tokens issued afterwards — re-run `pluq auth add dropbox` if you
+   change them.
+3. *Settings* tab:
+   - **OAuth 2 Redirect URIs** — add exactly `http://localhost:53682/callback`. Dropbox
+     requires an exact match including the port; if you set `PLUQ_OAUTH_PORT`, register that
+     port instead.
+   - **Chooser / Saver domains** — add `localhost` if you want the TUI's `c` picker.
+4. A Dropbox app has a single key + secret pair, which fills both variable pairs:
+
+   ```sh
+   export PLUQ_DROPBOX_APP_KEY="<app key>"          # public shared links
+   export PLUQ_DROPBOX_APP_SECRET="<app secret>"
+   export PLUQ_DROPBOX_CLIENT_ID="<app key>"        # OAuth (private files)
+   export PLUQ_DROPBOX_CLIENT_SECRET="<app secret>"
+   ```
+
+Your app can stay in **Development** status — that's fully functional for your own account.
+*Production* only matters if other Dropbox accounts will use your app.
