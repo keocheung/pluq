@@ -214,27 +214,27 @@ when writing.
 
 ---
 
-## Filename Encoding (The CP437 Problem)
+## ZIP Filename Encoding
 
-Older ZIP files from Windows XP/7 use DOS codepage CP437, not UTF-8.
-`from_utf8_lossy` silently corrupts filenames with accented characters
-(é, å, 한글), breaking international archives.
+- An explicit `ArchiveConfig::filename_encoding` overrides all ZIP filename flags
+  and detection. `auto` is the default; `cp932` aliases Shift_JIS.
+- In auto mode, GP bit 11 set: decode as UTF-8; do not feed it to detection.
+- Bit 11 clear: feed raw filenames, separated by newlines, to `chardetng`.
+  Guess one encoding for the archive with UTF-8 allowed and no domain hint,
+  then decode unflagged names using `encoding_rs` without BOM handling.
 
-**ZIP — General Purpose Bit 11:**
+Detection uses the already-loaded Central Directory, with no additional I/O.
+ZIP disk-cache hits replay the original metadata through this same parser, so
+filename decoding is rerun on every open.
+This supports legacy Japanese Shift_JIS/CP932 names as well as other encodings
+supported by chardetng. Explicit UTF-8 entries take precedence in mixed archives.
 
-- Bit 11 = 1 → filename is UTF-8 (modern tools always set this).
-- Bit 11 = 0 → legacy codepage; use `encoding_rs` crate to decode as
-  CP437/Windows-1252.
-
-```rust
-fn decode_zip_filename(bytes: &[u8], general_purpose_flags: u16) -> String {
-    if general_purpose_flags & (1 << 11) != 0 {
-        String::from_utf8_lossy(bytes).into_owned()
-    } else {
-        encoding_rs::WINDOWS_1252.decode_without_bom_handling(bytes).0.into_owned()
-    }
-}
-```
+Detection is heuristic: short names and archives mixing multiple unflagged
+encodings can be misidentified. CP437 is not supported by chardetng/encoding_rs;
+Windows-1252 is not a CP437 substitute. Unicode Path extra fields are not currently implemented.
+The global CLI `--encoding` option applies to ZIP filenames in list/get/test and
+TUI flows; it does not transcode file contents or change RAR filename decoding.
+Encoding overrides are session configuration, never persisted in the raw cache.
 
 **RAR/7z:** UTF-16LE throughout — no encoding ambiguity.
 **TAR (pax headers):** UTF-8 with pax extension for long names; legacy

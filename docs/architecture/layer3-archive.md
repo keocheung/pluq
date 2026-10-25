@@ -70,33 +70,39 @@ at the product level (Layer 4). See `layer4-products.md`.
 
 ---
 
-## Caching (`ZipIndex` Pattern)
+## Persistent Metadata Caching
 
-**Cache the metadata (entry list), not the data (file contents).**
+`archive-cache` owns disk persistence and source fingerprint validation. It exposes
+`CachedArchive` to products, hiding the composed metadata reader type.
 
-```rust
-pub struct ArchiveIndex {
-    pub source: String,
-    pub source_size: u64,
-    pub entries: Vec<ArchiveEntry>,
-    pub created_at: u64,
-    // Staleness detection
-    pub etag: Option<String>,        // HTTP ETag header
-    pub last_modified: Option<String>, // HTTP Last-Modified header
-}
-```
+- **ZIP:** persist original byte ranges read during opening, including format
+  detection, the EOCD search window, ZIP64 records when needed, and the Central
+  Directory. Store offsets with bytes; do not persist decoded entries or locations.
+- **RAR4/RAR5:** retain parsed entries and format-specific scan results, since their
+  sequential scanning paths differ from ZIP metadata discovery.
 
-On load: compare `source_size` against current archive size (one HEAD
-request for HTTP, one stat for local). If size changed → cache stale →
-re-scan. For HTTP: also check ETag/Last-Modified.
+On a ZIP cache hit, a `ReadAt` wrapper in `archive-cache` replays those ranges through
+`Archive::open_reader_uncached`. The current parser, filename detector and resource
+limits run again without downloading the cached metadata. Extraction still reads
+from the original source. Streams are never recorded, and recording ends before
+extraction or a pending RAR scan. Capture has a byte budget; an oversized capture
+is discarded instead of persisting an incomplete snapshot.
+
+Source validation still runs before replay (ETag, Last-Modified, mtime, or size).
+Malformed or incomplete cached metadata falls back to a fresh source parse. Cache
+schema changes invalidate old files; changes to ZIP filename decoding alone no
+longer require invalidation. The first open after migration reads metadata again.
+
+The EOCD search window may incidentally include adjacent compressed data, but no
+extraction stream or whole archive is deliberately cached.
 
 ---
 
 ## Crate Placement
 
-`archive`, depends on `archive-core`. Pure cross-platform Rust. No
-dependency on any horizontal crate (auth, retry, metering). Platform-
-specific concerns (cache storage path) are injected via traits.
+`archive` depends on `archive-core` and handles the facade and format state.
+`archive-cache` composes source resolution, disk persistence and metadata replay
+above the facade. Core parsers do not own persistence or cache session state.
 
 See `docs/errors/archive-error.md` for the full error translation flow
 and tunnel mechanism.

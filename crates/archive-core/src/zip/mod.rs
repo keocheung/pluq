@@ -73,6 +73,15 @@ impl<R: ReadAt> ZipArchive<R> {
     ///
     /// This issues exactly **2 range reads** (or 1 if the file is small).
     pub async fn open(reader: R, limits: &crate::ResourceLimits) -> Result<Self, CoreError> {
+        Self::open_with_encoding(reader, limits, crate::FilenameEncoding::default()).await
+    }
+
+    /// Open with an optional forced filename encoding, including for UTF-8 flagged names.
+    pub async fn open_with_encoding(
+        reader: R,
+        limits: &crate::ResourceLimits,
+        filename_encoding: crate::FilenameEncoding,
+    ) -> Result<Self, CoreError> {
         info!("opening ZIP archive");
         let eocd = parse::find_eocd(&reader).await?;
 
@@ -100,7 +109,8 @@ impl<R: ReadAt> ZipArchive<R> {
             entry_count = eocd.entry_count,
             "EOCD found"
         );
-        let (entries, locations) = parse::parse_central_directory(&reader, &eocd).await?;
+        let (entries, locations) =
+            parse::parse_central_directory(&reader, &eocd, filename_encoding).await?;
         info!(entries = entries.len(), "ZIP archive opened");
 
         Ok(Self {

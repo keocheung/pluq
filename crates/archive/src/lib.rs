@@ -16,3 +16,5 @@ pub use config::ArchiveConfig;
 pub use entry_tree::{EntryTree, TreeNode};
 pub use error::{ArchiveError, build_user_message, translate_core_error};
 pub use opened::{Opened, PendingArchive};
+
+pub use archive_core::FilenameEncoding;

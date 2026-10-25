@@ -146,7 +146,7 @@ impl<R: ReadAt + LocalPath + 'static> Archive<R> {
 
         // Fall back to ZIP (reads EOCD from the end of the file).
         info!("format detected: ZIP (fallback)");
-        let zip = ZipArchive::open(reader, &config.limits)
+        let zip = ZipArchive::open_with_encoding(reader, &config.limits, config.filename_encoding)
             .await
             .map_err(translate_core_error)?;
         let archive = Self {
@@ -154,6 +154,11 @@ impl<R: ReadAt + LocalPath + 'static> Archive<R> {
             config: config.clone(),
         };
         Ok(Opened::Ready(archive))
+    }
+
+    /// Whether this archive can be cached by replaying ZIP metadata reads.
+    pub fn is_zip(&self) -> bool {
+        matches!(self.inner, ArchiveInner::Zip(_))
     }
 
     pub fn format_cache_state(&self) -> archive_core::FormatCacheState {

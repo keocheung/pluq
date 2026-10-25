@@ -75,6 +75,7 @@ pluq path/to/archive.zip               # browse a local archive in the TUI
 pluq https://example.com/big.rar       # browse a remote archive
 
 pluq list  archive.zip                 # print the file list
+pluq list --encoding cp932 archive.zip # override ZIP filename encoding
 pluq get   archive.zip "*.jpg"         # extract matching files
 pluq get   archive.zip -o out/         # extract everything into out/
 pluq test  archive.zip                 # CRC-verify every entry

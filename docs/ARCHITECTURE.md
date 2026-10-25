@@ -123,7 +123,7 @@ Each entry: title + one-line gist + "Read when" trigger.
 - **[Layer 2 — Format Parsers](architecture/layer2-parsers.md)** —
   `ArchiveReader` trait, internal `FormatLocation` arrays, format method
   ID translation, `has_stream` flag, solid-block handling, 7z header
-  quirks (encoded/encrypted/BCJ2/external), CP437 filename decoding.
+  quirks (encoded/encrypted/BCJ2/external), ZIP filename encoding detection.
   *Read when:* adding a format, parsing a new header variant, debugging
   filename mojibake or solid-block extraction.
 

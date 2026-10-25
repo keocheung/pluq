@@ -8,11 +8,11 @@ use std::time::Instant;
 use crate::glob_match;
 use crate::home::complete::{complete_path, looks_like_url};
 use archive::{
-    Archive, ArchiveConfig, ArchiveEntry, ArchiveError, BatchResult, EntryTree, ProgressReporter,
-    ReadAt, ScanInfo,
+    ArchiveConfig, ArchiveEntry, ArchiveError, BatchResult, EntryTree, ProgressReporter, ReadAt,
+    ScanInfo,
 };
 use archive_cache::Opened;
-use archive_source::{ResolvedSource, SourceConfig, resolve};
+use archive_source::{SourceConfig, resolve};
 use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::widgets::TableState;
@@ -27,7 +27,7 @@ pub enum AppMessage {
     /// Archive::open() completed.
     ArchiveOpened(Result<Opened, ArchiveError>),
     /// PendingArchive::scan() completed.
-    ScanComplete(Result<Archive<ResolvedSource>, ArchiveError>),
+    ScanComplete(Result<archive_cache::CachedArchive, ArchiveError>),
     /// Archive::extract() completed.
     ExtractionComplete(Result<u64, ArchiveError>),
     /// Archive::extract_selected() completed.
@@ -340,7 +340,7 @@ pub struct DisplayItem {
 pub struct App {
     pub phase: AppPhase,
     pub source: String,
-    pub archive: Option<Arc<Archive<ResolvedSource>>>,
+    pub archive: Option<Arc<archive_cache::CachedArchive>>,
     pub archive_config: ArchiveConfig,
     pub entries: Vec<ArchiveEntry>,
     pub selected: usize,

@@ -42,3 +42,6 @@ pub use io::{CachingReadAt, HttpReadAt, LocalPath, LocalReadAt, ReadAt, ReadErro
 pub use rar::{RAR4_SIGNATURE, RAR5_SIGNATURE, RarArchive, RarEntryLocation};
 pub use rar4::{Rar4Archive, Rar4EntryLocation};
 pub use zip::{AesExtraInfo, ZipArchive, ZipEntryLocation, ZipIndex};
+
+mod filename_encoding;
+pub use filename_encoding::FilenameEncoding;

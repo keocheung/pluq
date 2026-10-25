@@ -19,22 +19,13 @@ use crate::{ArchiveEntry, CoreError, ReadAt};
 
 // ── Filename decoding ─────────────────────────────────────────────────────
 
-/// Decode a ZIP entry filename from raw bytes, respecting the UTF-8 flag.
-///
-/// - GP bit 11 set → UTF-8 (modern tools always set this)
-/// - GP bit 11 clear → legacy CP437 / Windows-1252 (ZIP's original codepage)
-///
-/// Using `from_utf8_lossy` for the legacy branch silently corrupts accented
-/// characters (é, å, 한글). We use `encoding_rs::WINDOWS_1252` instead,
-/// which is a strict superset of CP437 for the printable range.
-pub(crate) fn decode_zip_filename(bytes: &[u8], general_purpose_flags: u16) -> String {
-    if general_purpose_flags & (1 << 11) != 0 {
-        // Modern, explicit UTF-8.
+/// Decode filenames with an explicit UTF-8 flag without guessing.
+/// Unflagged names share an archive-wide encoding detected by chardetng.
+fn decode_zip_filename(bytes: &[u8], flags: u16, legacy: &'static encoding_rs::Encoding) -> String {
+    if flags & (1 << 11) != 0 {
         String::from_utf8_lossy(bytes).into_owned()
     } else {
-        // Legacy codepage — decode as Windows-1252 (superset of CP437).
-        let (decoded, _, _) = encoding_rs::WINDOWS_1252.decode(bytes);
-        decoded.into_owned()
+        legacy.decode_without_bom_handling(bytes).0.into_owned()
     }
 }
 
@@ -281,6 +272,7 @@ pub async fn find_eocd(reader: &impl ReadAt) -> Result<Eocd, CoreError> {
 pub async fn parse_central_directory(
     reader: &impl ReadAt,
     eocd: &Eocd,
+    filename_encoding: crate::FilenameEncoding,
 ) -> Result<(Vec<ArchiveEntry>, Vec<ZipEntryLocation>), CoreError> {
     const MAX_ENTRY_COUNT: u64 = 10_000_000; // 10 million entries
 
@@ -309,6 +301,8 @@ pub async fn parse_central_directory(
     let mut entries: Vec<ArchiveEntry> = Vec::with_capacity(capacity);
     let mut locations: Vec<ZipEntryLocation> = Vec::with_capacity(capacity);
     let mut cursor = 0usize;
+    let mut detector = chardetng::EncodingDetector::new(chardetng::Iso2022JpDetection::Deny);
+    let mut filenames = Vec::with_capacity(capacity);
 
     for index in 0..eocd.entry_count as usize {
         if cursor + 46 > cd_bytes.len() {
@@ -378,8 +372,14 @@ pub async fn parse_central_directory(
         // even if some tools don't set GP bit 0.
         let is_encrypted = (general_purpose_flags & GP_FLAG_ENCRYPTED != 0) || method_id == 99;
 
-        let name = decode_zip_filename(&cd_bytes[name_start..name_end], general_purpose_flags);
-        let mut is_directory = name.ends_with('/');
+        let raw_name = &cd_bytes[name_start..name_end];
+        if filename_encoding.forced().is_none() && general_purpose_flags & (1 << 11) == 0 {
+            detector.feed(raw_name, false);
+            // Keep distinct names from forming a multibyte character across boundaries.
+            detector.feed(b"\n", false);
+        }
+        filenames.push((name_start..name_end, general_purpose_flags));
+        let mut is_directory = raw_name.ends_with(b"/");
         if is_symlink && is_directory {
             is_directory = false;
         }
@@ -394,7 +394,7 @@ pub async fn parse_central_directory(
         };
 
         entries.push(ArchiveEntry {
-            name,
+            name: String::new(),
             compressed_size,
             uncompressed_size,
             is_directory,
@@ -415,13 +415,32 @@ pub async fn parse_central_directory(
 
         trace!(
             index,
-            name = %entries.last().unwrap().name,
             compressed = compressed_size,
             uncompressed = uncompressed_size,
             "parsed CD entry"
         );
 
         cursor = name_end + extra_len + comment_len;
+    }
+
+    detector.feed(b"", true);
+    let encoding = filename_encoding
+        .forced()
+        .unwrap_or_else(|| detector.guess(None, chardetng::Utf8Detection::Allow));
+    debug!(
+        encoding = encoding.name(),
+        forced = filename_encoding.forced().is_some(),
+        "selected ZIP filename encoding"
+    );
+    for (entry, (range, flags)) in entries.iter_mut().zip(filenames) {
+        // An explicit override also repairs archives with an incorrect UTF-8 flag.
+        let flags = if filename_encoding.forced().is_some() {
+            0
+        } else {
+            flags
+        };
+        entry.name = decode_zip_filename(&cd_bytes[range], flags, encoding);
+        entry.is_directory = entry.name.ends_with('/') && !entry.is_symlink;
     }
 
     Ok((entries, locations))
@@ -559,10 +578,13 @@ mod tests {
         let name = "café.txt";
         let bytes = name.as_bytes();
         let flags: u16 = 1 << 11; // UTF-8 bit
-        assert_eq!(decode_zip_filename(bytes, flags), "café.txt");
+        assert_eq!(
+            decode_zip_filename(bytes, flags, encoding_rs::WINDOWS_1252),
+            "café.txt"
+        );
     }
 
-    /// GP bit 11 clear → decode as Windows-1252.
+    /// A detected Windows-1252 encoding is used for unflagged names.
     /// 0xE9 is 'é' in Windows-1252 / Latin-1. `from_utf8_lossy` would turn
     /// it into the replacement character (U+FFFD) — we must NOT do that.
     #[test]
@@ -570,7 +592,7 @@ mod tests {
         // "café" encoded in Windows-1252: c=0x63, a=0x61, f=0x66, é=0xE9
         let bytes: &[u8] = b"caf\xE9.txt";
         let flags: u16 = 0; // bit 11 clear → legacy codepage
-        let result = decode_zip_filename(bytes, flags);
+        let result = decode_zip_filename(bytes, flags, encoding_rs::WINDOWS_1252);
         assert_eq!(result, "café.txt");
     }
 
@@ -581,12 +603,74 @@ mod tests {
     fn utf8_lossy_and_windows1252_are_distinct_for_non_ascii() {
         let bytes: &[u8] = &[0xE9]; // 'é' in Win-1252, invalid lone byte in UTF-8
         let utf8_lossy = String::from_utf8_lossy(bytes).into_owned();
-        let win1252 = decode_zip_filename(bytes, 0 /* bit 11 clear */);
+        let win1252 = decode_zip_filename(bytes, 0, encoding_rs::WINDOWS_1252);
         assert_ne!(
             utf8_lossy, win1252,
             "Windows-1252 decode must differ from UTF-8 lossy for 0xE9"
         );
         assert_eq!(win1252, "é");
+    }
+
+    async fn parse_test_names(names: &[(&[u8], u16)]) -> Vec<ArchiveEntry> {
+        let mut cd = Vec::new();
+        for (name, flags) in names {
+            let mut header = [0u8; 46];
+            header[..4].copy_from_slice(&CD_ENTRY_SIGNATURE.to_le_bytes());
+            header[8..10].copy_from_slice(&flags.to_le_bytes());
+            header[28..30].copy_from_slice(&(name.len() as u16).to_le_bytes());
+            cd.extend_from_slice(&header);
+            cd.extend_from_slice(name);
+        }
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &cd).unwrap();
+        let reader = crate::LocalReadAt::new(tmp.path());
+        let eocd = Eocd {
+            entry_count: names.len() as u64,
+            cd_size: cd.len() as u64,
+            cd_offset: 0,
+        };
+        parse_central_directory(&reader, &eocd, crate::FilenameEncoding::default())
+            .await
+            .unwrap()
+            .0
+    }
+
+    #[tokio::test]
+    async fn detects_dlsite_cp932_names_without_overriding_utf8() {
+        // Raw directory prefix from RJ01464205_trial.zip, not generated by our decoder.
+        let prefix = [
+            0x82, 0xa9, 0x82, 0xc2, 0x82, 0xc4, 0x97, 0x45, 0x8e, 0xd2, 0x82, 0xbe, 0x82, 0xc1,
+            0x82, 0xbd, 0x8d, 0xc8, 0x92, 0x42, 0x82, 0xd6, 0x5f, 0x91, 0xcc, 0x8c, 0xb1, 0x94,
+            0xc5, 0x2f,
+        ];
+        let file = [prefix.as_slice(), b"data.xp3"].concat();
+        let explicit = "中文😀.txt";
+        let entries = parse_test_names(&[
+            (&prefix, 0),
+            (&file, 0),
+            (explicit.as_bytes(), 1 << 11),
+            (b"readme.txt", 0),
+        ])
+        .await;
+        assert_eq!(entries[0].name, "かつて勇者だった妻達へ_体験版/");
+        assert!(entries[0].is_directory);
+        assert_eq!(entries[1].name, "かつて勇者だった妻達へ_体験版/data.xp3");
+        assert!(!entries[1].is_directory);
+        assert_eq!(entries[2].name, explicit);
+        assert_eq!(entries[3].name, "readme.txt");
+    }
+
+    #[tokio::test]
+    async fn detects_unflagged_utf8_and_handles_ascii_and_empty_archives() {
+        let name = "日本語のファイル.txt";
+        let entries = parse_test_names(&[(name.as_bytes(), 0), (b"README", 0)]).await;
+        assert_eq!(entries[0].name, name);
+        assert_eq!(entries[1].name, "README");
+        assert_eq!(
+            parse_test_names(&[(b"plain.txt", 0)]).await[0].name,
+            "plain.txt"
+        );
+        assert!(parse_test_names(&[]).await.is_empty());
     }
 
     #[test]

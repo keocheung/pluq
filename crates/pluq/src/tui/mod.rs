@@ -31,9 +31,12 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io
 pub async fn run_with_source(
     source: String,
     token_store: Option<std::sync::Arc<archive_auth::TokenStore>>,
+    encoding: archive::FilenameEncoding,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!(source = %source, "TUI starting in Browse mode");
-    let app = app::App::new_with_source(source.clone(), token_store.clone());
+    let mut app = app::App::new_with_source(source.clone(), token_store.clone());
+    app.archive_config.filename_encoding = encoding;
+    let archive_config = app.archive_config.clone();
 
     run_app(
         app,
@@ -62,7 +65,7 @@ pub async fn run_with_source(
                 Some(tokio::spawn(async move {
                     let config = crate::source_config(token_store);
                     let result =
-                        archive_cache::open(&source, &config, archive::ArchiveConfig::default())
+                        archive_cache::open(&source, &config, archive_config)
                             .await;
                     let _ = tx.send(app::AppMessage::ArchiveOpened(result));
                 }))
@@ -74,9 +77,11 @@ pub async fn run_with_source(
 
 pub async fn run_home(
     token_store: Option<std::sync::Arc<archive_auth::TokenStore>>,
+    encoding: archive::FilenameEncoding,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("TUI starting in Home mode");
-    let app = app::App::new_home(token_store);
+    let mut app = app::App::new_home(token_store);
+    app.archive_config.filename_encoding = encoding;
     run_app(
         app,
         None::<

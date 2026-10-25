@@ -12,10 +12,13 @@ use archive_core::FormatCacheState;
 /// type it transitively contains changes (new field without a `default`,
 /// variant rename, etc.). A mismatch triggers a silent re-scan — no migration.
 ///
-/// **Current value: 2.**
-pub const SCHEMA_VERSION: u32 = 2;
+/// Also bump when parsing changes invalidate the parsed RAR metadata.
+/// ZIP decoding changes do not require a bump: raw bytes are reparsed.
+/// Version 4 stores raw ZIP metadata instead of parsed filenames.
+pub const SCHEMA_VERSION: u32 = 4;
 
-/// Cached metadata for an archive — entry list + format state + fingerprint.
+/// Cached metadata for an archive plus its source fingerprint.
+/// ZIP snapshots contain original byte ranges; RAR retains parsed scan results.
 ///
 /// Format-agnostic at the fingerprint level. Format-specific extraction data
 /// lives in [`FormatCacheState`]. Stored as pretty-printed JSON in the platform
@@ -32,10 +35,23 @@ pub struct ArchiveCache {
     #[serde(default)]
     pub schema_version: u32,
     pub fingerprint: ArchiveFingerprint,
-    pub entries: Vec<ArchiveEntry>,
-    pub format_state: FormatCacheState,
+    #[serde(flatten)]
+    pub data: CacheData,
     /// Creation time as Unix timestamp (seconds).
     pub created_at: u64,
+}
+
+/// ZIP cache data is independent of filename decoding and parser output schemas.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum CacheData {
+    ZipMetadata {
+        blocks: Vec<crate::reader::MetadataBlock>,
+    },
+    Parsed {
+        entries: Vec<ArchiveEntry>,
+        format_state: FormatCacheState,
+    },
 }
 
 impl ArchiveCache {
@@ -96,7 +112,8 @@ impl ArchiveCache {
     /// a missing or corrupt cache file (→ re-scan, no crash).
     pub fn load(path: &std::path::Path) -> Result<Self, std::io::Error> {
         let json = std::fs::read_to_string(path)?;
-        let cache: Self = serde_json::from_str(&json).map_err(std::io::Error::other)?;
+        let cache: Self = serde_json::from_str(&json)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         if cache.schema_version != SCHEMA_VERSION {
             info!(
                 old = cache.schema_version,
@@ -154,8 +171,7 @@ mod tests {
         ArchiveCache {
             schema_version: SCHEMA_VERSION,
             fingerprint: fp,
-            entries: vec![],
-            format_state: FormatCacheState::Zip { locations: vec![] },
+            data: CacheData::ZipMetadata { blocks: vec![] },
             created_at: 0,
         }
     }
@@ -167,7 +183,7 @@ mod tests {
         cache.save(tmp.path()).unwrap();
         let loaded = ArchiveCache::load(tmp.path()).unwrap();
         assert_eq!(loaded.fingerprint, cache.fingerprint);
-        assert!(loaded.entries.is_empty());
+        assert!(matches!(loaded.data, CacheData::ZipMetadata { blocks } if blocks.is_empty()));
     }
 
     #[test]
@@ -175,11 +191,22 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let entry = ArchiveEntry::new_test("hello.txt", false);
         let mut cache = make_cache(fingerprint("test.zip", 100));
-        cache.entries.push(entry);
+        cache.data = CacheData::Parsed {
+            entries: vec![entry],
+            format_state: FormatCacheState::Rar {
+                locations: vec![],
+                archive_preamble: vec![],
+                end_block: vec![],
+                archive_size: 100,
+            },
+        };
         cache.save(tmp.path()).unwrap();
         let loaded = ArchiveCache::load(tmp.path()).unwrap();
-        assert_eq!(loaded.entries.len(), 1);
-        assert_eq!(loaded.entries[0].name, "hello.txt");
+        let CacheData::Parsed { entries, .. } = loaded.data else {
+            panic!("expected parsed RAR")
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "hello.txt");
     }
 
     #[test]
@@ -224,12 +251,14 @@ mod tests {
         let cache = ArchiveCache {
             schema_version: SCHEMA_VERSION,
             fingerprint: fingerprint("test.rar", 2048),
-            entries: vec![],
-            format_state: FormatCacheState::Rar {
-                locations: vec![],
-                archive_preamble: vec![0x52, 0x61, 0x72, 0x21],
-                end_block: vec![0xFF],
-                archive_size: 2048,
+            data: CacheData::Parsed {
+                entries: vec![],
+                format_state: FormatCacheState::Rar {
+                    locations: vec![],
+                    archive_preamble: vec![0x52, 0x61, 0x72, 0x21],
+                    end_block: vec![0xFF],
+                    archive_size: 2048,
+                },
             },
             created_at: 1234567890,
         };
@@ -237,11 +266,15 @@ mod tests {
         let loaded = ArchiveCache::load(tmp.path()).unwrap();
         assert_eq!(loaded.fingerprint, cache.fingerprint);
         assert_eq!(loaded.created_at, 1234567890);
-        if let FormatCacheState::Rar {
-            archive_preamble,
-            archive_size,
+        if let CacheData::Parsed {
+            format_state:
+                FormatCacheState::Rar {
+                    archive_preamble,
+                    archive_size,
+                    ..
+                },
             ..
-        } = loaded.format_state
+        } = loaded.data
         {
             assert_eq!(archive_preamble, vec![0x52, 0x61, 0x72, 0x21]);
             assert_eq!(archive_size, 2048);
@@ -256,22 +289,28 @@ mod tests {
         let cache = ArchiveCache {
             schema_version: SCHEMA_VERSION,
             fingerprint: fingerprint("test4.rar", 1024),
-            entries: vec![],
-            format_state: FormatCacheState::Rar4 {
-                locations: vec![],
-                archive_preamble: vec![0x52, 0x61, 0x72],
-                end_block: vec![0x00],
-                archive_size: 1024,
+            data: CacheData::Parsed {
+                entries: vec![],
+                format_state: FormatCacheState::Rar4 {
+                    locations: vec![],
+                    archive_preamble: vec![0x52, 0x61, 0x72],
+                    end_block: vec![0x00],
+                    archive_size: 1024,
+                },
             },
             created_at: 0,
         };
         cache.save(tmp.path()).unwrap();
         let loaded = ArchiveCache::load(tmp.path()).unwrap();
-        if let FormatCacheState::Rar4 {
-            archive_preamble,
-            archive_size,
+        if let CacheData::Parsed {
+            format_state:
+                FormatCacheState::Rar4 {
+                    archive_preamble,
+                    archive_size,
+                    ..
+                },
             ..
-        } = loaded.format_state
+        } = loaded.data
         {
             assert_eq!(archive_preamble, vec![0x52, 0x61, 0x72]);
             assert_eq!(archive_size, 1024);
@@ -287,8 +326,7 @@ mod tests {
         let cache = ArchiveCache {
             schema_version: 0, // deliberate mismatch
             fingerprint: fp.clone(),
-            entries: vec![],
-            format_state: FormatCacheState::Zip { locations: vec![] },
+            data: CacheData::ZipMetadata { blocks: vec![] },
             created_at: 0,
         };
         assert!(
@@ -304,8 +342,7 @@ mod tests {
         let old_cache = ArchiveCache {
             schema_version: 0,
             fingerprint: fingerprint("old.zip", 100),
-            entries: vec![],
-            format_state: FormatCacheState::Zip { locations: vec![] },
+            data: CacheData::ZipMetadata { blocks: vec![] },
             created_at: 0,
         };
         // Bypass save() to write schema_version: 0 without triggering any guard.

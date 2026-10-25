@@ -17,8 +17,8 @@ use tracing::{info, warn};
 
 use tokio::io::AsyncWrite;
 
-use archive::{Archive, ArchiveEntry};
-use archive_source::{ResolvedSource, SourceConfig, classify_transport, resolve};
+use archive::ArchiveEntry;
+use archive_source::{SourceConfig, classify_transport, resolve};
 
 /// pluq — surgical archive extraction from local or cloud storage.
 #[derive(Parser)]
@@ -38,6 +38,10 @@ struct Cli {
     /// Delete the debug log directory before starting the operation.
     #[arg(long, global = true)]
     clean_logs: bool,
+
+    /// ZIP filename encoding: auto detects; explicit values override archive flags (not file contents).
+    #[arg(long, global = true, default_value = "auto", value_name = "ENCODING")]
+    encoding: archive::FilenameEncoding,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -196,9 +200,9 @@ async fn main() {
         .map(std::sync::Arc::new);
 
     let run_result = match (cli.source, cli.command) {
-        (None, None) => run_home(cancel, token_store).await,
-        (Some(src), None) => run_browse(src, cancel, token_store).await,
-        (None, Some(cmd)) => run_subcommand(cmd, cancel, token_store).await,
+        (None, None) => run_home(cancel, token_store, cli.encoding).await,
+        (Some(src), None) => run_browse(src, cancel, token_store, cli.encoding).await,
+        (None, Some(cmd)) => run_subcommand(cmd, cancel, token_store, cli.encoding).await,
         (Some(_), Some(_)) => {
             eprintln!("  Error: cannot pass both <SOURCE> and a subcommand");
             eprintln!("  Usage: pluq [OPTIONS] <SOURCE>");
@@ -263,16 +267,18 @@ fn source_config(token_store: Option<Arc<archive_auth::TokenStore>>) -> SourceCo
 async fn run_home(
     _cancel: Arc<AtomicBool>,
     token_store: Option<Arc<archive_auth::TokenStore>>,
+    encoding: archive::FilenameEncoding,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    tui::run_home(token_store).await
+    tui::run_home(token_store, encoding).await
 }
 
 async fn run_browse(
     source: String,
     _cancel: Arc<AtomicBool>,
     token_store: Option<Arc<archive_auth::TokenStore>>,
+    encoding: archive::FilenameEncoding,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    tui::run_with_source(source, token_store).await?;
+    tui::run_with_source(source, token_store, encoding).await?;
     Ok(())
 }
 
@@ -280,6 +286,7 @@ async fn run_subcommand(
     command: Command,
     cancel: Arc<AtomicBool>,
     token_store: Option<Arc<archive_auth::TokenStore>>,
+    encoding: archive::FilenameEncoding,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         Command::Auth { action } => {
@@ -306,7 +313,7 @@ async fn run_subcommand(
             return Ok(());
         }
         Command::List { source, all } => {
-            let archive = open_with_progress(&source, &cancel, token_store).await?;
+            let archive = open_with_progress(&source, &cancel, token_store, encoding).await?;
 
             let entries: Vec<_> = if all {
                 archive.entries().iter().collect()
@@ -359,7 +366,7 @@ async fn run_subcommand(
 
             let config = source_config(token_store.clone());
             let reader = resolve(&source, &config)?;
-            let archive = open_with_progress(&source, &cancel, token_store).await?;
+            let archive = open_with_progress(&source, &cancel, token_store, encoding).await?;
 
             let entries: Vec<_> = if all {
                 archive.entries().iter().collect()
@@ -433,7 +440,7 @@ async fn run_subcommand(
             );
         }
         Command::Test { source, all } => {
-            let archive = open_with_progress(&source, &cancel, token_store).await?;
+            let archive = open_with_progress(&source, &cancel, token_store, encoding).await?;
 
             let entries: Vec<_> = if all {
                 archive.entries().iter().collect()
@@ -481,10 +488,19 @@ async fn open_with_progress(
     source: &str,
     cancel: &Arc<AtomicBool>,
     token_store: Option<Arc<archive_auth::TokenStore>>,
-) -> Result<Archive<ResolvedSource>, Box<dyn std::error::Error>> {
+    encoding: archive::FilenameEncoding,
+) -> Result<archive_cache::CachedArchive, Box<dyn std::error::Error>> {
     eprintln!("  Opening {source}...");
     let config = source_config(token_store);
-    let opened = archive_cache::open(source, &config, archive::ArchiveConfig::default()).await?;
+    let opened = archive_cache::open(
+        source,
+        &config,
+        archive::ArchiveConfig {
+            filename_encoding: encoding,
+            ..Default::default()
+        },
+    )
+    .await?;
     match opened {
         archive_cache::Opened::Ready(a) => Ok(a),
         archive_cache::Opened::NeedsScan(pending) => {
@@ -893,5 +909,21 @@ mod tests {
 
         // no flag is allowed
         assert!(Cli::try_parse_from(["pluq", "feedback"]).is_ok());
+    }
+    #[test]
+    fn filename_encoding_is_global_and_validated() {
+        for args in [
+            vec!["pluq", "--encoding", "cp932", "list", "test.zip"],
+            vec!["pluq", "list", "--encoding", "shift_jis", "test.zip"],
+            vec!["pluq", "get", "test.zip", "--encoding", "gbk"],
+            vec!["pluq", "test", "test.zip", "--encoding", "utf-8"],
+            vec!["pluq", "--encoding", "cp932", "test.zip"],
+            vec!["pluq", "--encoding", "auto"],
+        ] {
+            Cli::try_parse_from(args).unwrap();
+        }
+        let err =
+            Cli::try_parse_from(["pluq", "list", "--encoding", "unknown-charset", "test.zip"]);
+        assert!(err.is_err());
     }
 }
